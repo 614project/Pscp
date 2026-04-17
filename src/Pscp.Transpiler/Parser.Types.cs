@@ -64,14 +64,24 @@ public sealed partial class Parser
         }
 
         TypeSyntax current = baseType;
-        int arrayDepth = 0;
-        List<Expression> sizedDimensions = [];
-
-        while (Match(TokenKind.OpenBracket))
+        while (true)
         {
+            if (Match(TokenKind.Question))
+            {
+                current = new NullableTypeSyntax(current);
+                continue;
+            }
+
+            if (!Match(TokenKind.OpenBracket))
+            {
+                break;
+            }
+
             if (Match(TokenKind.CloseBracket))
             {
-                arrayDepth++;
+                current = current is ArrayTypeSyntax arrayType
+                    ? new ArrayTypeSyntax(arrayType.ElementType, arrayType.Depth + 1)
+                    : new ArrayTypeSyntax(current, 1);
                 continue;
             }
 
@@ -81,19 +91,17 @@ public sealed partial class Parser
                 return null;
             }
 
-            Expression dimension = ParseExpression();
-            Expect(TokenKind.CloseBracket, "Expected ']' after sized array dimension.");
-            sizedDimensions.Add(dimension);
-        }
+            List<Expression> sizedDimensions = [];
+            do
+            {
+                Expression dimension = ParseExpression();
+                Expect(TokenKind.CloseBracket, "Expected ']' after sized array dimension.");
+                sizedDimensions.Add(dimension);
+            }
+            while (Match(TokenKind.OpenBracket));
 
-        if (arrayDepth > 0)
-        {
-            current = new ArrayTypeSyntax(current, arrayDepth);
-        }
-
-        if (sizedDimensions.Count > 0)
-        {
             current = new SizedArrayTypeSyntax(current, sizedDimensions);
+            break;
         }
 
         return current;

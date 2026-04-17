@@ -485,6 +485,8 @@ $RECYCLE.BIN/
 
 # For pscp
 .generated-tests/
+.generated-sample-builds/
+.generated-sample-check/
 .installer-smoke/
 .installer-smoke2/
 .sdk-smoke/

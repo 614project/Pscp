@@ -17,13 +17,14 @@ internal sealed partial class CSharpEmitter
             UnaryExpression unary => EmitUnaryExpression(unary),
             AssignmentExpression assignment => EmitAssignmentExpression(assignment),
             PrefixExpression prefix => EmitPrefixExpression(prefix),
-            PostfixExpression postfix => $"({EmitExpression(postfix.Operand)}{(postfix.Operator == PostfixOperator.Increment ? "++" : "--")})",
+            PostfixExpression postfix => EmitPostfixExpression(postfix),
             BinaryExpression binary => EmitBinaryExpression(binary),
             RangeExpression range => EmitRangeEnumerable(range, targetTypeHint),
             IsPatternExpression isPattern => EmitIsPatternExpression(isPattern),
             CallExpression call => EmitCallExpression(call, targetTypeHint),
             MemberAccessExpression member => EmitMemberAccessExpression(member),
             IndexExpression index => EmitIndexExpression(index),
+            WithExpression @with => $"{EmitExpression(@with.Receiver)} with {@with.InitializerText}",
             FromEndExpression fromEnd => $"^{EmitExpression(fromEnd.Operand)}",
             SliceExpression slice => EmitSliceExpression(slice),
             TupleProjectionExpression projection => $"{EmitExpression(projection.Receiver)}.Item{projection.Position}",
@@ -91,6 +92,8 @@ internal sealed partial class CSharpEmitter
         {
             BinaryOperator.Add => "+",
             BinaryOperator.Subtract => "-",
+            BinaryOperator.ShiftLeft => "<<",
+            BinaryOperator.ShiftRight => ">>",
             BinaryOperator.Multiply => "*",
             BinaryOperator.Divide => "/",
             BinaryOperator.Modulo => "%",
@@ -157,6 +160,13 @@ internal sealed partial class CSharpEmitter
             return knownPeek!;
         }
 
+        if (unary.Operator == UnaryOperator.Negate
+            && unary.Operand is MemberAccessExpression { MemberName: "CompareTo" } compareToMember
+            && TryGetTypeLikeText(compareToMember.Receiver, out string? comparableType))
+        {
+            return $"Comparer<{comparableType}>.Create((__left, __right) => {comparableType}.CompareTo(__right, __left))";
+        }
+
         return $"({EmitUnaryOperator(unary.Operator)}{EmitExpression(unary.Operand)})";
     }
 
@@ -172,6 +182,12 @@ internal sealed partial class CSharpEmitter
             ? $"(++{EmitExpression(prefix.Operand)})"
             : $"(--{EmitExpression(prefix.Operand)})";
     }
+
+    private string EmitPostfixExpression(PostfixExpression postfix)
+        => $"({EmitExpression(postfix.Operand)}{(postfix.Operator == PostfixOperator.Increment ? "++" : "--")})";
+
+    private string EmitPostfixStatementExpression(PostfixExpression postfix)
+        => $"{EmitExpression(postfix.Operand)}{(postfix.Operator == PostfixOperator.Increment ? "++" : "--")}";
 
     private string EmitAssignmentExpression(AssignmentExpression assignment)
         => EmitAssignmentCore(assignment, wrapNormalAssignment: true);
@@ -282,7 +298,7 @@ internal sealed partial class CSharpEmitter
                 : $"Comparer<{typeText}>.Create((__left, __right) => {comparer}.Compare(__right, __left))";
         }
 
-        return $"{EmitExpression(member.Receiver)}.{EmitMemberName(member.Receiver, member.MemberName)}";
+        return $"{EmitMemberReceiverExpression(member.Receiver)}.{EmitMemberName(member.Receiver, member.MemberName)}";
     }
 
     private bool TryGetTypeLikeText(Expression expression, out string? typeText)
@@ -317,11 +333,50 @@ internal sealed partial class CSharpEmitter
 
     private string EmitNewExpression(NewExpression creation, TypeSyntax? targetTypeHint)
     {
+        TypeSyntax? effectiveType = UnwrapNullableType(NormalizeSizedTypeOrNull(creation.Type ?? targetTypeHint));
+        if (effectiveType is not null
+            && TryGetDeclaredTypeShape(effectiveType, out DeclaredTypeShape? shape)
+            && TryEmitObjectInitializerNewExpression(shape!, effectiveType, creation.Arguments, out string? objectInitializer))
+        {
+            return objectInitializer!;
+        }
+
         string arguments = string.Join(", ", creation.Arguments.Select(EmitArgument));
-        TypeSyntax? effectiveType = creation.Type ?? targetTypeHint;
         return effectiveType is null
             ? $"new({arguments})"
             : $"new {EmitType(effectiveType)}({arguments})";
+    }
+
+    private bool TryEmitObjectInitializerNewExpression(
+        DeclaredTypeShape shape,
+        TypeSyntax effectiveType,
+        IReadOnlyList<ArgumentSyntax> arguments,
+        out string? emitted)
+    {
+        emitted = null;
+        if (!shape.IsValueType
+            || shape.Constructors.Any(constructor => constructor.ParameterCount == arguments.Count)
+            || shape.Fields.Count != arguments.Count)
+        {
+            return false;
+        }
+
+        List<string> assignments = [];
+        for (int i = 0; i < arguments.Count; i++)
+        {
+            if (arguments[i] is not ExpressionArgumentSyntax expressionArgument
+                || expressionArgument.Modifier != ArgumentModifier.None
+                || !string.IsNullOrWhiteSpace(expressionArgument.Name))
+            {
+                return false;
+            }
+
+            DeclaredFieldShape field = shape.Fields[i];
+            assignments.Add($"{field.Name} = {EmitExpression(expressionArgument.Expression, field.Type)}");
+        }
+
+        emitted = $"new {EmitType(effectiveType)} {{ {string.Join(", ", assignments)} }}";
+        return true;
     }
 
     private string EmitNewArrayExpression(NewArrayExpression newArray)
@@ -746,6 +801,7 @@ internal sealed partial class CSharpEmitter
                 : $"{named.Name}<{string.Join(", ", named.TypeArguments.Select(argument => EmitType(argument)))}>",
             TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitType(element)))})",
             ArrayTypeSyntax array => $"{EmitType(array.ElementType)}{string.Concat(Enumerable.Repeat("[]", array.Depth))}",
+            NullableTypeSyntax nullable => $"{EmitType(nullable.InnerType)}?",
             SizedArrayTypeSyntax sized => EmitType(new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count)),
             _ => "object"
         };
@@ -1038,6 +1094,34 @@ internal sealed partial class CSharpEmitter
 
     private static TypeSyntax? NormalizeSizedTypeOrNull(TypeSyntax? type)
         => type is null ? null : NormalizeSizedType(type);
+
+    private string EmitMemberReceiverExpression(Expression receiver)
+    {
+        string emittedReceiver = EmitExpression(receiver);
+        return NeedsNullableValueTypeAccess(_semantic?.GetExpressionType(receiver))
+            ? $"({emittedReceiver}).GetValueOrDefault()"
+            : emittedReceiver;
+    }
+
+    private bool NeedsNullableValueTypeAccess(TypeSyntax? type)
+        => type is NullableTypeSyntax nullable && IsValueTypeLike(nullable.InnerType);
+
+    private bool IsValueTypeLike(TypeSyntax? type)
+        => type switch
+        {
+            null => false,
+            NullableTypeSyntax nullable => IsValueTypeLike(nullable.InnerType),
+            TupleTypeSyntax => true,
+            NamedTypeSyntax { Name: "int" or "long" or "double" or "decimal" or "bool" or "char" } => true,
+            NamedTypeSyntax { Name: "string" } => false,
+            ArrayTypeSyntax => false,
+            SizedArrayTypeSyntax => false,
+            NamedTypeSyntax named when TryGetDeclaredTypeShape(named, out DeclaredTypeShape? shape) => shape!.IsValueType,
+            _ => false,
+        };
+
+    private static TypeSyntax? UnwrapNullableType(TypeSyntax? type)
+        => type is NullableTypeSyntax nullable ? nullable.InnerType : type;
 
     private static bool IsLongRange(RangeExpression range, TypeSyntax? targetTypeHint)
     {

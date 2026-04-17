@@ -1,6 +1,137 @@
-﻿# PSCP
+﻿# PSCP 
 
-`pscp`는 문제 풀이 스타일 문법을 갖춘 실험적 언어이며, 이 저장소에는 다음 구현이 들어 있습니다.
+## 🚀 PSCP (Problem Solving & Competitive Programming) 언어 소개
+
+**PSCP**는 알고리즘 문제 해결(PS)과 경쟁 프로그래밍(CP)에 최적화된 새로운 프로그래밍 언어입니다. 
+가장 빠르고 간결하게 의도를 코드로 표현하고, 이를 빠르고 최적화된 **C# 코드로 트랜스파일(Transpile)**하는 것을 목표로 설계되었습니다.
+
+F#은 매우 뛰어난 표현력을 가집니다. 특히 컬렉션을 다루는 편리함은 압도적입니다. 하지만 때로는 함수형을 포기하거나(break, return) C#의 문법 설탕이 절실히 필요해지는 상황이 오기도 합니다. 또한 두 언어 모두 입출력에서 매우 장황하다는 단점을 공유하고 있습니다.
+이를 해소하기 위해 PSCP라는 언어를 새로 고안하게 되었습니다. 최대한 많은걸 표현하도록 최적화된 문법과, 풍부한 PSCP상의 API를 제공하여, 적게 쓰고 더 많이 표현할수 있게 합니다.
+
+---
+
+## ✨ 핵심 철학
+
+* **반복 작업의 최소화:** 입력 파싱, 배열 생성, 범위 순회 등 PS에서 매번 작성하는 귀찮은 보일러플레이트 코드를 언어 차원의 문법 설탕(Syntax Sugar)으로 대폭 줄였습니다.
+* **직관적이고 짧은 문법:** 코드의 길이를 줄여 타이핑 시간을 단축하고 버그 발생 확률을 낮춥니다.
+* **제로 코스트 추상화:** 문법 설탕은 런타임 오버헤드를 발생시키지 않습니다. 불필요한 배열 생성이나 LINQ 체인 대신, 트랜스파일러가 직접적이고 빠른 C# 코드로 변환합니다.
+* **기본 불변성(Default Immutability):** 변수는 기본적으로 불변(`let`)이며, 필요할 때만 가변(`var`, `mut`)으로 선언하여 사이드 이펙트를 통제합니다.
+
+---
+
+## 💡 주요 기능 및 특징
+
+### 1. 짧고 간결한 입출력
+변수 선언과 동시에 토큰을 읽어옵니다.
+```pscp
+int n =             // 정수 하나 입력
+long a, b =         // 정수 두 개 입력
+int[n] arr =        // 크기가 n인 배열 입력
+int[n][m] grid =    // 2차원 배열 입력
+
+= arr               // Console.Write(string.Join(' ', arr))
++= (a, b)           // Console.WriteLine($"{a} {b}")
+```
+
+### 2. 강력한 범위(Range)와 컬렉션 빌더
+F#에 깊은 영감을 받았습니다. `[]`는 실제로 힙에 할당되는 컬렉션, `()`는 지연 평가되는 제너레이터를 의미합니다.
+
+```pscp
+int[] parent = [0..<n]                   // 0부터 n-1까지의 배열 생성
+let squares = [1..10 -> i do i * i]      // 1부터 10까지 제곱수 배열 생성
+let best = min (0..<n -> i do arr[i])    // 중간 배열 생성 없이 바로 최솟값 계산
+```
+
+### 3. 자료구조 특화 연산자 (Operator Rewrites)
+.NET의 기본 자료구조들을 더 짧고 직관적으로 다룰 수 있도록 트랜스파일러 수준에서 특별한 연산자를 지원합니다.
+
+- List : `list += x` (요소 추가), `list -= x` (요소 제거)
+- HashSet: `visited += x` (요소 추가 및 `bool` 반환), `visited -= x` (요소 제거)
+- Stack / Queue: `+= x` (Push/Enqueue), `~s` (Peek), `--s` (Pop/Dequeue)
+- PriorityQueue: `pq += (item, priority)` (튜플 형태 추가)
+
+이러한 특수 연산자의 활용을 가장 잘 보여주는 BFS 예시입니다.
+```pscp
+int n,m =
+List<int>[] graph = new![n]
+0..<m -> _ {
+    int a, b =
+    graph[a] += b
+    graph[b] += a
+}
+
+Queue<int> queue
+queue += 0
+HashSet<bool> visited
+
+while queue.Count > 0 {
+    let me = --queue
+    if not (visited += me) then
+        continue
+        
+    graph[me] -> other {
+        queue += other
+    }
+}
+```
+
+### 4. 실전 압축 문법
+* **`:=` 대입 연산자:** 대입과 동시에 해당 값을 반환합니다. (예: 경로 압축에 유용 `parent[x] := find(parent[x])`)
+* **자동 객체 생성 `new![n]`:** 컬렉션 배열을 선언할 때 내부 요소들까지 `new()`로 자동 초기화합니다. (예: `List<int>[] graph = new![n]`)
+* **내장 집계 함수 (Aggregate Intrinsic):** `min`, `max`, `sum`, `sumBy`, `chmin`, `chmax` 등을 별도의 라이브러리 임포트 없이 즉시 사용합니다.
+* **암묵적 반환 (Implicit Return):** 블록의 마지막 표현식은 자동으로 반환값이 되어 코드가 한결 깔끔해집니다.
+
+---
+
+## 📖 Union-Find 예제
+
+PSCP의 문법이 알고리즘 뼈대를 얼마나 명확하게 드러내는지 확인해 보세요.
+
+```pscp
+// 1. 빠른 입력
+int n =
+(int, int)[n] query =
+
+// 2. 간결한 배열 초기화
+int[] parent = [0..<n]
+
+// 3. 재귀(rec) 함수와 암묵적 반환, := 연산자로 명시적 대입 후 l-value 반환
+rec int find(int x) {
+    if x == parent[x] then x
+    else parent[x] := find(parent[x])
+}
+
+// 4. 튜플 스왑과 제어 흐름
+bool union(int a, int b) {
+    a = find(a)
+    b = find(b)
+    if a == b then
+        false
+
+    if size[a] < size[b] {
+        (a, b) = (b, a) // 튜플 스왑
+    }
+
+    parent[b] = a
+    true // 암묵적 true 반환
+}
+
+// 5. 간결한 foreach
+query -> q {
+    //6. Item1, Item2 대신 상수를 사용하는 간단해진 튜플 접근
+    if union q.1 q.2 then
+        // 7. 빠른 출력
+        += "OK"
+    else
+        += "NO"
+}
+```
+
+---
+
+## 구성
+
+이 저장소에는 다음 구현이 들어 있습니다.
 
 - C# 기반 `pscp` 트랜스파일러
 - SDK 스타일 `pscp` CLI
@@ -9,8 +140,7 @@
 - Windows 설치 프로그램
 
 언어 및 언어 서버 관련 참고 문서는 [docs](./docs) 아래에 있습니다.
-
-## 구성
+목록은 다음과 같습니다.
 
 - `src/Pscp.Transpiler`: `pscp` -> C# 트랜스파일러
 - `src/Pscp.Cli`: CLI 및 SDK 진입점 (`pscp.exe`)
@@ -21,14 +151,11 @@
 - `vscode/Build-Vsix.ps1`: VSIX 빌드 스크립트
 - `installer/Build-Installer.ps1`: 설치기 빌드 스크립트
 
-## SDK 빠른 시작
+## 빠른 SDK 빌드
 
 저장소에서 바로 CLI를 실행하려면:
 
 ```powershell
-$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
-$env:DOTNET_CLI_HOME='D:\Projects\Pscp\.dotnet'
-$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 dotnet build src\Pscp.Cli\Pscp.Cli.csproj
 dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- init .\sample
 ```
@@ -38,12 +165,6 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- init .\sample
 - `sample\main.pscp`
 - `sample\.pscp\Pscp.Generated.csproj`
 - `sample\.pscp\Program.cs`
-
-`pscp init`은 현재 폴더에도 바로 실행할 수 있습니다.
-
-```powershell
-pscp init
-```
 
 ## 사용자 코드 실행 방법
 
@@ -187,25 +308,3 @@ code --install-extension .\artifacts\vscode\local.pscp-vscode-0.1.0.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.
-
-## 검증
-
-주요 검증 명령:
-
-```powershell
-dotnet build src\Pscp.Cli\Pscp.Cli.csproj
-dotnet build src\Pscp.LanguageServer\Pscp.LanguageServer.csproj
-dotnet build src\Pscp.Installer\Pscp.Installer.csproj
-dotnet run --project tests\Pscp.Transpiler.Tests\Pscp.Transpiler.Tests.csproj
-powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1
-powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
-```
-
-추가로 다음 흐름을 직접 확인했습니다.
-
-- Native AOT `pscp.exe version`
-- Native AOT `pscp.exe init` / `pscp.exe run`
-- Native AOT `Pscp.LanguageServer.exe`의 `initialize` 응답
-- `setup.exe` 설치 후 `pscp.exe version`
-- `uninstall.exe --uninstall ...` 후 설치 폴더 삭제
-- VSIX 생성 후 내부 필수 엔트리 검증

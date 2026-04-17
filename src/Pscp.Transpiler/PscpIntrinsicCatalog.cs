@@ -22,6 +22,18 @@ internal static class PscpIntrinsicCatalog
         "stdin", "stdout", "Array"
     };
 
+    public static readonly IReadOnlySet<string> StrictIntrinsicReceivers = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "stdin", "stdout"
+    };
+
+    public static readonly IReadOnlySet<string> KnownExternalTypeLikeRoots = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "Math", "MathF", "Console", "Environment", "Convert", "GC",
+        "StringComparer", "Comparer", "Path", "File", "Directory",
+        "MemoryExtensions", "CollectionsMarshal", "System"
+    };
+
     public static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownMembers =
         new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal)
         {
@@ -44,6 +56,16 @@ internal static class PscpIntrinsicCatalog
     public static bool IsMathMinMaxCompatible(TypeSyntax? type)
         => type is NamedTypeSyntax { TypeArguments.Count: 0 } named
             && named.Name is "int" or "long" or "double" or "decimal";
+
+    public static bool IsLikelyExternalTypeLikeRoot(string name)
+        => KnownExternalTypeLikeRoots.Contains(name)
+            || (!string.IsNullOrEmpty(name) && char.IsUpper(name[0]));
+
+    public static bool IsLikelyExternalTypeLikeSegment(string name)
+    {
+        string stripped = StripGenericSuffix(name);
+        return !string.IsNullOrEmpty(stripped) && char.IsUpper(stripped[0]);
+    }
 
     public static string StripGenericSuffix(string name)
     {

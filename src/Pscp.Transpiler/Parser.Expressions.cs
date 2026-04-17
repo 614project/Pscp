@@ -166,18 +166,18 @@ public sealed partial class Parser
 
     private Expression ParseRange()
     {
-        Expression start = ParseAdditive();
+        Expression start = ParseShift();
         if (Current.Kind is not TokenKind.DotDot and not TokenKind.DotDotLess and not TokenKind.DotDotEqual)
         {
             return start;
         }
 
         TokenKind rangeToken = Next().Kind;
-        Expression middle = ParseAdditive();
+        Expression middle = ParseShift();
 
         if (rangeToken == TokenKind.DotDot && Match(TokenKind.DotDot))
         {
-            Expression end = ParseAdditive();
+            Expression end = ParseShift();
             return new RangeExpression(start, middle, end, RangeKind.Inclusive);
         }
 
@@ -189,6 +189,17 @@ public sealed partial class Parser
         };
 
         return new RangeExpression(start, null, middle, kind);
+    }
+
+    private Expression ParseShift()
+    {
+        Expression expression = ParseAdditive();
+        while (TryReadShiftOperator(out BinaryOperator shiftOperator))
+        {
+            expression = new BinaryExpression(expression, shiftOperator, ParseAdditive());
+        }
+
+        return expression;
     }
 
     private Expression ParseAdditive()
@@ -258,7 +269,7 @@ public sealed partial class Parser
 
         while (true)
         {
-            if (Match(TokenKind.OpenParen))
+            if (Current.Kind == TokenKind.OpenParen && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.OpenParen))
             {
                 expression = new CallExpression(expression, ParseCallArgumentsTail(), false);
                 continue;
@@ -287,6 +298,12 @@ public sealed partial class Parser
                 continue;
             }
 
+            if (Current.Kind == TokenKind.Identifier && Current.Text == "with")
+            {
+                expression = ParseWithExpression(expression);
+                continue;
+            }
+
             if (Current.Kind == TokenKind.PlusPlus && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.PlusPlus))
             {
                 expression = new PostfixExpression(expression, PostfixOperator.Increment);
@@ -310,6 +327,30 @@ public sealed partial class Parser
         }
 
         return expression;
+    }
+
+    private Expression ParseWithExpression(Expression receiver)
+    {
+        Expect(TokenKind.Identifier, "Expected 'with'.");
+        SkipSeparators();
+        int start = _position;
+        Expect(TokenKind.OpenBrace, "Expected '{' after 'with'.");
+        int braceDepth = 1;
+        while (braceDepth > 0 && Current.Kind != TokenKind.EndOfFile)
+        {
+            if (Current.Kind == TokenKind.OpenBrace)
+            {
+                braceDepth++;
+            }
+            else if (Current.Kind == TokenKind.CloseBrace)
+            {
+                braceDepth--;
+            }
+
+            Next();
+        }
+
+        return new WithExpression(receiver, TokensToText(start, _position));
     }
 
     private Expression ParsePrimary()

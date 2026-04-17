@@ -5,8 +5,21 @@ internal sealed partial class CSharpEmitter
     private readonly TranspilationOptions _options;
     private readonly SemanticAnalysisResult? _semantic;
     private readonly CodeWriter _writer = new();
-    private readonly Stack<string> _currentTypeStack = new();
+    private readonly Stack<TypeDeclaration> _currentTypeStack = new();
+    private readonly HashSet<DeclarationStatement> _hoistedGlobalDeclarations = [];
+    private readonly HashSet<string> _declaredTypeNames = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
     private int _temporaryId;
+
+    private sealed record ConstructorShape(int ParameterCount);
+
+    private sealed record DeclaredFieldShape(string Name, TypeSyntax Type);
+
+    private sealed record DeclaredTypeShape(
+        string Name,
+        bool IsValueType,
+        IReadOnlyList<DeclaredFieldShape> Fields,
+        IReadOnlyList<ConstructorShape> Constructors);
 
     public CSharpEmitter(TranspilationOptions options, SemanticAnalysisResult? semantic = null)
     {
@@ -16,11 +29,17 @@ internal sealed partial class CSharpEmitter
 
     public string Emit(PscpProgram program)
     {
+        CollectDeclaredTypeNames(program.Types);
+        CollectDeclaredTypeShapes(program.Types, null);
+        CollectHoistedGlobalDeclarations(program);
+
         foreach (string usingLine in CollectUsings(program))
         {
             _writer.WriteLine(usingLine);
         }
 
+        _writer.WriteLine();
+        _writer.WriteLine("#nullable enable");
         _writer.WriteLine();
         _writer.WriteLine($"namespace {program.NamespaceName ?? _options.Namespace};");
         _writer.WriteLine();
@@ -37,6 +56,8 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("private static readonly __PscpStdin stdin = new();");
         _writer.WriteLine("private static readonly __PscpStdout stdout = new();");
         _writer.WriteLine();
+
+        EmitHoistedGlobalFields();
 
         foreach (FunctionDeclaration function in program.Functions)
         {
@@ -88,9 +109,342 @@ internal sealed partial class CSharpEmitter
         }
     }
 
+    private void CollectHoistedGlobalDeclarations(PscpProgram program)
+    {
+        HashSet<string> referencedNames = [];
+        foreach (FunctionDeclaration function in program.Functions)
+        {
+            CollectReferencedNames(function.Body, referencedNames);
+        }
+
+        foreach (DeclarationStatement declaration in program.GlobalStatements.OfType<DeclarationStatement>())
+        {
+            if (CanHoistGlobalDeclaration(declaration) && IsReferencedOutsideMain(declaration, referencedNames))
+            {
+                _hoistedGlobalDeclarations.Add(declaration);
+            }
+        }
+    }
+
+    private void EmitHoistedGlobalFields()
+    {
+        foreach (DeclarationStatement declaration in _hoistedGlobalDeclarations)
+        {
+            if (!TryGetFieldEntries(declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries))
+            {
+                continue;
+            }
+
+            foreach ((string name, TypeSyntax type, _) in entries!)
+            {
+                _writer.WriteLine($"private static {EmitType(type)} {name} = default!;");
+            }
+        }
+
+        if (_hoistedGlobalDeclarations.Count > 0)
+        {
+            _writer.WriteLine();
+        }
+    }
+
+    private bool CanHoistGlobalDeclaration(DeclarationStatement declaration)
+        => declaration.ExplicitType is not null && TryGetFieldEntries(declaration, out _);
+
+    private static bool IsReferencedOutsideMain(DeclarationStatement declaration, HashSet<string> referencedNames)
+        => declaration.Targets.Any(target => TargetContainsReferencedName(target, referencedNames));
+
+    private static bool TargetContainsReferencedName(BindingTarget target, HashSet<string> referencedNames)
+        => target switch
+        {
+            NameTarget nameTarget => referencedNames.Contains(nameTarget.Name),
+            TupleTarget tupleTarget => tupleTarget.Elements.Any(element => TargetContainsReferencedName(element, referencedNames)),
+            _ => false,
+        };
+
+    private void EmitHoistedDeclarationInitialization(DeclarationStatement declaration)
+    {
+        if (declaration.IsInputShorthand)
+        {
+            EmitHoistedInputDeclaration(declaration);
+            return;
+        }
+
+        if (declaration.Targets.Count > 1)
+        {
+            string initializer = declaration.Initializer is null ? "default!" : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+            _writer.WriteLine($"({string.Join(", ", declaration.Targets.Select(EmitBindingPattern))}) = {initializer};");
+            return;
+        }
+
+        if (declaration.Targets[0] is DiscardTarget)
+        {
+            if (declaration.Initializer is not null)
+            {
+                _writer.WriteLine($"_ = {EmitExpression(declaration.Initializer, declaration.ExplicitType)};");
+            }
+
+            return;
+        }
+
+        string name = EmitBindingPattern(declaration.Targets[0]);
+        if (declaration.ExplicitType is SizedArrayTypeSyntax sizedType && declaration.Initializer is null)
+        {
+            _writer.WriteLine($"{name} = {EmitSizedArrayCreationExpression(sizedType)};");
+            return;
+        }
+
+        if (declaration.Initializer is not null
+            && TryEmitLoweredHoistedDeclarationInitialization(declaration, name))
+        {
+            return;
+        }
+
+        string initializerText = declaration.Initializer is null
+            ? EmitImplicitInitializer(declaration.ExplicitType)
+            : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+        _writer.WriteLine($"{name} = {initializerText};");
+    }
+
+    private void EmitHoistedInputDeclaration(DeclarationStatement declaration)
+    {
+        if (declaration.ExplicitType is null)
+        {
+            return;
+        }
+
+        if (declaration.Targets.Count == 1 && declaration.Targets[0] is TupleTarget tupleTarget)
+        {
+            _writer.WriteLine($"{EmitBindingPattern(tupleTarget)} = {EmitInputRead(declaration.ExplicitType)};");
+            return;
+        }
+
+        foreach (BindingTarget target in declaration.Targets)
+        {
+            string readExpression = EmitInputRead(declaration.ExplicitType);
+            if (target is DiscardTarget)
+            {
+                _writer.WriteLine($"_ = {readExpression};");
+            }
+            else
+            {
+                _writer.WriteLine($"{EmitBindingPattern(target)} = {readExpression};");
+            }
+        }
+    }
+
+    private static void CollectReferencedNames(BlockStatement block, HashSet<string> names)
+    {
+        foreach (Statement statement in block.Statements)
+        {
+            CollectReferencedNames(statement, names);
+        }
+    }
+
+    private static void CollectReferencedNames(Statement statement, HashSet<string> names)
+    {
+        switch (statement)
+        {
+            case BlockStatement block:
+                CollectReferencedNames(block, names);
+                break;
+            case DeclarationStatement declaration when declaration.Initializer is not null:
+                CollectReferencedNames(declaration.Initializer, names);
+                break;
+            case ExpressionStatement expressionStatement:
+                CollectReferencedNames(expressionStatement.Expression, names);
+                break;
+            case AssignmentStatement assignment:
+                CollectReferencedNames(assignment.Target, names);
+                CollectReferencedNames(assignment.Value, names);
+                break;
+            case OutputStatement output:
+                CollectReferencedNames(output.Expression, names);
+                break;
+            case IfStatement ifStatement:
+                CollectReferencedNames(ifStatement.Condition, names);
+                CollectReferencedNames(ifStatement.ThenBranch, names);
+                if (ifStatement.ElseBranch is not null) CollectReferencedNames(ifStatement.ElseBranch, names);
+                break;
+            case WhileStatement whileStatement:
+                CollectReferencedNames(whileStatement.Condition, names);
+                CollectReferencedNames(whileStatement.Body, names);
+                break;
+            case ForInStatement forIn:
+                CollectReferencedNames(forIn.Source, names);
+                CollectReferencedNames(forIn.Body, names);
+                break;
+            case FastForStatement fastFor:
+                CollectReferencedNames(fastFor.Source, names);
+                CollectReferencedNames(fastFor.Body, names);
+                break;
+            case ReturnStatement { Expression: not null } returnStatement:
+                CollectReferencedNames(returnStatement.Expression!, names);
+                break;
+            case LocalFunctionStatement localFunction:
+                CollectReferencedNames(localFunction.Function.Body, names);
+                break;
+        }
+    }
+
+    private static void CollectReferencedNames(Expression expression, HashSet<string> names)
+    {
+        switch (expression)
+        {
+            case IdentifierExpression identifier:
+                names.Add(identifier.Name);
+                break;
+            case TupleExpression tuple:
+                foreach (Expression element in tuple.Elements) CollectReferencedNames(element, names);
+                break;
+            case BlockExpression block:
+                CollectReferencedNames(block.Block, names);
+                break;
+            case IfExpression ifExpression:
+                CollectReferencedNames(ifExpression.Condition, names);
+                CollectReferencedNames(ifExpression.ThenExpression, names);
+                CollectReferencedNames(ifExpression.ElseExpression, names);
+                break;
+            case ConditionalExpression conditional:
+                CollectReferencedNames(conditional.Condition, names);
+                CollectReferencedNames(conditional.WhenTrue, names);
+                CollectReferencedNames(conditional.WhenFalse, names);
+                break;
+            case UnaryExpression unary:
+                CollectReferencedNames(unary.Operand, names);
+                break;
+            case AssignmentExpression assignment:
+                CollectReferencedNames(assignment.Target, names);
+                CollectReferencedNames(assignment.Value, names);
+                break;
+            case PrefixExpression prefix:
+                CollectReferencedNames(prefix.Operand, names);
+                break;
+            case PostfixExpression postfix:
+                CollectReferencedNames(postfix.Operand, names);
+                break;
+            case BinaryExpression binary:
+                CollectReferencedNames(binary.Left, names);
+                CollectReferencedNames(binary.Right, names);
+                break;
+            case RangeExpression range:
+                CollectReferencedNames(range.Start, names);
+                if (range.Step is not null) CollectReferencedNames(range.Step, names);
+                CollectReferencedNames(range.End, names);
+                break;
+            case IsPatternExpression isPattern:
+                CollectReferencedNames(isPattern.Left, names);
+                if (isPattern.Pattern is ConstantPatternSyntax constantPattern) CollectReferencedNames(constantPattern.Expression, names);
+                break;
+            case CallExpression call:
+                CollectReferencedNames(call.Callee, names);
+                foreach (ArgumentSyntax argument in call.Arguments)
+                {
+                    switch (argument)
+                    {
+                        case ExpressionArgumentSyntax expressionArgument:
+                            CollectReferencedNames(expressionArgument.Expression, names);
+                            break;
+                    }
+                }
+                break;
+            case MemberAccessExpression member:
+                CollectReferencedNames(member.Receiver, names);
+                break;
+            case IndexExpression index:
+                CollectReferencedNames(index.Receiver, names);
+                foreach (Expression argument in index.Arguments) CollectReferencedNames(argument, names);
+                break;
+            case WithExpression @with:
+                CollectReferencedNames(@with.Receiver, names);
+                break;
+            case FromEndExpression fromEnd:
+                CollectReferencedNames(fromEnd.Operand, names);
+                break;
+            case SliceExpression slice:
+                if (slice.Start is not null) CollectReferencedNames(slice.Start, names);
+                if (slice.End is not null) CollectReferencedNames(slice.End, names);
+                break;
+            case TupleProjectionExpression projection:
+                CollectReferencedNames(projection.Receiver, names);
+                break;
+            case LambdaExpression lambda:
+                switch (lambda.Body)
+                {
+                    case LambdaExpressionBody expressionBody:
+                        CollectReferencedNames(expressionBody.Expression, names);
+                        break;
+                    case LambdaBlockBody blockBody:
+                        CollectReferencedNames(blockBody.Block, names);
+                        break;
+                }
+                break;
+            case NewExpression creation:
+                foreach (ArgumentSyntax argument in creation.Arguments)
+                {
+                    if (argument is ExpressionArgumentSyntax expressionArgument)
+                    {
+                        CollectReferencedNames(expressionArgument.Expression, names);
+                    }
+                }
+                break;
+            case NewArrayExpression newArray:
+                foreach (Expression dimension in newArray.Dimensions) CollectReferencedNames(dimension, names);
+                break;
+            case TargetTypedNewArrayExpression targetTypedNewArray:
+                foreach (Expression dimension in targetTypedNewArray.Dimensions) CollectReferencedNames(dimension, names);
+                break;
+            case CollectionExpression collection:
+                foreach (CollectionElement element in collection.Elements)
+                {
+                    switch (element)
+                    {
+                        case ExpressionElement expressionElement:
+                            CollectReferencedNames(expressionElement.Expression, names);
+                            break;
+                        case RangeElement rangeElement:
+                            CollectReferencedNames(rangeElement.Range, names);
+                            break;
+                        case SpreadElement spreadElement:
+                            CollectReferencedNames(spreadElement.Expression, names);
+                            break;
+                        case BuilderElement builderElement:
+                            CollectReferencedNames(builderElement.Source, names);
+                            switch (builderElement.Body)
+                            {
+                                case LambdaExpressionBody expressionBody:
+                                    CollectReferencedNames(expressionBody.Expression, names);
+                                    break;
+                                case LambdaBlockBody blockBody:
+                                    CollectReferencedNames(blockBody.Block, names);
+                                    break;
+                            }
+                            break;
+                    }
+                }
+                break;
+            case AggregationExpression aggregation:
+                CollectReferencedNames(aggregation.Source, names);
+                if (aggregation.WhereExpression is not null) CollectReferencedNames(aggregation.WhereExpression, names);
+                CollectReferencedNames(aggregation.Body, names);
+                break;
+            case GeneratorExpression generator:
+                CollectReferencedNames(generator.Source, names);
+                switch (generator.Body)
+                {
+                    case LambdaExpressionBody expressionBody:
+                        CollectReferencedNames(expressionBody.Expression, names);
+                        break;
+                    case LambdaBlockBody blockBody:
+                        CollectReferencedNames(blockBody.Block, names);
+                        break;
+                }
+                break;
+        }
+    }
+
     private void EmitTypeDeclaration(TypeDeclaration declaration)
     {
-        _currentTypeStack.Push(declaration.Name);
+        _currentTypeStack.Push(declaration);
         if (!declaration.HasBody)
         {
             string header = GetEmittedTypeHeader(declaration);
@@ -126,6 +480,12 @@ internal sealed partial class CSharpEmitter
             case MethodMember method:
                 EmitMethodMember(method);
                 break;
+            case PropertyMember property:
+                EmitPropertyMember(property);
+                break;
+            case OperatorMember @operator:
+                EmitOperatorMember(@operator);
+                break;
             case OrderingShorthandMember ordering:
                 EmitOrderingShorthandMember(ordering);
                 break;
@@ -135,7 +495,27 @@ internal sealed partial class CSharpEmitter
     }
 
     private void EmitOrderingShorthandMember(OrderingShorthandMember ordering)
-        => _writer.WriteLine($"public int CompareTo({GetCurrentDeclaringTypeName()} {ordering.ParameterName}) => {EmitExpression(ordering.Body)};");
+    {
+        string currentType = GetCurrentDeclaringTypeName();
+        if (ordering.ParameterNames.Count >= 2)
+        {
+            string leftName = ordering.ParameterNames[0];
+            string rightName = ordering.ParameterNames[1];
+            EmitMethodLike($"public static int CompareTo({currentType} {leftName}, {currentType} {rightName})", ordering.Body, isVoidLike: false);
+            _writer.WriteLine($"public int CompareTo({currentType} other) => CompareTo(this, other);");
+        }
+        else
+        {
+            string otherName = ordering.ParameterNames.Count == 0 ? "other" : ordering.ParameterNames[0];
+            EmitMethodLike($"public int CompareTo({currentType} {otherName})", ordering.Body, isVoidLike: false);
+            _writer.WriteLine($"public static int CompareTo({currentType} left, {currentType} right) => left.CompareTo(right);");
+        }
+
+        _writer.WriteLine($"public static bool operator <({currentType} left, {currentType} right) => CompareTo(left, right) < 0;");
+        _writer.WriteLine($"public static bool operator >({currentType} left, {currentType} right) => CompareTo(left, right) > 0;");
+        _writer.WriteLine($"public static bool operator <=({currentType} left, {currentType} right) => CompareTo(left, right) <= 0;");
+        _writer.WriteLine($"public static bool operator >=({currentType} left, {currentType} right) => CompareTo(left, right) >= 0;");
+    }
 
     private void EmitMethodMember(MethodMember method)
     {
@@ -144,8 +524,19 @@ internal sealed partial class CSharpEmitter
         string signature = method.IsConstructor
             ? $"{modifiers}{method.Name}({parameters})"
             : $"{modifiers}{EmitType(method.ReturnType!)} {method.Name}({parameters})";
+        if (!string.IsNullOrWhiteSpace(method.InitializerText))
+        {
+            signature += " " + method.InitializerText;
+        }
 
-        switch (method.Body)
+        EmitMethodLike(signature, method.Body, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType)));
+    }
+
+    private void EmitPropertyMember(PropertyMember property)
+    {
+        string modifiers = property.Modifiers.Count == 0 ? "public " : string.Join(" ", property.Modifiers) + " ";
+        string signature = $"{modifiers}{EmitType(property.Type)} {property.Name}";
+        switch (property.Body)
         {
             case ExpressionMethodBody expressionBody:
                 _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
@@ -154,11 +545,148 @@ internal sealed partial class CSharpEmitter
                 _writer.WriteLine(signature);
                 _writer.WriteLine("{");
                 _writer.Indent();
-                EmitBlockContents(blockBody.Block, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType)));
+                _writer.WriteLine("get");
+                _writer.WriteLine("{");
+                _writer.Indent();
+                EmitBlockContents(blockBody.Block, isVoidLike: false);
+                _writer.Unindent();
+                _writer.WriteLine("}");
                 _writer.Unindent();
                 _writer.WriteLine("}");
                 break;
         }
+    }
+
+    private void EmitOperatorMember(OperatorMember @operator)
+    {
+        List<string> modifiers = @operator.Modifiers.Count == 0 ? ["public"] : [.. @operator.Modifiers];
+        if (!modifiers.Contains("static", StringComparer.Ordinal))
+        {
+            modifiers.Add("static");
+        }
+
+        string signature = $"{string.Join(" ", modifiers)} {EmitType(@operator.ReturnType)} operator {@operator.OperatorTokenText}({string.Join(", ", @operator.Parameters.Select(EmitParameter))})";
+        EmitMethodLike(signature, @operator.Body, isVoidLike: GetIsVoid(@operator.ReturnType));
+    }
+
+    private void EmitMethodLike(string signature, MethodBody body, bool isVoidLike)
+    {
+        switch (body)
+        {
+            case ExpressionMethodBody expressionBody:
+                _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                break;
+            case BlockMethodBody blockBody:
+                _writer.WriteLine(signature);
+                _writer.WriteLine("{");
+                _writer.Indent();
+                if (isVoidLike)
+                {
+                    EmitBlockContents(blockBody.Block, isVoidLike: true);
+                }
+                else
+                {
+                    EmitValueAwareBlockContents(blockBody.Block);
+                }
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                break;
+        }
+    }
+
+    private void EmitValueAwareBlockContents(BlockStatement block)
+    {
+        bool emittedTerminalReturn = false;
+        for (int i = 0; i < block.Statements.Count; i++)
+        {
+            bool isTerminal = i == block.Statements.Count - 1;
+            if (EmitValueAwareStatement(block.Statements[i], isTerminal))
+            {
+                emittedTerminalReturn = isTerminal;
+                continue;
+            }
+
+            EmitStatement(block.Statements[i]);
+        }
+
+        if (!emittedTerminalReturn && !ContainsExplicitReturn(block))
+        {
+            _writer.WriteLine("return default!;");
+        }
+    }
+
+    private bool EmitValueAwareStatement(Statement statement, bool isTerminal)
+    {
+        switch (statement)
+        {
+            case ExpressionStatement { HasSemicolon: false } expressionStatement when isTerminal:
+                _writer.WriteLine($"return {EmitExpression(expressionStatement.Expression)};");
+                return true;
+            case BlockStatement block when isTerminal:
+                _writer.WriteLine("{");
+                _writer.Indent();
+                EmitValueAwareBlockContents(block);
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                return true;
+            case IfStatement ifStatement when ifStatement.ElseBranch is null && CanEmitReturningStatement(ifStatement.ThenBranch):
+                _writer.WriteLine($"if ({EmitExpression(ifStatement.Condition)})");
+                EmitReturningEmbeddedStatement(ifStatement.ThenBranch);
+                return true;
+            case IfStatement ifStatement when isTerminal && ifStatement.ElseBranch is not null && CanEmitReturningStatement(ifStatement.ThenBranch) && CanEmitReturningStatement(ifStatement.ElseBranch):
+                _writer.WriteLine($"if ({EmitExpression(ifStatement.Condition)})");
+                EmitReturningEmbeddedStatement(ifStatement.ThenBranch);
+                _writer.WriteLine("else");
+                EmitReturningEmbeddedStatement(ifStatement.ElseBranch);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private bool CanEmitReturningStatement(Statement statement)
+        => statement switch
+        {
+            ExpressionStatement { HasSemicolon: false } => true,
+            BlockStatement block => block.Statements.Count > 0 && CanEmitReturningStatement(block.Statements[^1]),
+            IfStatement ifStatement when ifStatement.ElseBranch is not null
+                => CanEmitReturningStatement(ifStatement.ThenBranch) && CanEmitReturningStatement(ifStatement.ElseBranch),
+            _ => false,
+        };
+
+    private void EmitReturningEmbeddedStatement(Statement statement)
+    {
+        if (statement is ExpressionStatement { HasSemicolon: false } expressionStatement)
+        {
+            _writer.WriteLine("{");
+            _writer.Indent();
+            _writer.WriteLine($"return {EmitExpression(expressionStatement.Expression)};");
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return;
+        }
+
+        if (statement is BlockStatement block)
+        {
+            _writer.WriteLine("{");
+            _writer.Indent();
+            EmitValueAwareBlockContents(block);
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return;
+        }
+
+        if (statement is IfStatement nestedIf && nestedIf.ElseBranch is not null && CanEmitReturningStatement(nestedIf.ThenBranch) && CanEmitReturningStatement(nestedIf.ElseBranch))
+        {
+            _writer.WriteLine("{");
+            _writer.Indent();
+            EmitValueAwareStatement(nestedIf, isTerminal: true);
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return;
+        }
+
+        EmitEmbeddedStatement(statement);
     }
 
     private void EmitFunction(FunctionDeclaration function, bool includeAccessibility, bool isStatic)
@@ -183,9 +711,32 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("public static void Main()");
         _writer.WriteLine("{");
         _writer.Indent();
-        EmitBlockContents(new BlockStatement(statements), isVoidLike: true);
+        EmitTopLevelBlockContents(new BlockStatement(statements));
         _writer.Unindent();
         _writer.WriteLine("}");
+    }
+
+    private void EmitTopLevelBlockContents(BlockStatement block)
+    {
+        Expression? implicitReturn = GetImplicitReturnExpression(block);
+        int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
+
+        for (int i = 0; i < regularCount; i++)
+        {
+            if (block.Statements[i] is DeclarationStatement declaration && _hoistedGlobalDeclarations.Contains(declaration))
+            {
+                EmitHoistedDeclarationInitialization(declaration);
+            }
+            else
+            {
+                EmitStatement(block.Statements[i]);
+            }
+        }
+
+        if (implicitReturn is not null)
+        {
+            _writer.WriteLine($"{EmitExpression(implicitReturn)};");
+        }
     }
 
     private void EmitBlockContents(BlockStatement block, bool isVoidLike)
@@ -230,9 +781,7 @@ internal sealed partial class CSharpEmitter
                 EmitDeclaration(declaration, isField: false, modifiers: null);
                 break;
             case ExpressionStatement expressionStatement:
-                _writer.WriteLine(expressionStatement.Expression is AssignmentExpression assignmentExpression
-                    ? $"{EmitStatementAssignmentExpression(assignmentExpression)};"
-                    : $"{EmitExpression(expressionStatement.Expression)};");
+                _writer.WriteLine($"{EmitStatementExpression(expressionStatement.Expression)};");
                 break;
             case AssignmentStatement assignment:
                 EmitAssignment(assignment);
@@ -294,7 +843,9 @@ internal sealed partial class CSharpEmitter
 
     private void EmitDeclaration(DeclarationStatement declaration, bool isField, IReadOnlyList<string>? modifiers)
     {
-        string prefix = modifiers is { Count: > 0 } ? string.Join(" ", modifiers) + " " : string.Empty;
+        string prefix = modifiers is { Count: > 0 }
+            ? string.Join(" ", modifiers) + " "
+            : isField ? GetImplicitFieldAccessibilityPrefix() : string.Empty;
 
         if (declaration.IsInputShorthand)
         {
@@ -312,6 +863,11 @@ internal sealed partial class CSharpEmitter
         if (isField)
         {
             EmitFieldDeclaration(prefix, declaration);
+            return;
+        }
+
+        if (TryEmitAmbiguousCallLikeDeclaration(declaration))
+        {
             return;
         }
 
@@ -359,8 +915,211 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine($"{typeText} {name} = {initializerText};");
     }
 
+    private string GetImplicitFieldAccessibilityPrefix()
+    {
+        if (_currentTypeStack.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return IsValueTypeDeclaration(_currentTypeStack.Peek().HeaderText) ? "public " : string.Empty;
+    }
+
+    private void CollectDeclaredTypeNames(IReadOnlyList<TypeDeclaration> types)
+    {
+        foreach (TypeDeclaration type in types)
+        {
+            _declaredTypeNames.Add(type.Name);
+            CollectDeclaredTypeNames(type.Members.OfType<NestedTypeMember>().Select(member => member.Declaration).ToArray());
+        }
+    }
+
+    private void CollectDeclaredTypeShapes(IReadOnlyList<TypeDeclaration> types, string? containerName)
+    {
+        foreach (TypeDeclaration type in types)
+        {
+            string fullName = string.IsNullOrWhiteSpace(containerName)
+                ? type.Name
+                : containerName + "." + type.Name;
+            DeclaredTypeShape shape = CreateDeclaredTypeShape(type);
+            _declaredTypeShapes[fullName] = shape;
+            _declaredTypeShapes.TryAdd(type.Name, shape);
+            CollectDeclaredTypeShapes(type.Members.OfType<NestedTypeMember>().Select(member => member.Declaration).ToArray(), fullName);
+        }
+    }
+
+    private DeclaredTypeShape CreateDeclaredTypeShape(TypeDeclaration declaration)
+    {
+        List<DeclaredFieldShape> fields = [];
+        foreach (FieldMember field in declaration.Members.OfType<FieldMember>())
+        {
+            if (!TryGetFieldEntries(field.Declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries))
+            {
+                continue;
+            }
+
+            foreach ((string name, TypeSyntax type, _) in entries!)
+            {
+                fields.Add(new DeclaredFieldShape(name, type));
+            }
+        }
+
+        List<ConstructorShape> constructors = [];
+        if (TryCountHeaderParameters(declaration.HeaderText, out int headerParameterCount))
+        {
+            constructors.Add(new ConstructorShape(headerParameterCount));
+        }
+
+        foreach (MethodMember constructor in declaration.Members.OfType<MethodMember>().Where(member => member.IsConstructor))
+        {
+            constructors.Add(new ConstructorShape(constructor.Parameters.Count));
+        }
+
+        return new DeclaredTypeShape(
+            declaration.Name,
+            IsValueTypeDeclaration(declaration.HeaderText),
+            fields,
+            constructors);
+    }
+
+    private static bool TryCountHeaderParameters(string headerText, out int parameterCount)
+    {
+        parameterCount = 0;
+        int openParen = headerText.IndexOf('(');
+        int closeParen = headerText.LastIndexOf(')');
+        if (openParen < 0 || closeParen <= openParen)
+        {
+            return false;
+        }
+
+        string parameterText = headerText[(openParen + 1)..closeParen].Trim();
+        if (parameterText.Length == 0)
+        {
+            return true;
+        }
+
+        int depth = 0;
+        parameterCount = 1;
+        foreach (char ch in parameterText)
+        {
+            switch (ch)
+            {
+                case '<':
+                case '(':
+                case '[':
+                case '{':
+                    depth++;
+                    break;
+                case '>':
+                case ')':
+                case ']':
+                case '}':
+                    if (depth > 0)
+                    {
+                        depth--;
+                    }
+                    break;
+                case ',' when depth == 0:
+                    parameterCount++;
+                    break;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsValueTypeDeclaration(string headerText)
+    {
+        string normalized = headerText.TrimStart();
+        return normalized.StartsWith("struct ", StringComparison.Ordinal)
+            || normalized.StartsWith("readonly struct ", StringComparison.Ordinal)
+            || normalized.StartsWith("record struct ", StringComparison.Ordinal)
+            || normalized.StartsWith("readonly record struct ", StringComparison.Ordinal);
+    }
+
+    private bool TryGetDeclaredTypeShape(TypeSyntax? type, out DeclaredTypeShape? shape)
+    {
+        shape = null;
+        if (UnwrapNullableType(type) is not NamedTypeSyntax named)
+        {
+            return false;
+        }
+
+        if (_declaredTypeShapes.TryGetValue(named.Name, out shape))
+        {
+            return true;
+        }
+
+        if (_declaredTypeShapes.TryGetValue(PscpIntrinsicCatalog.StripGenericSuffix(named.Name), out shape))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private string EmitStatementExpression(Expression expression)
+        => expression switch
+        {
+            AssignmentExpression assignmentExpression => EmitStatementAssignmentExpression(assignmentExpression),
+            PrefixExpression prefix when !TryEmitKnownDataStructurePop(prefix.Operand, out _) => EmitScalarPrefixStatementExpression(prefix),
+            PrefixExpression prefix => EmitPrefixExpression(prefix),
+            PostfixExpression postfix => EmitPostfixStatementExpression(postfix),
+            _ => EmitExpression(expression),
+        };
+
+    private string EmitScalarPrefixStatementExpression(PrefixExpression prefix)
+        => prefix.Operator == PostfixOperator.Increment
+            ? $"++{EmitExpression(prefix.Operand)}"
+            : $"--{EmitExpression(prefix.Operand)}";
+
+    private bool TryEmitAmbiguousCallLikeDeclaration(DeclarationStatement declaration)
+    {
+        if (declaration.IsInputShorthand
+            || declaration.Initializer is not null
+            || declaration.Targets.Count != 1
+            || declaration.Targets[0] is not NameTarget nameTarget
+            || declaration.ExplicitType is not NamedTypeSyntax named
+            || named.TypeArguments.Count != 0
+            || named.Name.Contains('.', StringComparison.Ordinal)
+            || PscpIntrinsicCatalog.BuiltinTypes.Contains(named.Name)
+            || _declaredTypeNames.Contains(named.Name))
+        {
+            return false;
+        }
+
+        _writer.WriteLine($"{named.Name}({nameTarget.Name});");
+        return true;
+    }
+
     private void EmitFieldDeclaration(string prefix, DeclarationStatement declaration)
     {
+        if (TryGetFieldEntries(declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries))
+        {
+            foreach ((string fieldName, TypeSyntax fieldType, Expression? fieldInitializer) in entries!)
+            {
+                string emittedTypeText = EmitType(fieldType);
+                if (fieldInitializer is null)
+                {
+                    if (fieldType is NamedTypeSyntax namedFieldType && IsKnownAutoConstructType(namedFieldType))
+                    {
+                        _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName} = new();");
+                    }
+                    else
+                    {
+                        _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName};");
+                    }
+                }
+                else
+                {
+                    string initializerText = EmitExpression(fieldInitializer, fieldType);
+                    _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName} = {initializerText};");
+                }
+            }
+
+            return;
+        }
+
         if (declaration.Targets.Count != 1 || declaration.Targets[0] is not NameTarget and not DiscardTarget)
         {
             string comment = declaration.Initializer is null
@@ -387,7 +1146,79 @@ internal sealed partial class CSharpEmitter
             typeText = EmitType(new ArrayTypeSyntax(sizedType.ElementType, sizedType.Dimensions.Count));
         }
 
+        if (declaration.Initializer is null
+            && !(declaration.ExplicitType is NamedTypeSyntax namedExplicitType && IsKnownAutoConstructType(namedExplicitType)))
+        {
+            _writer.WriteLine($"{prefix}{typeText} {name};");
+            return;
+        }
+
         _writer.WriteLine($"{prefix}{typeText} {name} = {initializer};");
+    }
+
+    private bool TryGetFieldEntries(DeclarationStatement declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries)
+    {
+        List<(string Name, TypeSyntax Type, Expression? Initializer)> result = [];
+        entries = result;
+        if (declaration.ExplicitType is null)
+        {
+            return false;
+        }
+
+        TypeSyntax normalizedType = NormalizeSizedType(declaration.ExplicitType);
+        if (declaration.Targets.Count == 1)
+        {
+            if (declaration.Targets[0] is NameTarget nameTarget)
+            {
+                result.Add((nameTarget.Name, normalizedType, declaration.Initializer));
+                return true;
+            }
+
+            if (declaration.Targets[0] is TupleTarget tupleTarget && normalizedType is TupleTypeSyntax tupleType)
+            {
+                for (int i = 0; i < tupleTarget.Elements.Count && i < tupleType.Elements.Count; i++)
+                {
+                    if (tupleTarget.Elements[i] is NameTarget elementName)
+                    {
+                        Expression? elementInitializer = declaration.Initializer is TupleExpression tupleInitializer && i < tupleInitializer.Elements.Count
+                            ? tupleInitializer.Elements[i]
+                            : null;
+                        result.Add((elementName.Name, tupleType.Elements[i], elementInitializer));
+                    }
+                }
+
+                return result.Count > 0;
+            }
+
+            return false;
+        }
+
+        if (declaration.Initializer is TupleExpression tupleExpression)
+        {
+            for (int i = 0; i < declaration.Targets.Count; i++)
+            {
+                if (declaration.Targets[i] is NameTarget nameTarget)
+                {
+                    TypeSyntax targetType = normalizedType is TupleTypeSyntax tupleType && i < tupleType.Elements.Count
+                        ? tupleType.Elements[i]
+                        : normalizedType;
+                    Expression? initializer = i < tupleExpression.Elements.Count ? tupleExpression.Elements[i] : null;
+                    result.Add((nameTarget.Name, targetType, initializer));
+                }
+            }
+
+            return result.Count > 0;
+        }
+
+        foreach (BindingTarget target in declaration.Targets)
+        {
+            if (target is NameTarget nameTarget)
+            {
+                result.Add((nameTarget.Name, normalizedType, declaration.Initializer));
+            }
+        }
+
+        return result.Count > 0;
     }
 
     private string EmitImplicitInitializer(TypeSyntax? explicitType)
@@ -416,11 +1247,68 @@ internal sealed partial class CSharpEmitter
         string typeText = EmitType(declaredType);
         return declaration.Initializer switch
         {
+            TargetTypedNewArrayExpression targetTypedNewArray => TryEmitLoweredTargetTypedNewArrayDeclaration(name, typeText, declaredType, targetTypedNewArray),
             CollectionExpression collection => TryEmitLoweredCollectionDeclaration(name, typeText, declaredType, collection),
             CallExpression call => TryEmitLoweredCallDeclaration(name, typeText, declaredType, call),
             AggregationExpression aggregation => TryEmitLoweredAggregationDeclaration(name, typeText, declaredType, aggregation),
             _ => false,
         };
+    }
+
+    private bool TryEmitLoweredHoistedDeclarationInitialization(DeclarationStatement declaration, string name)
+    {
+        if (declaration.Initializer is not TargetTypedNewArrayExpression targetTypedNewArray)
+        {
+            return false;
+        }
+
+        TypeSyntax? declaredType = NormalizeSizedTypeOrNull(declaration.ExplicitType ?? _semantic?.GetExpressionType(declaration.Initializer));
+        if (declaredType is not ArrayTypeSyntax arrayType
+            || targetTypedNewArray.Dimensions.Count != 1
+            || !targetTypedNewArray.AutoConstructElements
+            || arrayType.ElementType is not NamedTypeSyntax namedElementType
+            || !IsKnownAutoConstructType(namedElementType))
+        {
+            return false;
+        }
+
+        string lengthName = NextTemporary("length");
+        string indexName = NextTemporary("i");
+        string elementTypeText = EmitType(arrayType.ElementType);
+        _writer.WriteLine($"int {lengthName} = {EmitExpression(targetTypedNewArray.Dimensions[0])};");
+        _writer.WriteLine($"{name} = new {elementTypeText}[{lengthName}];");
+        _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"{name}[{indexName}] = new {elementTypeText}();");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        return true;
+    }
+
+    private bool TryEmitLoweredTargetTypedNewArrayDeclaration(string name, string typeText, TypeSyntax declaredType, TargetTypedNewArrayExpression targetTypedNewArray)
+    {
+        if (declaredType is not ArrayTypeSyntax arrayType
+            || targetTypedNewArray.Dimensions.Count != 1
+            || !targetTypedNewArray.AutoConstructElements
+            || arrayType.ElementType is not NamedTypeSyntax namedElementType
+            || !IsKnownAutoConstructType(namedElementType))
+        {
+            return false;
+        }
+
+        string lengthName = NextTemporary("length");
+        string indexName = NextTemporary("i");
+        string elementTypeText = EmitType(arrayType.ElementType);
+        _writer.WriteLine($"int {lengthName} = {EmitExpression(targetTypedNewArray.Dimensions[0])};");
+        _writer.WriteLine($"{typeText} {name} = new {elementTypeText}[{lengthName}];");
+        _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"{name}[{indexName}] = new {elementTypeText}();");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        return true;
     }
 
     private bool TryEmitLoweredCollectionDeclaration(string name, string typeText, TypeSyntax declaredType, CollectionExpression collection)
@@ -815,11 +1703,7 @@ internal sealed partial class CSharpEmitter
     {
         if (fastFor.Source is RangeExpression range)
         {
-            string itemName = ChooseBindingName(fastFor.ItemTarget, "item");
-            string? indexName = fastFor.IndexTarget is null ? null : ChooseBindingName(fastFor.IndexTarget, "index");
-            string aliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
-            string prefix = string.IsNullOrWhiteSpace(aliases) ? string.Empty : aliases + " ";
-            _writer.WriteLine(EmitLoopOverSource(range, itemName, $"{prefix}{EmitInlineStatement(fastFor.Body)}", indexName));
+            EmitRangeFastForStatement(range, fastFor);
             return;
         }
 
@@ -840,6 +1724,50 @@ internal sealed partial class CSharpEmitter
         _writer.Indent();
         EmitStatement(fastFor.Body);
         _writer.WriteLine($"{fallbackIndexName}++;");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private void EmitRangeFastForStatement(RangeExpression range, FastForStatement fastFor)
+    {
+        string itemName = ChooseBindingName(fastFor.ItemTarget, "item");
+        string? indexName = fastFor.IndexTarget is null ? null : ChooseBindingName(fastFor.IndexTarget, "index");
+        string startName = NextTemporary("start");
+        string endName = NextTemporary("end");
+        string stepName = NextTemporary("step");
+        bool useLong = IsLongRange(range, null);
+        string iteratorType = useLong ? "long" : "int";
+        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+        string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
+
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"{iteratorType} {startName} = {EmitExpression(range.Start)};");
+        _writer.WriteLine($"{iteratorType} {endName} = {EmitExpression(range.End)};");
+        _writer.WriteLine($"{iteratorType} {stepName} = {EmitRangeStepExpression(range, startName, endName, useLong)};");
+        _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+        if (indexName is not null)
+        {
+            _writer.WriteLine($"int {indexName} = 0;");
+        }
+
+        _writer.WriteLine($"for ({iteratorType} {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {decrementComparison} {endName}; {itemName} += {stepName})");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        string aliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
+        if (!string.IsNullOrWhiteSpace(aliases))
+        {
+            _writer.WriteLine(aliases);
+        }
+
+        EmitStatement(fastFor.Body);
+        if (indexName is not null)
+        {
+            _writer.WriteLine($"{indexName}++;");
+        }
+
         _writer.Unindent();
         _writer.WriteLine("}");
         _writer.Unindent();
@@ -912,7 +1840,7 @@ internal sealed partial class CSharpEmitter
     }
 
     private string GetCurrentDeclaringTypeName()
-        => _currentTypeStack.Count == 0 ? "object" : _currentTypeStack.Peek();
+        => _currentTypeStack.Count == 0 ? "object" : _currentTypeStack.Peek().Name;
 
     partial void EmitRuntimeHelpers();
 }

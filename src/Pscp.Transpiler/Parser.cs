@@ -190,6 +190,19 @@ public sealed partial class Parser
 
         if (Match(TokenKind.Then))
         {
+            if (ShouldParseThenBranchAsStatement())
+            {
+                Statement statementThenBranch = ParseEmbeddedStatement();
+                SkipSeparators();
+                Statement? statementElseBranch = null;
+                if (Match(TokenKind.Else))
+                {
+                    statementElseBranch = ParseEmbeddedStatement();
+                }
+
+                return new IfStatement(condition, statementThenBranch, statementElseBranch, true);
+            }
+
             Expression thenExpression = ParseExpression();
             SkipSeparators();
             Expect(TokenKind.Else, "Expected 'else' in one-line if expression.");
@@ -202,6 +215,7 @@ public sealed partial class Parser
         }
 
         Statement thenBranch = ParseEmbeddedStatement();
+        SkipSeparators();
         Statement? elseBranch = null;
         if (Match(TokenKind.Else))
         {
@@ -290,7 +304,10 @@ public sealed partial class Parser
     }
 
     private Statement ParseEmbeddedStatement()
-        => Current.Kind == TokenKind.OpenBrace ? ParseBlockStatement() : ParseStatement();
+    {
+        SkipSeparators();
+        return Current.Kind == TokenKind.OpenBrace ? ParseBlockStatement() : ParseStatement();
+    }
 
     private Statement ParseReturnStatement()
     {
@@ -376,6 +393,7 @@ public sealed partial class Parser
     private IReadOnlyList<ParameterSyntax> ParseParameterListTail()
     {
         List<ParameterSyntax> parameters = [];
+        SkipSeparators();
 
         if (Match(TokenKind.CloseParen))
         {
@@ -384,6 +402,7 @@ public sealed partial class Parser
 
         do
         {
+            SkipSeparators();
             ArgumentModifier modifier = ParseOptionalArgumentModifier();
             TypeSyntax? parameterType = TryParseTypeSyntax(allowSizedArrays: false);
             if (parameterType is null)
@@ -394,6 +413,7 @@ public sealed partial class Parser
 
             BindingTarget target = ParseBindingTarget();
             parameters.Add(new ParameterSyntax(modifier, parameterType, target));
+            SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 
@@ -409,6 +429,7 @@ public sealed partial class Parser
 
         MutabilityKind mutability = MutabilityKind.Immutable;
         TypeSyntax? explicitType = null;
+        List<BindingTarget>? preparsedTargets = null;
 
         if (Match(TokenKind.Let))
         {
@@ -423,24 +444,32 @@ public sealed partial class Parser
         else
         {
             bool hadMut = Match(TokenKind.Mut);
-            explicitType = TryParseTypeSyntax(allowSizedArrays: true);
-            if (explicitType is null)
+            if (TryParseTypedTupleDeclarationHead(out TypeSyntax? tupleType, out List<BindingTarget>? tupleTargets))
             {
-                Restore(savedPosition, savedDiagnostics);
-                return false;
+                explicitType = tupleType;
+                preparsedTargets = tupleTargets;
+            }
+            else
+            {
+                explicitType = TryParseTypeSyntax(allowSizedArrays: true);
+                if (explicitType is null)
+                {
+                    Restore(savedPosition, savedDiagnostics);
+                    return false;
+                }
             }
 
             mutability = hadMut ? MutabilityKind.Mutable : MutabilityKind.Immutable;
         }
 
-        if (explicitType is not null && Current.Kind == TokenKind.OpenParen)
+        if (preparsedTargets is null && explicitType is not null && Current.Kind == TokenKind.OpenParen)
         {
             Restore(savedPosition, savedDiagnostics);
             return false;
         }
 
-        List<BindingTarget> targets = [];
-        if (!TryParseBindingTargetList(targets))
+        List<BindingTarget> targets = preparsedTargets ?? [];
+        if (preparsedTargets is null && !TryParseBindingTargetList(targets))
         {
             Restore(savedPosition, savedDiagnostics);
             return false;
@@ -456,7 +485,9 @@ public sealed partial class Parser
                 return true;
             }
 
-            Expression initializer = ParseTupleAwareInitializer();
+            Expression initializer = TryParseMultiDeclaratorInitializer(explicitType, targets, out Expression? multiInitializer)
+                ? multiInitializer!
+                : ParseTupleAwareInitializer();
             declaration = new DeclarationStatement(mutability, explicitType, targets, initializer, false);
             TryConsumeSemicolon();
             return true;
@@ -468,9 +499,133 @@ public sealed partial class Parser
             return false;
         }
 
+        if (declaration is null
+            && explicitType is NamedTypeSyntax named
+            && named.Name.Contains('.', StringComparison.Ordinal))
+        {
+            Restore(savedPosition, savedDiagnostics);
+            return false;
+        }
+
         declaration = new DeclarationStatement(mutability, explicitType, targets, null, false);
         TryConsumeSemicolon();
         return true;
+    }
+
+    private bool TryParseTypedTupleDeclarationHead(out TypeSyntax? explicitType, out List<BindingTarget>? targets)
+    {
+        int savedPosition = _position;
+        int savedDiagnostics = _diagnostics.Count;
+        explicitType = null;
+        targets = null;
+
+        if (!Match(TokenKind.OpenParen))
+        {
+            return false;
+        }
+
+        List<TypeSyntax> elementTypes = [];
+        List<BindingTarget> elementTargets = [];
+        SkipSeparators();
+
+        if (Match(TokenKind.CloseParen))
+        {
+            Restore(savedPosition, savedDiagnostics);
+            return false;
+        }
+
+        do
+        {
+            SkipSeparators();
+            TypeSyntax? type = TryParseTypeSyntax(allowSizedArrays: false);
+            if (type is null || !TryParseBindingTarget(out BindingTarget? target))
+            {
+                Restore(savedPosition, savedDiagnostics);
+                return false;
+            }
+
+            elementTypes.Add(type);
+            elementTargets.Add(target!);
+            SkipSeparators();
+        }
+        while (Match(TokenKind.Comma));
+
+        if (!Match(TokenKind.CloseParen))
+        {
+            Restore(savedPosition, savedDiagnostics);
+            return false;
+        }
+
+        explicitType = new TupleTypeSyntax(elementTypes);
+        targets = [new TupleTarget(elementTargets)];
+        return true;
+    }
+
+    private bool TryParseMultiDeclaratorInitializer(TypeSyntax? explicitType, List<BindingTarget> targets, out Expression? initializer)
+    {
+        initializer = null;
+        if (explicitType is null || targets.Count != 1)
+        {
+            return false;
+        }
+
+        Expression firstValue = ParseExpression();
+        if (Current.Kind != TokenKind.Comma)
+        {
+            initializer = firstValue;
+            return true;
+        }
+
+        int repeatSavedPosition = _position;
+        int repeatSavedDiagnostics = _diagnostics.Count;
+        List<BindingTarget> extraTargets = [];
+        List<Expression> values = [firstValue];
+
+        while (Match(TokenKind.Comma))
+        {
+            SkipSeparators();
+            if (!TryParseBindingTarget(out BindingTarget? target) || !Match(TokenKind.Equal))
+            {
+                Restore(repeatSavedPosition, repeatSavedDiagnostics);
+                initializer = ParseTupleContinuation(firstValue);
+                return true;
+            }
+
+            SkipSeparators();
+            extraTargets.Add(target!);
+            values.Add(ParseExpression());
+            SkipSeparators();
+        }
+
+        if (extraTargets.Count == 0)
+        {
+            Restore(repeatSavedPosition, repeatSavedDiagnostics);
+            initializer = ParseTupleContinuation(firstValue);
+            return true;
+        }
+
+        targets.AddRange(extraTargets);
+        initializer = new TupleExpression(values);
+        return true;
+    }
+
+    private Expression ParseTupleContinuation(Expression first)
+    {
+        if (!Match(TokenKind.Comma))
+        {
+            return first;
+        }
+
+        List<Expression> elements = [first];
+        do
+        {
+            SkipSeparators();
+            elements.Add(ParseExpression());
+            SkipSeparators();
+        }
+        while (Match(TokenKind.Comma));
+
+        return new TupleExpression(elements);
     }
 
     private bool TryParseBindingTargetList(List<BindingTarget> targets)
@@ -503,19 +658,7 @@ public sealed partial class Parser
     private Expression ParseTupleAwareInitializer()
     {
         Expression first = ParseExpression();
-        if (!Match(TokenKind.Comma))
-        {
-            return first;
-        }
-
-        List<Expression> elements = [first];
-        do
-        {
-            elements.Add(ParseExpression());
-        }
-        while (Match(TokenKind.Comma));
-
-        return new TupleExpression(elements);
+        return ParseTupleContinuation(first);
     }
 
     private bool TryParseTypeDeclaration(out TypeDeclaration? declaration)
@@ -564,6 +707,7 @@ public sealed partial class Parser
         int headerEnd = _position;
         string headerText = TokensToText(headerStart, headerEnd);
 
+        SkipSeparators();
         if (Match(TokenKind.OpenBrace))
         {
             IReadOnlyList<TypeMember> members = ParseTypeMembers(name);
@@ -628,6 +772,7 @@ public sealed partial class Parser
         int savedDiagnostics = _diagnostics.Count;
         member = null;
 
+        _ = Match(TokenKind.Rec);
         IReadOnlyList<string> modifiers = ParseModifiers();
         IReadOnlyList<string> effectiveModifiers = ApplySectionAccess(modifiers, sectionAccess);
 
@@ -643,21 +788,50 @@ public sealed partial class Parser
             Expect(TokenKind.OpenParen, "Expected '(' after constructor name.");
             IReadOnlyList<ParameterSyntax> parameters = ParseParameterListTail();
             SkipSeparators();
+            string? initializerText = ParseOptionalConstructorInitializerText();
+            SkipSeparators();
             MethodBody body = ParseMethodBody();
-            member = new MethodMember(effectiveModifiers, null, name, parameters, body, IsConstructor: true);
+            member = new MethodMember(effectiveModifiers, null, name, parameters, body, IsConstructor: true, initializerText);
             return true;
         }
 
         int afterModifiers = _position;
         int afterModifiersDiagnostics = _diagnostics.Count;
         TypeSyntax? returnType = TryParseTypeSyntax(allowSizedArrays: false);
-        if (returnType is not null && TryParseIdentifier(out string? nameToken) && Match(TokenKind.OpenParen))
+        if (returnType is not null
+            && Current.Kind == TokenKind.Identifier
+            && Current.Text == "operator")
         {
-            IReadOnlyList<ParameterSyntax> parameters = ParseParameterListTail();
+            Next();
+            if (TryReadOperatorTokenText(out string? operatorTokenText))
+            {
+                Expect(TokenKind.OpenParen, "Expected '(' after operator token.");
+                IReadOnlyList<ParameterSyntax> parameters = ParseOperatorParameterList(declaringTypeName);
+                SkipSeparators();
+                MethodBody body = ParseMethodBody();
+                member = new OperatorMember(effectiveModifiers, returnType, operatorTokenText!, parameters, body);
+                return true;
+            }
+        }
+
+        if (returnType is not null && TryParseIdentifier(out string? nameToken))
+        {
+            if (Match(TokenKind.OpenParen))
+            {
+                IReadOnlyList<ParameterSyntax> parameters = ParseParameterListTail();
+                SkipSeparators();
+                MethodBody body = ParseMethodBody();
+                member = new MethodMember(effectiveModifiers, returnType, nameToken!, parameters, body, IsConstructor: false);
+                return true;
+            }
+
             SkipSeparators();
-            MethodBody body = ParseMethodBody();
-            member = new MethodMember(effectiveModifiers, returnType, nameToken!, parameters, body, IsConstructor: false);
-            return true;
+            if (Current.Kind is TokenKind.FatArrow or TokenKind.OpenBrace)
+            {
+                MethodBody body = ParseMethodBody();
+                member = new PropertyMember(effectiveModifiers, returnType, nameToken!, body);
+                return true;
+            }
         }
 
         Restore(afterModifiers, afterModifiersDiagnostics);
@@ -673,6 +847,7 @@ public sealed partial class Parser
 
     private MethodBody ParseMethodBody()
     {
+        SkipSeparators();
         if (Current.Kind == TokenKind.OpenBrace)
         {
             return new BlockMethodBody(ParseBlockStatement());
@@ -680,6 +855,7 @@ public sealed partial class Parser
 
         if (Match(TokenKind.FatArrow))
         {
+            SkipSeparators();
             Expression expression = ParseExpression();
             TryConsumeSemicolon();
             return new ExpressionMethodBody(expression);
@@ -687,6 +863,128 @@ public sealed partial class Parser
 
         _diagnostics.Add(new Diagnostic("Expected method body.", Current.Span));
         return new BlockMethodBody(new BlockStatement(Immutable.List<Statement>()));
+    }
+
+    private string? ParseOptionalConstructorInitializerText()
+    {
+        if (!Match(TokenKind.Colon))
+        {
+            return null;
+        }
+
+        int start = _position - 1;
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int braceDepth = 0;
+        while (Current.Kind != TokenKind.EndOfFile)
+        {
+            if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0
+                && Current.Kind is TokenKind.OpenBrace or TokenKind.NewLine or TokenKind.Semicolon)
+            {
+                break;
+            }
+
+            switch (Current.Kind)
+            {
+                case TokenKind.OpenParen:
+                    parenDepth++;
+                    break;
+                case TokenKind.CloseParen:
+                    if (parenDepth > 0)
+                    {
+                        parenDepth--;
+                    }
+                    break;
+                case TokenKind.OpenBracket:
+                    bracketDepth++;
+                    break;
+                case TokenKind.CloseBracket:
+                    if (bracketDepth > 0)
+                    {
+                        bracketDepth--;
+                    }
+                    break;
+                case TokenKind.OpenBrace:
+                    braceDepth++;
+                    break;
+                case TokenKind.CloseBrace:
+                    if (braceDepth > 0)
+                    {
+                        braceDepth--;
+                    }
+                    break;
+            }
+
+            Next();
+        }
+
+        return TokensToText(start, _position);
+    }
+
+    private IReadOnlyList<ParameterSyntax> ParseOperatorParameterList(string declaringTypeName)
+    {
+        List<ParameterSyntax> parameters = [];
+        SkipSeparators();
+        if (Match(TokenKind.CloseParen))
+        {
+            return parameters;
+        }
+
+        do
+        {
+            SkipSeparators();
+            ArgumentModifier modifier = ParseOptionalArgumentModifier();
+            int savedPosition = _position;
+            int savedDiagnostics = _diagnostics.Count;
+            TypeSyntax? parameterType = TryParseTypeSyntax(allowSizedArrays: false);
+            if (parameterType is not null && TryParseBindingTarget(out BindingTarget? typedTarget))
+            {
+                parameters.Add(new ParameterSyntax(modifier, parameterType, typedTarget!));
+            }
+            else
+            {
+                Restore(savedPosition, savedDiagnostics);
+                BindingTarget target = ParseBindingTarget();
+                parameters.Add(new ParameterSyntax(
+                    modifier,
+                    new NamedTypeSyntax(declaringTypeName, Immutable.List<TypeSyntax>()),
+                    target));
+            }
+
+            SkipSeparators();
+        }
+        while (Match(TokenKind.Comma));
+
+        Expect(TokenKind.CloseParen, "Expected ')' after operator parameter list.");
+        return parameters;
+    }
+
+    private bool TryReadOperatorTokenText(out string? operatorTokenText)
+    {
+        operatorTokenText = Current.Kind switch
+        {
+            TokenKind.Plus => "+",
+            TokenKind.Minus => "-",
+            TokenKind.Star => "*",
+            TokenKind.Slash => "/",
+            TokenKind.Percent => "%",
+            TokenKind.EqualEqual => "==",
+            TokenKind.BangEqual => "!=",
+            TokenKind.LessThan => "<",
+            TokenKind.LessEqual => "<=",
+            TokenKind.GreaterThan => ">",
+            TokenKind.GreaterEqual => ">=",
+            TokenKind.Spaceship => "<=>",
+            _ => null,
+        };
+
+        if (operatorTokenText is null)
+        {
+            return false;
+        }
+
+        Next();
+        return true;
     }
 
     private bool TryParseOrderingShorthand(out OrderingShorthandMember? member)
@@ -703,15 +1001,22 @@ public sealed partial class Parser
         Next();
         Expect(TokenKind.Spaceship, "Expected '<=>' after 'operator'.");
         Expect(TokenKind.OpenParen, "Expected '(' after 'operator<=>'.");
-        string parameterName = Expect(TokenKind.Identifier, "Expected parameter name in ordering shorthand.").Text;
-        Expect(TokenKind.CloseParen, "Expected ')' after ordering shorthand parameter.");
-        Expect(TokenKind.FatArrow, "Expected '=>' in ordering shorthand.");
+        List<string> parameterNames = [];
         SkipSeparators();
-        Expression body = Current.Kind == TokenKind.OpenBrace
-            ? new BlockExpression(ParseBlockStatement())
-            : ParseExpression();
-        TryConsumeSemicolon();
-        member = new OrderingShorthandMember(parameterName, body);
+        if (!Match(TokenKind.CloseParen))
+        {
+            do
+            {
+                parameterNames.Add(Expect(TokenKind.Identifier, "Expected parameter name in ordering shorthand.").Text);
+                SkipSeparators();
+            }
+            while (Match(TokenKind.Comma));
+
+            Expect(TokenKind.CloseParen, "Expected ')' after ordering shorthand parameter list.");
+        }
+
+        MethodBody body = ParseMethodBody();
+        member = new OrderingShorthandMember(parameterNames, body);
         return true;
     }
 

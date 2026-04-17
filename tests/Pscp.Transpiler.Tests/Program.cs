@@ -341,6 +341,31 @@ internal static class TestRunner
                 "6 50 10 50 20 10 30",
                 "3 0 3 1 0 2\n"),
             new(
+                "ThenStatementFormsAndMathPassThrough",
+                """
+                bool positive(int x) {
+                    if x > 0 then return true
+                    false
+                }
+
+                int x = 9
+                mut int y = 0
+                if positive(x) then
+                    y = int Math.Sqrt(x)
+                += y
+                """,
+                "",
+                "3\n"),
+            new(
+                "ArraySortPassThrough",
+                """
+                int[] values = [3, 1, 2]
+                Array.Sort(values)
+                += values
+                """,
+                "",
+                "1 2 3\n"),
+            new(
                 "AggregateHelperFamily",
                 """
                 int[] arr = [1, 2, 3, 4, 2]
@@ -444,6 +469,12 @@ internal static class TestRunner
         VerifyDirectRangeCollectionLowering(failures);
         VerifyDirectFastForLowering(failures);
         VerifyInterpolatedStringLowering(failures);
+        VerifyDotNetPassThroughLowering(failures);
+        VerifyStructObjectInitializerLowering(failures);
+        VerifyImplicitFieldAccessibilityLowering(failures);
+        VerifyAutoConstructArrayDeclarationLowering(failures);
+        VerifyReverseCompareToLowering(failures);
+        VerifyPostfixStatementLowering(failures);
         VerifyRuntimeAvoidsDynamicHelpers(failures);
         VerifySemanticDiagnostics(failures);
 
@@ -646,6 +677,180 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyDotNetPassThroughLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int[] values = [9, 4, 16]
+                Array.Sort(values)
+                += Math.Sqrt(values[0])
+                """),
+            new TranspilationOptions("Pscp.Generated", "DotNetPassThroughLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"DotNetPassThroughLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("Array.Sort(values);", StringComparison.Ordinal)
+            || !userCode.Contains("Math.Sqrt(values[0])", StringComparison.Ordinal)
+            || userCode.Contains("__PscpSeq", StringComparison.Ordinal))
+        {
+            failures.Add($"DotNetPassThroughLowering: expected direct .NET API lowering not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyStructObjectInitializerLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                struct PointData {
+                    int X, Y
+                }
+
+                PointData point = new(1, 2)
+                += point.X + point.Y
+                """),
+            new TranspilationOptions("Pscp.Generated", "StructObjectInitializerLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"StructObjectInitializerLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("new PointData { X = 1, Y = 2 }", StringComparison.Ordinal))
+        {
+            failures.Add($"StructObjectInitializerLowering: expected object-initializer lowering not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyImplicitFieldAccessibilityLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                class Worker {
+                    record struct Job(int Id)
+                    List<Job> jobs
+                }
+
+                struct PointData {
+                    int X, Y
+                }
+                """),
+            new TranspilationOptions("Pscp.Generated", "ImplicitFieldAccessibilityLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ImplicitFieldAccessibilityLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (userCode.Contains("public List<Job> jobs", StringComparison.Ordinal)
+            || !userCode.Contains("List<Job> jobs = new();", StringComparison.Ordinal)
+            || !userCode.Contains("public int X;", StringComparison.Ordinal)
+            || !userCode.Contains("public int Y;", StringComparison.Ordinal))
+        {
+            failures.Add($"ImplicitFieldAccessibilityLowering: expected private class fields and public value-type fields\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyAutoConstructArrayDeclarationLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n = 4
+                List<int>[] graph = new![n]
+                
+                int solve() {
+                    graph.Length
+                }
+                += solve()
+                """),
+            new TranspilationOptions("Pscp.Generated", "AutoConstructArrayDeclarationLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"AutoConstructArrayDeclarationLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!(userCode.Contains("List<int>[] graph = new List<int>[", StringComparison.Ordinal)
+                || userCode.Contains("graph = new List<int>[", StringComparison.Ordinal))
+            || !userCode.Contains("graph[", StringComparison.Ordinal)
+            || !userCode.Contains("= new List<int>();", StringComparison.Ordinal)
+            || userCode.Contains("__PscpSeq.expr", StringComparison.Ordinal))
+        {
+            failures.Add($"AutoConstructArrayDeclarationLowering: expected direct array auto-construction lowering\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyReverseCompareToLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                record struct Item(int Value) {
+                    operator<=>(left, right) => left.Value <=> right.Value
+                }
+
+                PriorityQueue<Item, Item> pq = new(-Item.CompareTo)
+                pq += (new(1), new(1))
+                pq += (new(3), new(3))
+                += (--pq).Value
+                """),
+            new TranspilationOptions("Pscp.Generated", "ReverseCompareToLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ReverseCompareToLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("Comparer<Item>.Create((__left, __right) => Item.CompareTo(__right, __left))", StringComparison.Ordinal))
+        {
+            failures.Add($"ReverseCompareToLowering: expected reversed comparer lowering not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyPostfixStatementLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                mut int x = 3
+                x--
+                x++
+                += x
+                """),
+            new TranspilationOptions("Pscp.Generated", "PostfixStatementLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"PostfixStatementLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("x--;", StringComparison.Ordinal)
+            || !userCode.Contains("x++;", StringComparison.Ordinal)
+            || userCode.Contains("(x--);", StringComparison.Ordinal)
+            || userCode.Contains("(x++);", StringComparison.Ordinal))
+        {
+            failures.Add($"PostfixStatementLowering: expected direct statement lowering not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
     private static void VerifySemanticDiagnostics(List<string> failures)
     {
         ExpectDiagnostic(
@@ -736,6 +941,25 @@ internal static class TestRunner
             += bad()
             """,
             "Final expression in `bad` returns `void`, but `int` is required.");
+
+        ExpectDiagnostic(
+            failures,
+            "ArrayAddCall",
+            """
+            int[] values = [1, 2, 3]
+            values.Add(4)
+            """,
+            "Arrays do not contain an `Add` method.");
+
+        ExpectDiagnostic(
+            failures,
+            "PriorityQueueTryDequeueShape",
+            """
+            PriorityQueue<int, int> pq = new()
+            pq.TryDequeue(out int x)
+            += x
+            """,
+            "requires two `out` arguments");
     }
 
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)

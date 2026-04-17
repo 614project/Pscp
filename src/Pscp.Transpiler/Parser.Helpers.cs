@@ -56,6 +56,32 @@ public sealed partial class Parser
         return true;
     }
 
+    private bool TryReadShiftOperator(out BinaryOperator binaryOperator)
+    {
+        binaryOperator = BinaryOperator.Add;
+        if (Current.Kind == TokenKind.LessThan
+            && Peek(1).Kind == TokenKind.LessThan
+            && Current.Position + Current.Text.Length == Peek(1).Position)
+        {
+            Next();
+            Next();
+            binaryOperator = BinaryOperator.ShiftLeft;
+            return true;
+        }
+
+        if (Current.Kind == TokenKind.GreaterThan
+            && Peek(1).Kind == TokenKind.GreaterThan
+            && Current.Position + Current.Text.Length == Peek(1).Position)
+        {
+            Next();
+            Next();
+            binaryOperator = BinaryOperator.ShiftRight;
+            return true;
+        }
+
+        return false;
+    }
+
     private bool TryConsumeSemicolon()
     {
         if (Current.Kind == TokenKind.Semicolon)
@@ -77,6 +103,87 @@ public sealed partial class Parser
 
     private bool IsStatementTerminator(TokenKind kind)
         => kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.CloseBrace or TokenKind.EndOfFile;
+
+    private bool ShouldParseThenBranchAsStatement()
+        => Current.Kind == TokenKind.NewLine
+            || StartsStatementOnlyForm(Current.Kind)
+            || !HasElseBeforeCurrentStatementTerminator();
+
+    private static bool StartsStatementOnlyForm(TokenKind kind)
+        => kind is TokenKind.Return
+            or TokenKind.Break
+            or TokenKind.Continue
+            or TokenKind.If
+            or TokenKind.While
+            or TokenKind.For
+            or TokenKind.Equal
+            or TokenKind.PlusEqual
+            or TokenKind.Let
+            or TokenKind.Var
+            or TokenKind.Mut;
+
+    private bool HasElseBeforeCurrentStatementTerminator()
+    {
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int braceDepth = 0;
+
+        for (int i = _position; i < _tokens.Count; i++)
+        {
+            TokenKind kind = _tokens[i].Kind;
+            switch (kind)
+            {
+                case TokenKind.OpenParen:
+                    parenDepth++;
+                    break;
+                case TokenKind.CloseParen:
+                    if (parenDepth > 0)
+                    {
+                        parenDepth--;
+                    }
+                    break;
+                case TokenKind.OpenBracket:
+                    bracketDepth++;
+                    break;
+                case TokenKind.CloseBracket:
+                    if (bracketDepth > 0)
+                    {
+                        bracketDepth--;
+                    }
+                    break;
+                case TokenKind.OpenBrace:
+                    braceDepth++;
+                    break;
+                case TokenKind.CloseBrace:
+                    if (braceDepth == 0 && parenDepth == 0 && bracketDepth == 0)
+                    {
+                        return false;
+                    }
+
+                    if (braceDepth > 0)
+                    {
+                        braceDepth--;
+                    }
+                    break;
+                case TokenKind.NewLine:
+                case TokenKind.Semicolon:
+                case TokenKind.EndOfFile:
+                    if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0)
+                    {
+                        return false;
+                    }
+                    break;
+                case TokenKind.Else:
+                    if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0)
+                    {
+                        return true;
+                    }
+                    break;
+            }
+        }
+
+        return false;
+    }
 
     private static bool IsTypeNameToken(TokenKind kind)
         => kind == TokenKind.Identifier;

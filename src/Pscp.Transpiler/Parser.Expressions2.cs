@@ -24,16 +24,58 @@ public sealed partial class Parser
             _diagnostics.Add(new Diagnostic("Expected '[' after 'new!'.", Current.Span));
         }
 
-        TypeSyntax type = ParseTypeSyntax(allowSizedArrays: false);
-        if (Current.Kind == TokenKind.OpenBracket)
+        int typeStart = _position;
+        int typeDiagnostics = _diagnostics.Count;
+        TypeSyntax? type = TryParseTypeSyntax(allowSizedArrays: false);
+        if (type is not null && Current.Kind == TokenKind.OpenBracket)
         {
             List<Expression> dimensions = ParseArrayDimensionList();
             return new NewArrayExpression(type, dimensions);
         }
 
+        if (type is not null && Current.Kind == TokenKind.OpenParen)
+        {
+            Expect(TokenKind.OpenParen, "Expected '(' after new expression.");
+            return new NewExpression(type, ParseCallArgumentsTail());
+        }
+
+        if (type is not null && CanStartSpaceArgument(Current.Kind) && LooksLikeExplicitTypeForSpaceSeparatedNew(type))
+        {
+            return new NewExpression(type, ParseSpaceSeparatedArguments());
+        }
+
+        Restore(typeStart, typeDiagnostics);
+        if (CanStartSpaceArgument(Current.Kind))
+        {
+            return new NewExpression(null, ParseSpaceSeparatedArguments());
+        }
+
+        TypeSyntax fallbackType = ParseTypeSyntax(allowSizedArrays: false);
         Expect(TokenKind.OpenParen, "Expected '(' after new expression.");
-        return new NewExpression(type, ParseCallArgumentsTail());
+        return new NewExpression(fallbackType, ParseCallArgumentsTail());
     }
+
+    private IReadOnlyList<ArgumentSyntax> ParseSpaceSeparatedArguments()
+    {
+        List<ArgumentSyntax> arguments = [];
+        while (CanStartSpaceArgument(Current.Kind))
+        {
+            arguments.Add(ParseCallArgument(allowNamed: false, allowComplexExpression: false));
+            SkipSeparators();
+        }
+
+        return arguments;
+    }
+
+    private static bool LooksLikeExplicitTypeForSpaceSeparatedNew(TypeSyntax type)
+        => type switch
+        {
+            NamedTypeSyntax named when named.Name.Length > 0
+                => char.IsUpper(named.Name[0]) || named.Name.Contains('.', StringComparison.Ordinal) || named.TypeArguments.Count > 0,
+            ArrayTypeSyntax => true,
+            NullableTypeSyntax nullable => LooksLikeExplicitTypeForSpaceSeparatedNew(nullable.InnerType),
+            _ => false
+        };
 
     private CollectionExpression ParseCollectionExpression()
     {
@@ -133,6 +175,7 @@ public sealed partial class Parser
     private IReadOnlyList<ArgumentSyntax> ParseCallArgumentsTail()
     {
         List<ArgumentSyntax> arguments = [];
+        SkipSeparators();
         if (Match(TokenKind.CloseParen))
         {
             return arguments;
@@ -140,7 +183,9 @@ public sealed partial class Parser
 
         do
         {
+            SkipSeparators();
             arguments.Add(ParseCallArgument(allowNamed: true, allowComplexExpression: true));
+            SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 
@@ -154,7 +199,9 @@ public sealed partial class Parser
 
         do
         {
+            SkipSeparators();
             arguments.Add(ParseIndexArgument());
+            SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 
@@ -275,7 +322,7 @@ public sealed partial class Parser
 
         while (true)
         {
-            if (Match(TokenKind.OpenParen))
+            if (Current.Kind == TokenKind.OpenParen && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.OpenParen))
             {
                 expression = new CallExpression(expression, ParseCallArgumentsTail(), false);
                 continue;
@@ -337,6 +384,7 @@ public sealed partial class Parser
             or MemberAccessExpression
             or IndexExpression
             or TupleProjectionExpression
+            or WithExpression
             or CallExpression;
 
     private static bool CanStartSpaceArgument(TokenKind kind)

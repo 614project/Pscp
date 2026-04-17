@@ -161,6 +161,8 @@ public enum BinaryOperator
 {
     Add,
     Subtract,
+    ShiftLeft,
+    ShiftRight,
     Multiply,
     Divide,
     Modulo,
@@ -225,12 +227,18 @@ public sealed record TypeDeclaration(
 public abstract record TypeMember;
 
 public sealed record OrderingShorthandMember(
-    string ParameterName,
-    Expression Body) : TypeMember;
+    IReadOnlyList<string> ParameterNames,
+    MethodBody Body) : TypeMember;
 
 public sealed record FieldMember(
     IReadOnlyList<string> Modifiers,
     DeclarationStatement Declaration) : TypeMember;
+
+public sealed record PropertyMember(
+    IReadOnlyList<string> Modifiers,
+    TypeSyntax Type,
+    string Name,
+    MethodBody Body) : TypeMember;
 
 public sealed record MethodMember(
     IReadOnlyList<string> Modifiers,
@@ -238,7 +246,15 @@ public sealed record MethodMember(
     string Name,
     IReadOnlyList<ParameterSyntax> Parameters,
     MethodBody Body,
-    bool IsConstructor) : TypeMember;
+    bool IsConstructor,
+    string? InitializerText = null) : TypeMember;
+
+public sealed record OperatorMember(
+    IReadOnlyList<string> Modifiers,
+    TypeSyntax ReturnType,
+    string OperatorTokenText,
+    IReadOnlyList<ParameterSyntax> Parameters,
+    MethodBody Body) : TypeMember;
 
 public sealed record NestedTypeMember(TypeDeclaration Declaration) : TypeMember;
 
@@ -402,6 +418,8 @@ public sealed record MemberAccessExpression(Expression Receiver, string MemberNa
 
 public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expression> Arguments) : Expression;
 
+public sealed record WithExpression(Expression Receiver, string InitializerText) : Expression;
+
 public sealed record FromEndExpression(Expression Operand) : Expression;
 
 public sealed record SliceExpression(Expression? Start, Expression? End) : Expression;
@@ -468,6 +486,8 @@ public sealed record NamedTypeSyntax(string Name, IReadOnlyList<TypeSyntax> Type
 public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax;
 
 public sealed record ArrayTypeSyntax(TypeSyntax ElementType, int Depth) : TypeSyntax;
+
+public sealed record NullableTypeSyntax(TypeSyntax InnerType) : TypeSyntax;
 
 public sealed record SizedArrayTypeSyntax(TypeSyntax ElementType, IReadOnlyList<Expression> Dimensions) : TypeSyntax;
 
