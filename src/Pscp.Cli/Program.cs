@@ -80,7 +80,7 @@ static class PscpCli
             throw new InvalidOperationException("A PSCP project already exists here. Use `pscp init --force` to overwrite the starter files.");
         }
 
-        await EnsureSdkLayoutAsync(layout, overwriteExisting: force);
+        await EnsureSdkLayoutAsync(layout, overwriteExisting: force, older: false);
         if (force || !File.Exists(sourcePath))
         {
             await File.WriteAllTextAsync(sourcePath, CreateStarterProgram(), Encoding.UTF8);
@@ -109,61 +109,34 @@ static class PscpCli
             Console.WriteLine(line);
         }
 
-        return 1;
+        return HasErrors(result.Diagnostics) ? 1 : 0;
     }
 
     private static async Task<int> TranspileAsync(string[] args)
     {
         SourceResolution source = ResolveSourceArgument(args, "pscp transpile [file.pscp] [-o output.cs] [--print]");
-        string? outputPath = null;
-        bool print = false;
-        string? ns = null;
-        string? className = null;
-
-        for (int i = source.OptionStart; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "-o":
-                case "--output":
-                    outputPath = Path.GetFullPath(args[++i]);
-                    break;
-                case "--print":
-                    print = true;
-                    break;
-                case "--namespace":
-                    ns = args[++i];
-                    break;
-                case "--class-name":
-                    className = args[++i];
-                    break;
-                default:
-                    throw new InvalidOperationException($"Unknown option: {args[i]}");
-            }
-        }
+        BackendOptions options = ParseBackendOptions(args, source.OptionStart, allowOutput: true, allowStdinFile: false);
 
         string sourceText = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
         TranspilationResult result = PscpTranspiler.Transpile(
             sourceText,
-            new TranspilationOptions(
-                ns ?? DefaultNamespace,
-                className ?? MakeSafeClassName(Path.GetFileNameWithoutExtension(source.SourcePath))));
+            CreateTranspilationOptions(source.SourcePath, sourceText, options, suffix: null));
 
-        if (result.Diagnostics.Count > 0)
+        foreach (string line in FormatDiagnostics(result.Diagnostics, sourceText))
         {
-            foreach (string line in FormatDiagnostics(result.Diagnostics, sourceText))
-            {
-                Console.WriteLine(line);
-            }
+            Console.WriteLine(line);
+        }
 
+        if (HasErrors(result.Diagnostics))
+        {
             return 1;
         }
 
-        outputPath ??= Path.ChangeExtension(source.SourcePath, ".g.cs");
+        string outputPath = options.OutputPath ?? Path.ChangeExtension(source.SourcePath, ".g.cs");
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-        await File.WriteAllTextAsync(outputPath, result.CSharpCode, Encoding.UTF8);
+        await File.WriteAllTextAsync(outputPath, result.CSharpCode, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-        if (print)
+        if (options.Print)
         {
             Console.WriteLine(result.CSharpCode);
         }
@@ -184,74 +157,41 @@ static class PscpCli
     private static async Task<int> ExecuteSdkCommandAsync(string[] args, bool runAfterBuild)
     {
         SourceResolution source = ResolveSourceArgument(args, runAfterBuild ? "pscp run [file.pscp]" : "pscp build [file.pscp]");
-        string? stdinFile = null;
-        string? ns = null;
-        string? className = null;
-        string configuration = "Debug";
-
-        for (int i = source.OptionStart; i < args.Length; i++)
-        {
-            switch (args[i])
-            {
-                case "--stdin-file":
-                    stdinFile = Path.GetFullPath(args[++i]);
-                    break;
-                case "-c":
-                case "--configuration":
-                    configuration = args[++i];
-                    break;
-                case "--release":
-                    configuration = "Release";
-                    break;
-                case "--debug":
-                    configuration = "Debug";
-                    break;
-                case "--namespace":
-                    ns = args[++i];
-                    break;
-                case "--class-name":
-                    className = args[++i];
-                    break;
-                default:
-                    throw new InvalidOperationException($"Unknown option: {args[i]}");
-            }
-        }
+        BackendOptions options = ParseBackendOptions(args, source.OptionStart, allowOutput: false, allowStdinFile: true);
 
         string sourceText = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
-        SdkLayout layout = await EnsureSdkLayoutAsync(CreateSdkLayout(source.SourcePath), overwriteExisting: false);
+        SdkLayout layout = await EnsureSdkLayoutAsync(CreateSdkLayout(source.SourcePath), overwriteExisting: false, older: options.Older);
         TranspilationResult result = PscpTranspiler.Transpile(
             sourceText,
-            new TranspilationOptions(
-                ns ?? DefaultNamespace,
-                className ?? MakeSafeClassName(Path.GetFileNameWithoutExtension(source.SourcePath)) + "Program"));
+            CreateTranspilationOptions(source.SourcePath, sourceText, options, suffix: "Program"));
 
-        if (result.Diagnostics.Count > 0)
+        foreach (string line in FormatDiagnostics(result.Diagnostics, sourceText))
         {
-            foreach (string line in FormatDiagnostics(result.Diagnostics, sourceText))
-            {
-                Console.WriteLine(line);
-            }
+            Console.WriteLine(line);
+        }
 
+        if (HasErrors(result.Diagnostics))
+        {
             return 1;
         }
 
-        await File.WriteAllTextAsync(layout.GeneratedProgramPath, result.CSharpCode, Encoding.UTF8);
+        await File.WriteAllTextAsync(layout.GeneratedProgramPath, result.CSharpCode, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         Console.WriteLine($"Generated {layout.GeneratedProgramPath}");
 
         if (!runAfterBuild)
         {
             return await RunDotnetProcessAsync(
-                $"build \"{layout.ProjectPath}\" -nologo -c {configuration}",
+                $"build \"{layout.ProjectPath}\" -nologo -c {options.Configuration}",
                 layout.RootDirectory,
                 stdIn: null);
         }
 
-        string? stdIn = stdinFile is not null
-            ? await File.ReadAllTextAsync(stdinFile, Encoding.UTF8)
+        string? stdIn = options.StdinFile is not null
+            ? await File.ReadAllTextAsync(options.StdinFile, Encoding.UTF8)
             : (Console.IsInputRedirected ? await Console.In.ReadToEndAsync() : null);
 
         return await RunDotnetProcessAsync(
-            $"run --project \"{layout.ProjectPath}\" -nologo -c {configuration}",
+            $"run --project \"{layout.ProjectPath}\" -nologo -c {options.Configuration}",
             layout.RootDirectory,
             stdIn);
     }
@@ -277,7 +217,7 @@ static class PscpCli
         return Task.FromResult(process.ExitCode);
     }
 
-    private static async Task<SdkLayout> EnsureSdkLayoutAsync(SdkLayout layout, bool overwriteExisting)
+    private static async Task<SdkLayout> EnsureSdkLayoutAsync(SdkLayout layout, bool overwriteExisting, bool older)
     {
         Directory.CreateDirectory(layout.RootDirectory);
         Directory.CreateDirectory(layout.SdkDirectory);
@@ -285,17 +225,18 @@ static class PscpCli
         string gitIgnorePath = Path.Combine(layout.SdkDirectory, ".gitignore");
         if (overwriteExisting || !File.Exists(gitIgnorePath))
         {
-            await File.WriteAllTextAsync(gitIgnorePath, "bin/\nobj/\n", Encoding.UTF8);
+            await File.WriteAllTextAsync(gitIgnorePath, "bin/\nobj/\n", new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         }
 
-        if (overwriteExisting || !File.Exists(layout.ProjectPath))
+        string desiredProject = CreateSdkProjectFile(layout, older);
+        if (overwriteExisting || !File.Exists(layout.ProjectPath) || !string.Equals(await File.ReadAllTextAsync(layout.ProjectPath, Encoding.UTF8), desiredProject, StringComparison.Ordinal))
         {
-            await File.WriteAllTextAsync(layout.ProjectPath, CreateSdkProjectFile(layout), Encoding.UTF8);
+            await File.WriteAllTextAsync(layout.ProjectPath, desiredProject, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         }
 
         if (overwriteExisting || !File.Exists(layout.GeneratedProgramPath))
         {
-            await File.WriteAllTextAsync(layout.GeneratedProgramPath, CreateGeneratedPlaceholder(layout), Encoding.UTF8);
+            await File.WriteAllTextAsync(layout.GeneratedProgramPath, CreateGeneratedPlaceholder(layout), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         }
 
         return layout;
@@ -412,7 +353,8 @@ static class PscpCli
         foreach (Diagnostic diagnostic in diagnostics)
         {
             (int line, int column) = GetLineColumn(lineStarts, diagnostic.Span.Start);
-            yield return $"{line + 1}:{column + 1}: {diagnostic.Message}";
+            string severity = diagnostic.Severity == DiagnosticSeverity.Error ? "error" : "warning";
+            yield return $"{line + 1}:{column + 1}: {severity}: {diagnostic.Message}";
         }
     }
 
@@ -442,12 +384,13 @@ static class PscpCli
         return (Math.Max(line, 0), Math.Max(column, 0));
     }
 
-    private static string CreateSdkProjectFile(SdkLayout layout)
+    private static string CreateSdkProjectFile(SdkLayout layout, bool older)
         => $$"""
            <Project Sdk="Microsoft.NET.Sdk">
              <PropertyGroup>
                <OutputType>Exe</OutputType>
-               <TargetFramework>net10.0</TargetFramework>
+               <TargetFramework>{{(older ? "net6.0" : "net10.0")}}</TargetFramework>
+               {{(older ? "<LangVersion>10.0</LangVersion>" : string.Empty)}}
                <ImplicitUsings>enable</ImplicitUsings>
                <Nullable>enable</Nullable>
                <AssemblyName>{{layout.AssemblyName}}</AssemblyName>
@@ -528,7 +471,7 @@ static class PscpCli
 
     private static int ShowVersion()
     {
-        Console.WriteLine("pscp CLI v0.3");
+        Console.WriteLine($"pscp CLI {PscpVersionInfo.ToolVersion} (language {PscpVersionInfo.LanguageVersion})");
         return 0;
     }
 
@@ -549,16 +492,116 @@ static class PscpCli
         Console.WriteLine("Commands:");
         Console.WriteLine("  pscp init [directory] [--force]");
         Console.WriteLine("  pscp check [file.pscp]");
-        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C]");
-        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug]");
-        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug]");
+        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
+        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
+        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
         Console.WriteLine("  pscp lsp");
         Console.WriteLine("  pscp version");
         Console.WriteLine();
         Console.WriteLine("When `file.pscp` is omitted, `main.pscp` in the current directory is used if present.");
+        Console.WriteLine("`--compact` is the default. Use `--verbose` to keep the full helper surface in generated C#.");
     }
 
     private sealed record SourceResolution(string SourcePath, int OptionStart);
     private sealed record SdkLayout(string RootDirectory, string SourcePath, string SdkDirectory, string ProjectPath, string GeneratedProgramPath, string AssemblyName);
     private sealed record ToolInvocation(string FileName, string Arguments, string WorkingDirectory);
+    private sealed record BackendOptions(
+        string? OutputPath,
+        bool Print,
+        string? Namespace,
+        string? ClassName,
+        string Configuration,
+        string? StdinFile,
+        HelperEmissionMode HelperEmission,
+        bool Explain,
+        bool Older);
+
+    private static BackendOptions ParseBackendOptions(string[] args, int startIndex, bool allowOutput, bool allowStdinFile)
+    {
+        string? outputPath = null;
+        bool print = false;
+        string? ns = null;
+        string? className = null;
+        string configuration = "Debug";
+        string? stdinFile = null;
+        HelperEmissionMode helperEmission = HelperEmissionMode.Compact;
+        bool explain = false;
+        bool older = false;
+
+        for (int i = startIndex; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "-o":
+                case "--output":
+                    if (!allowOutput)
+                    {
+                        throw new InvalidOperationException($"Unknown option: {args[i]}");
+                    }
+
+                    outputPath = Path.GetFullPath(args[++i]);
+                    break;
+                case "--print":
+                    if (!allowOutput)
+                    {
+                        throw new InvalidOperationException($"Unknown option: {args[i]}");
+                    }
+
+                    print = true;
+                    break;
+                case "--stdin-file":
+                    if (!allowStdinFile)
+                    {
+                        throw new InvalidOperationException($"Unknown option: {args[i]}");
+                    }
+
+                    stdinFile = Path.GetFullPath(args[++i]);
+                    break;
+                case "-c":
+                case "--configuration":
+                    configuration = args[++i];
+                    break;
+                case "--release":
+                    configuration = "Release";
+                    break;
+                case "--debug":
+                    configuration = "Debug";
+                    break;
+                case "--namespace":
+                    ns = args[++i];
+                    break;
+                case "--class-name":
+                    className = args[++i];
+                    break;
+                case "--compact":
+                    helperEmission = HelperEmissionMode.Compact;
+                    break;
+                case "--verbose":
+                    helperEmission = HelperEmissionMode.Verbose;
+                    break;
+                case "--explain":
+                    explain = true;
+                    break;
+                case "--older":
+                    older = true;
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unknown option: {args[i]}");
+            }
+        }
+
+        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older);
+    }
+
+    private static TranspilationOptions CreateTranspilationOptions(string sourcePath, string sourceText, BackendOptions options, string? suffix)
+        => new(
+            options.Namespace ?? DefaultNamespace,
+            (options.ClassName ?? MakeSafeClassName(Path.GetFileNameWithoutExtension(sourcePath))) + (suffix ?? string.Empty),
+            options.HelperEmission,
+            options.Explain,
+            options.Older,
+            options.Explain ? sourceText : null);
+
+    private static bool HasErrors(IReadOnlyList<Diagnostic> diagnostics)
+        => diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
 }

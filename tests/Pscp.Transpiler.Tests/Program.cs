@@ -74,6 +74,18 @@ internal static class TestRunner
                 "4",
                 "14\n"),
             new(
+                "DefaultRangeStepSemantics",
+                """
+                let forward = [1..3]
+                let descendingDefault = [3..1]
+                let descendingStepped = [3..-1..1]
+                += forward
+                += descendingDefault.Length
+                += descendingStepped
+                """,
+                "",
+                "1 2 3\n0\n3 2 1\n"),
+            new(
                 "HelpersAndDirectApi",
                 """
                 int n =
@@ -477,6 +489,17 @@ internal static class TestRunner
         VerifyPostfixStatementLowering(failures);
         VerifyRuntimeAvoidsDynamicHelpers(failures);
         VerifySemanticDiagnostics(failures);
+        VerifyExplicitStdinArraySpecialization(failures);
+        VerifyCompactAndVerboseHelperEmission(failures);
+        VerifyRangeLoopLoweringSemantics(failures);
+        VerifyDiscardLoopLowering(failures);
+        VerifyShorthandInputAvoidsGenericHelpers(failures);
+        VerifyCompactPrunesStdoutRender(failures);
+        VerifyEmptyMinMaxPolicy(failures);
+        VerifyMathIntrinsicLowering(failures);
+        VerifyRunAndFlushShape(failures);
+        VerifyExplainHeaderEmission(failures);
+        VerifyWarningDiagnostics(failures);
 
         if (failures.Count > 0)
         {
@@ -962,6 +985,289 @@ internal static class TestRunner
             "requires two `out` arguments");
     }
 
+    private static void VerifyExplicitStdinArraySpecialization(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n = 3
+                let xs = stdin.array<int>(n)
+                += xs
+                """),
+            new TranspilationOptions("Pscp.Generated", "ExplicitStdinArraySpecializationProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ExplicitStdinArraySpecialization: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("stdin.arrayInt(n)", StringComparison.Ordinal)
+            || userCode.Contains("stdin.array<int>(n)", StringComparison.Ordinal))
+        {
+            failures.Add($"ExplicitStdinArraySpecialization: expected direct stdin.arrayInt lowering\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyCompactAndVerboseHelperEmission(List<string> failures)
+    {
+        const string source = """
+            int x = 3
+            += x
+            """;
+
+        TranspilationResult compact = PscpTranspiler.Transpile(
+            NormalizeSource(source),
+            new TranspilationOptions("Pscp.Generated", "CompactHelpersProgram", HelperEmissionMode.Compact));
+        TranspilationResult verbose = PscpTranspiler.Transpile(
+            NormalizeSource(source),
+            new TranspilationOptions("Pscp.Generated", "VerboseHelpersProgram", HelperEmissionMode.Verbose));
+
+        if (compact.Diagnostics.Count > 0 || verbose.Diagnostics.Count > 0)
+        {
+            failures.Add($"CompactAndVerboseHelperEmission: unexpected diagnostics\nCompact:\n{FormatDiagnostics(compact.Diagnostics)}\nVerbose:\n{FormatDiagnostics(verbose.Diagnostics)}");
+            return;
+        }
+
+        if (compact.CSharpCode.Contains("public static class __PscpSeq", StringComparison.Ordinal)
+            || !verbose.CSharpCode.Contains("public static class __PscpSeq", StringComparison.Ordinal))
+        {
+            failures.Add($"CompactAndVerboseHelperEmission: expected helper pruning difference\nCompact:\n{compact.CSharpCode}\nVerbose:\n{verbose.CSharpCode}");
+        }
+    }
+
+    private static void VerifyRangeLoopLoweringSemantics(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n = 3
+                mut int total = 0
+                for i in 3..1 {
+                    total += i
+                }
+                for j in 1..n {
+                    total += j
+                }
+                += total
+                """),
+            new TranspilationOptions("Pscp.Generated", "RangeLoopLoweringSemanticsProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"RangeLoopLoweringSemantics: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (userCode.Contains("step", StringComparison.OrdinalIgnoreCase)
+            || userCode.Contains("Range step cannot be zero.", StringComparison.Ordinal)
+            || userCode.Contains("? i <=", StringComparison.Ordinal)
+            || userCode.Contains("? j <=", StringComparison.Ordinal))
+        {
+            failures.Add($"RangeLoopLoweringSemantics: expected direct default-step for-loops without step guards\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyDiscardLoopLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                let values = [0..<4 -> _ do 1]
+                += values
+                """),
+            new TranspilationOptions("Pscp.Generated", "DiscardLoopLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"DiscardLoopLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (userCode.Contains("_ =", StringComparison.Ordinal))
+        {
+            failures.Add($"DiscardLoopLowering: expected synthetic loop names instead of per-iteration discard assignments\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyShorthandInputAvoidsGenericHelpers(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n =
+                long[n] a =
+                += a
+                """),
+            new TranspilationOptions("Pscp.Generated", "ShorthandInputAvoidsGenericHelpersProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ShorthandInputAvoidsGenericHelpers: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (result.CSharpCode.Contains("stdin.read<", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("stdin.array<", StringComparison.Ordinal))
+        {
+            failures.Add($"ShorthandInputAvoidsGenericHelpers: expected direct typed scanner lowering only\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyCompactPrunesStdoutRender(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int x = 3
+                += x
+                """),
+            new TranspilationOptions("Pscp.Generated", "CompactPrunesStdoutRenderProgram", HelperEmissionMode.Compact));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"CompactPrunesStdoutRender: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal))
+        {
+            failures.Add($"CompactPrunesStdoutRender: expected scalar-only output to avoid generic render helpers\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyEmptyMinMaxPolicy(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int[] values = []
+                let answer = min(values)
+                += answer
+                """),
+            new TranspilationOptions("Pscp.Generated", "EmptyMinMaxPolicyProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"EmptyMinMaxPolicy: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (!result.CSharpCode.Contains("throw new InvalidOperationException(\"Sequence contains no elements.\")", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("return default!", StringComparison.Ordinal))
+        {
+            failures.Add($"EmptyMinMaxPolicy: expected explicit empty-sequence failure instead of default!\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyMathIntrinsicLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                double x = 9
+                += sqrt(x)
+                += abs(-3)
+                """),
+            new TranspilationOptions("Pscp.Generated", "MathIntrinsicLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"MathIntrinsicLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("System.Math.Sqrt(x)", StringComparison.Ordinal)
+            || !userCode.Contains("System.Math.Abs((-3))", StringComparison.Ordinal))
+        {
+            failures.Add($"MathIntrinsicLowering: expected direct System.Math intrinsic lowering\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyRunAndFlushShape(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                += 1
+                """),
+            new TranspilationOptions("Pscp.Generated", "RunAndFlushShapeProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"RunAndFlushShape: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("public static void Main()", StringComparison.Ordinal)
+            || !userCode.Contains("Run();", StringComparison.Ordinal)
+            || !userCode.Contains("stdout.flush();", StringComparison.Ordinal)
+            || !userCode.Contains("private static void Run()", StringComparison.Ordinal)
+            || userCode.Contains("finally", StringComparison.Ordinal))
+        {
+            failures.Add($"RunAndFlushShape: expected Run()+trailing flush shape\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyExplainHeaderEmission(List<string> failures)
+    {
+        const string source = """
+            // ignored
+            int x = 3
+            += x
+            """;
+
+        string normalized = NormalizeSource(source);
+        TranspilationResult result = PscpTranspiler.Transpile(
+            normalized,
+            new TranspilationOptions("Pscp.Generated", "ExplainHeaderProgram", HelperEmissionMode.Compact, Explain: true, Older: false, ExplainSource: normalized));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ExplainHeaderEmission: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (!result.CSharpCode.Contains("PSCP source:", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("int x = 3", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("// ignored", StringComparison.Ordinal))
+        {
+            failures.Add($"ExplainHeaderEmission: expected stripped PSCP comment header\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyWarningDiagnostics(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                string? maybe = null
+                string text = maybe
+                mut int base = 1
+                += text
+                """),
+            new TranspilationOptions("Pscp.Generated", "WarningDiagnosticsProgram"));
+
+        if (result.Diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Warning))
+        {
+            failures.Add("WarningDiagnostics: expected warning diagnostics.");
+            return;
+        }
+
+        if (!result.Diagnostics.Any(diagnostic => diagnostic.Message.Contains("nullable", StringComparison.OrdinalIgnoreCase))
+            || !result.Diagnostics.Any(diagnostic => diagnostic.Message.Contains("reserved C# keyword", StringComparison.OrdinalIgnoreCase)))
+        {
+            failures.Add($"WarningDiagnostics: expected nullable and reserved-keyword warnings\n{FormatDiagnostics(result.Diagnostics)}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -1000,8 +1306,22 @@ internal static class TestRunner
 
     private static string GetUserCodePortion(string generatedCode)
     {
-        const string runtimeMarker = "public static class __PscpArray";
-        int index = generatedCode.IndexOf(runtimeMarker, StringComparison.Ordinal);
+        string[] runtimeMarkers =
+        [
+            "public static class __PscpArray",
+            "public static class __PscpThunk",
+            "public static class __PscpSeq",
+            "public sealed class __PscpStdin",
+            "public sealed class __PscpStdout",
+            "public static class __PscpRender",
+        ];
+
+        int index = runtimeMarkers
+            .Select(marker => generatedCode.IndexOf(marker, StringComparison.Ordinal))
+            .Where(position => position >= 0)
+            .DefaultIfEmpty(-1)
+            .Min();
+
         return index >= 0 ? generatedCode[..index] : generatedCode;
     }
 

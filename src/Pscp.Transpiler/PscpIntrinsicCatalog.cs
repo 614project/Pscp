@@ -7,6 +7,7 @@ internal static class PscpIntrinsicCatalog
         "sum", "sumBy", "min", "max", "minBy", "maxBy",
         "count", "any", "all", "find", "findIndex", "findLastIndex",
         "sort", "sortBy", "sortWith", "distinct", "reverse", "copy",
+        "abs", "sqrt",
         "groupCount", "freq", "index", "chmin", "chmax"
     };
 
@@ -20,6 +21,18 @@ internal static class PscpIntrinsicCatalog
     public static readonly IReadOnlySet<string> GlobalValues = new HashSet<string>(StringComparer.Ordinal)
     {
         "stdin", "stdout", "Array"
+    };
+
+    public static readonly IReadOnlySet<string> CSharpReservedKeywords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked", "class",
+        "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
+        "explicit", "extern", "false", "finally", "fixed", "float", "for", "foreach", "goto", "if",
+        "implicit", "in", "int", "interface", "internal", "is", "lock", "long", "namespace", "new",
+        "null", "object", "operator", "out", "override", "params", "private", "protected", "public",
+        "readonly", "record", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc",
+        "static", "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint",
+        "ulong", "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while"
     };
 
     public static readonly IReadOnlySet<string> StrictIntrinsicReceivers = new HashSet<string>(StringComparer.Ordinal)
@@ -75,4 +88,8 @@ internal static class PscpIntrinsicCatalog
 
     public static bool TryGetKnownMembers(string receiverName, out IReadOnlySet<string>? members)
         => KnownMembers.TryGetValue(receiverName, out members);
+
+    public static bool IsProblematicDeclarationName(string name)
+        => CSharpReservedKeywords.Contains(name)
+            || GlobalValues.Contains(name);
 }

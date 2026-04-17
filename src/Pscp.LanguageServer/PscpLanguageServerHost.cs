@@ -205,7 +205,7 @@ public static class PscpLanguageServerHost
                 ["serverInfo"] = new JsonObject
                 {
                     ["name"] = "pscp-language-server",
-                    ["version"] = "0.4.0",
+                    ["version"] = PscpVersionInfo.ToolVersion,
                 },
                 ["capabilities"] = new JsonObject
                 {

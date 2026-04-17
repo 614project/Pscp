@@ -209,7 +209,7 @@ internal static class PscpSemanticAnalyzer
 
         private void AnalyzeType(TypeDeclaration declaration, Scope parent)
         {
-            _tracker.Take(declaration.Name);
+            WarnOnDeclarationName(declaration.Name, _tracker.Take(declaration.Name), "type");
             Scope scope = new(parent);
             TypeSyntax currentType = TypeName(declaration.Name);
             if (TryResolveType(declaration.Name, out TypeInfo? typeInfo) && typeInfo is not null)
@@ -250,6 +250,7 @@ internal static class PscpSemanticAnalyzer
         {
             ConsumeType(function.ReturnType);
             TextSpan functionSpan = _tracker.Take(function.Name);
+            WarnOnDeclarationName(function.Name, functionSpan, "function");
             Scope scope = new(parent);
             foreach (ParameterSyntax parameter in function.Parameters)
             {
@@ -267,6 +268,11 @@ internal static class PscpSemanticAnalyzer
         {
             if (!method.IsConstructor && method.ReturnType is not null) ConsumeType(method.ReturnType);
             TextSpan methodSpan = _tracker.Take(method.Name);
+            if (!method.IsConstructor)
+            {
+                WarnOnDeclarationName(method.Name, methodSpan, "method");
+            }
+
             Scope scope = new(parent);
             if (thisType is not null)
             {
@@ -293,6 +299,7 @@ internal static class PscpSemanticAnalyzer
         {
             ConsumeType(property.Type);
             TextSpan propertySpan = _tracker.Take(property.Name);
+            WarnOnDeclarationName(property.Name, propertySpan, "property");
             Scope scope = new(parent);
             scope.DeclareValue("this", new Symbol(SymbolKind.Local, thisType, false));
             scope.DeclareValue("base", new Symbol(SymbolKind.Local, thisType, false));
@@ -438,7 +445,14 @@ internal static class PscpSemanticAnalyzer
         private void AnalyzeDeclaration(DeclarationStatement declaration, Scope scope)
         {
             ConsumeDeclarationSignature(declaration);
-            if (declaration.Initializer is not null) AnalyzeExpression(declaration.Initializer, scope);
+            if (declaration.Initializer is not null)
+            {
+                AnalyzeExpression(declaration.Initializer, scope);
+                if (declaration.ExplicitType is not null)
+                {
+                    WarnIfNullabilityMismatch(declaration.Initializer, Normalize(declaration.ExplicitType), default);
+                }
+            }
 
             if (declaration.Initializer is TargetTypedNewArrayExpression targetTypedNewArray)
             {
@@ -599,6 +613,7 @@ internal static class PscpSemanticAnalyzer
             TypeSyntax? targetType = GetType(assignment.Target) ?? InferAssignmentTargetType(assignment.Target, scope);
             AnalyzeAssignmentTarget(assignment.Target, scope, IsKnownDataStructureMutationTarget(targetType, assignment.Operator));
             AnalyzeExpression(assignment.Value, scope);
+            WarnIfNullabilityMismatch(assignment.Value, Normalize(targetType), default);
 
             if (assignment.Value is TargetTypedNewArrayExpression targetTypedNewArray)
             {
@@ -797,6 +812,11 @@ internal static class PscpSemanticAnalyzer
             bool hasTypeLikeReceiver = TryGetTypeLikeReceiverName(member.Receiver, scope, out string? typeLikeReceiverName);
             TypeSyntax? receiverType = hasTypeLikeReceiver ? TypeName(typeLikeReceiverName!) : AnalyzeExpression(member.Receiver, scope);
             TypeSyntax? effectiveReceiverType = UnwrapNullable(receiverType);
+            if (receiverType is NullableTypeSyntax)
+            {
+                Warning($"Possible null dereference on nullable receiver when accessing `{memberName}`.", span);
+            }
+
             string receiverName = hasTypeLikeReceiver
                 ? typeLikeReceiverName!
                 : member.Receiver is IdentifierExpression id ? id.Name : (effectiveReceiverType as NamedTypeSyntax)?.Name ?? string.Empty;
@@ -872,6 +892,11 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzeIndex(IndexExpression index, Scope scope)
         {
             TypeSyntax? receiverType = AnalyzeExpression(index.Receiver, scope);
+            if (receiverType is NullableTypeSyntax)
+            {
+                Warning("Possible null dereference on nullable receiver when indexing.", default);
+            }
+
             foreach (Expression argument in index.Arguments) AnalyzeExpression(argument, scope);
             if (index.Arguments.Any(argument => argument is SliceExpression))
             {
@@ -1376,7 +1401,7 @@ internal static class PscpSemanticAnalyzer
             switch (target)
             {
                 case NameTarget nameTarget:
-                    _tracker.Take(nameTarget.Name);
+                    WarnOnDeclarationName(nameTarget.Name, _tracker.Take(nameTarget.Name), "binding");
                     break;
                 case DiscardTarget:
                     _tracker.Take("_");
@@ -1591,7 +1616,57 @@ internal static class PscpSemanticAnalyzer
                 yield return match.Groups[1].Value;
             }
         }
-        private void Error(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span));
+        private void WarnOnDeclarationName(string name, TextSpan span, string role)
+        {
+            if (PscpIntrinsicCatalog.CSharpReservedKeywords.Contains(name))
+            {
+                Warning($"`{name}` is also a reserved C# keyword. Rename it or expect escaping in generated C#.", span);
+            }
+
+            if (PscpIntrinsicCatalog.GlobalValues.Contains(name))
+            {
+                Warning($"`{name}` shadows a PSCP intrinsic {role} name.", span);
+            }
+        }
+
+        private void WarnIfNullabilityMismatch(Expression expression, TypeSyntax? targetType, TextSpan span)
+        {
+            if (targetType is null || !IsNonNullableReferenceType(targetType))
+            {
+                return;
+            }
+
+            if (expression is LiteralExpression { Kind: LiteralKind.Null })
+            {
+                Warning($"Assigning `null` to non-nullable `{DisplayType(targetType)}` may trigger nullable warnings in generated C#.", span);
+                return;
+            }
+
+            TypeSyntax? sourceType = GetType(expression);
+            if (sourceType is NullableTypeSyntax nullable && IsNonNullableReferenceType(nullable.InnerType) && IsNonNullableReferenceType(targetType))
+            {
+                Warning($"Assigning nullable `{DisplayType(sourceType)}` to non-nullable `{DisplayType(targetType)}` may trigger nullable warnings in generated C#.", span);
+            }
+        }
+
+        private bool IsNonNullableReferenceType(TypeSyntax? type)
+        {
+            if (type is null || type is NullableTypeSyntax)
+            {
+                return false;
+            }
+
+            TypeSyntax normalized = Normalize(type) ?? type;
+            return normalized switch
+            {
+                ArrayTypeSyntax => true,
+                NamedTypeSyntax named => !IsValueTypeLike(named) && named.Name != "void",
+                _ => false,
+            };
+        }
+
+        private void Error(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Error));
+        private void Warning(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Warning));
     }
 }
 

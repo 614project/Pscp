@@ -28,8 +28,23 @@ internal sealed partial class PscpAnalyzer
         Scope globalScope = state.CreateScope(null, 0, snapshot.Text.Length);
         InitializeIntrinsics(state, globalScope);
         AnalyzeStatements(state, globalScope, 0, tokens.Count - 1, null, topLevel: true, loopDepth: 0);
+        AddTranspilerWarnings(state, snapshot.Text);
         AddDefaultTokenClassifications(state);
         return state.Build();
+    }
+
+    private static void AddTranspilerWarnings(AnalyzerState state, string text)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(text);
+        foreach (Diagnostic diagnostic in result.Diagnostics)
+        {
+            if (diagnostic.Severity == DiagnosticSeverity.Error)
+            {
+                continue;
+            }
+
+            state.AddDiagnostic("PSCP3001", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Warning);
+        }
     }
 
     private void InitializeIntrinsics(AnalyzerState state, Scope globalScope)

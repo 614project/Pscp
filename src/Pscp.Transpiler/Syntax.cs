@@ -101,11 +101,33 @@ public sealed record Token(TokenKind Kind, string Text, int Position)
     public TextSpan Span => new(Position, Text.Length);
 }
 
-public sealed record Diagnostic(string Message, TextSpan Span);
+public enum DiagnosticSeverity
+{
+    Warning,
+    Error,
+}
+
+public enum HelperEmissionMode
+{
+    Compact,
+    Verbose,
+}
+
+public static class PscpVersionInfo
+{
+    public const string LanguageVersion = "0.4";
+    public const string ToolVersion = "0.4.1";
+}
+
+public sealed record Diagnostic(string Message, TextSpan Span, DiagnosticSeverity Severity = DiagnosticSeverity.Error);
 
 public sealed record TranspilationOptions(
     string Namespace = "Pscp.Generated",
-    string ClassName = "GeneratedProgram");
+    string ClassName = "GeneratedProgram",
+    HelperEmissionMode HelperEmission = HelperEmissionMode.Compact,
+    bool Explain = false,
+    bool Older = false,
+    string? ExplainSource = null);
 
 public sealed record TranspilationResult(
     string Source,
@@ -113,7 +135,7 @@ public sealed record TranspilationResult(
     string CSharpCode,
     IReadOnlyList<Diagnostic> Diagnostics)
 {
-    public bool Success => Diagnostics.Count == 0;
+    public bool Success => Diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Error);
 }
 
 public enum MutabilityKind

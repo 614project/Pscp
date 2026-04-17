@@ -695,6 +695,8 @@ internal sealed partial class PscpAnalyzer
             "sum" or "min" or "max" => InferFirstArgumentElementType(state, scope, openParen),
             "find" or "minBy" or "maxBy" => InferFirstArgumentElementType(state, scope, openParen),
             "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" => InferFirstArgumentMaterializedType(state, scope, openParen),
+            "abs" => InferFirstArgumentType(state, scope, openParen),
+            "sqrt" => "double",
             "groupCount" or "freq" or "index" => InferDictionaryTypeFromFirstArgument(state, scope, openParen),
             _ => null,
         };
@@ -812,6 +814,16 @@ internal sealed partial class PscpAnalyzer
     {
         string? elementType = InferFirstArgumentElementType(state, scope, openParen);
         return string.IsNullOrWhiteSpace(elementType) ? null : $"{elementType}[]";
+    }
+
+    private string? InferFirstArgumentType(AnalyzerState state, Scope scope, int openParen)
+    {
+        if (!TryReadFirstArgumentBounds(state.Tokens, openParen, out int argumentStart, out int argumentEnd))
+        {
+            return null;
+        }
+
+        return InferExpressionType(state, scope, argumentStart, argumentEnd);
     }
 
     private string? InferDictionaryTypeFromFirstArgument(AnalyzerState state, Scope scope, int openParen)
