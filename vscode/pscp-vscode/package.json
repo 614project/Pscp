@@ -1,0 +1,69 @@
+{
+  "name": "pscp-vscode",
+  "displayName": "PSCP",
+  "description": "VS Code support for the PSCP programming language.",
+  "version": "0.4.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "pscp",
+    "competitive-programming",
+    "language-server"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onLanguage:pscp",
+    "onCommand:pscp.restartLanguageServer"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pscp.restartLanguageServer",
+        "title": "PSCP: Restart Language Server"
+      }
+    ],
+    "languages": [
+      {
+        "id": "pscp",
+        "aliases": [
+          "PSCP",
+          "pscp"
+        ],
+        "extensions": [
+          ".pscp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pscp",
+        "scopeName": "source.pscp",
+        "path": "./syntaxes/pscp.tmGrammar.json"
+      }
+    ],
+    "configuration": {
+      "title": "PSCP",
+      "properties": {
+        "pscp.sdkPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to an installed `pscp.exe` or to the PSCP installation directory."
+        },
+        "pscp.languageServerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional direct path to `Pscp.LanguageServer.exe` or `Pscp.LanguageServer.dll`."
+        }
+      }
+    }
+  }
+}

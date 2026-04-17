@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pscp.Cli/Pscp.Cli.csproj" />
+    <Project Path="src/Pscp.LanguageServer/Pscp.LanguageServer.csproj" />
+    <Project Path="src/Pscp.Transpiler/Pscp.Transpiler.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pscp.Transpiler.Tests/Pscp.Transpiler.Tests.csproj" />
+  </Folder>
+</Solution>

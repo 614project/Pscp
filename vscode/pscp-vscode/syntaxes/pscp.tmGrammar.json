@@ -1,0 +1,207 @@
+{
+  "scopeName": "source.pscp",
+  "name": "PSCP",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#section-labels"
+    },
+    {
+      "include": "#modifiers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.pscp",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.pscp",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.interpolated.double.pscp",
+          "begin": "\\$\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.pscp"
+            }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.pscp"
+            }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.pscp",
+              "match": "\\\\.|\\{\\{|\\}\\}"
+            },
+            {
+              "name": "meta.interpolation.pscp",
+              "begin": "\\{",
+              "beginCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.begin.pscp"
+                }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": {
+                  "name": "punctuation.section.interpolation.end.pscp"
+                }
+              },
+              "patterns": [
+                {
+                  "include": "#comments"
+                },
+                {
+                  "include": "#strings"
+                },
+                {
+                  "include": "#numbers"
+                },
+                {
+                  "include": "#section-labels"
+                },
+                {
+                  "include": "#modifiers"
+                },
+                {
+                  "include": "#keywords"
+                },
+                {
+                  "include": "#types"
+                },
+                {
+                  "include": "#functions"
+                },
+                {
+                  "include": "#operators"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.pscp",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pscp",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.pscp",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pscp",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.pscp",
+          "match": "\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[mMlL]?\\b"
+        }
+      ]
+    },
+    "section-labels": {
+      "patterns": [
+        {
+          "name": "keyword.other.section-label.pscp",
+          "match": "\\b(?:public|private|protected|internal)\\s*:"
+        }
+      ]
+    },
+    "modifiers": {
+      "patterns": [
+        {
+          "name": "storage.modifier.access.pscp",
+          "match": "\\b(?:public|private|protected|internal)\\b(?!\\s*:)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.pscp",
+          "match": "\\b(?:let|var|mut|rec|if|then|else|for|in|do|while|break|continue|return|and|or|xor|not|where|new|match|when|class|struct|record|namespace|using|ref|out|is|this|base|switch|operator)\\b"
+        },
+        {
+          "name": "constant.language.pscp",
+          "match": "\\b(?:true|false|null)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.pscp",
+          "match": "\\b(?:int|long|double|decimal|bool|char|string|void|List|LinkedList|Queue|Stack|HashSet|Dictionary|PriorityQueue|SortedSet|IEnumerable|IComparable|Comparer|Array)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.intrinsic.pscp",
+          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|groupCount|freq|index|chmin|chmax)\\b"
+        },
+        {
+          "name": "entity.name.function.pscp",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.pscp",
+          "match": "(?<=\\.)\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pscp",
+          "match": "<=>|\\.\\.<|\\.\\.=|\\.\\.|:=|=>|->|\\|>|<\\||&&|\\|\\||==|!=|<=|>=|\\+\\+|--|\\+=|-=|\\*=|/=|%=|[=+\\-*/%!^~?:<>.]"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,921 @@
+namespace Pscp.Transpiler;
+
+internal sealed partial class CSharpEmitter
+{
+    private readonly TranspilationOptions _options;
+    private readonly SemanticAnalysisResult? _semantic;
+    private readonly CodeWriter _writer = new();
+    private readonly Stack<string> _currentTypeStack = new();
+    private int _temporaryId;
+
+    public CSharpEmitter(TranspilationOptions options, SemanticAnalysisResult? semantic = null)
+    {
+        _options = options;
+        _semantic = semantic;
+    }
+
+    public string Emit(PscpProgram program)
+    {
+        foreach (string usingLine in CollectUsings(program))
+        {
+            _writer.WriteLine(usingLine);
+        }
+
+        _writer.WriteLine();
+        _writer.WriteLine($"namespace {program.NamespaceName ?? _options.Namespace};");
+        _writer.WriteLine();
+
+        foreach (TypeDeclaration type in program.Types)
+        {
+            EmitTypeDeclaration(type);
+            _writer.WriteLine();
+        }
+
+        _writer.WriteLine($"public static class {_options.ClassName}");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine("private static readonly __PscpStdin stdin = new();");
+        _writer.WriteLine("private static readonly __PscpStdout stdout = new();");
+        _writer.WriteLine();
+
+        foreach (FunctionDeclaration function in program.Functions)
+        {
+            EmitFunction(function, includeAccessibility: true, isStatic: true);
+            _writer.WriteLine();
+        }
+
+        EmitMain(program.GlobalStatements);
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        _writer.WriteLine();
+        EmitRuntimeHelpers();
+        return _writer.ToString();
+    }
+
+    private static IEnumerable<string> CollectUsings(PscpProgram program)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        string[] defaults =
+        [
+            "using System;",
+            "using System.Collections.Generic;",
+            "using System.Globalization;",
+            "using System.IO;",
+            "using System.Linq;",
+            "using System.Text;",
+        ];
+
+        foreach (string line in defaults)
+        {
+            if (seen.Add(line))
+            {
+                yield return line;
+            }
+        }
+
+        foreach (UsingDirective directive in program.Usings)
+        {
+            string text = directive.Text.TrimEnd();
+            if (!text.EndsWith(';'))
+            {
+                text += ";";
+            }
+
+            if (seen.Add(text))
+            {
+                yield return text;
+            }
+        }
+    }
+
+    private void EmitTypeDeclaration(TypeDeclaration declaration)
+    {
+        _currentTypeStack.Push(declaration.Name);
+        if (!declaration.HasBody)
+        {
+            string header = GetEmittedTypeHeader(declaration);
+            _writer.WriteLine(header.EndsWith(";", StringComparison.Ordinal)
+                ? header
+                : header + ";");
+            _currentTypeStack.Pop();
+            return;
+        }
+
+        _writer.WriteLine(GetEmittedTypeHeader(declaration));
+        _writer.WriteLine("{");
+        _writer.Indent();
+        foreach (TypeMember member in declaration.Members)
+        {
+            EmitTypeMember(member);
+        }
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        _currentTypeStack.Pop();
+    }
+
+    private void EmitTypeMember(TypeMember member)
+    {
+        switch (member)
+        {
+            case NestedTypeMember nested:
+                EmitTypeDeclaration(nested.Declaration);
+                break;
+            case FieldMember field:
+                EmitDeclaration(field.Declaration, isField: true, modifiers: field.Modifiers);
+                break;
+            case MethodMember method:
+                EmitMethodMember(method);
+                break;
+            case OrderingShorthandMember ordering:
+                EmitOrderingShorthandMember(ordering);
+                break;
+        }
+
+        _writer.WriteLine();
+    }
+
+    private void EmitOrderingShorthandMember(OrderingShorthandMember ordering)
+        => _writer.WriteLine($"public int CompareTo({GetCurrentDeclaringTypeName()} {ordering.ParameterName}) => {EmitExpression(ordering.Body)};");
+
+    private void EmitMethodMember(MethodMember method)
+    {
+        string modifiers = method.Modifiers.Count == 0 ? "public " : string.Join(" ", method.Modifiers) + " ";
+        string parameters = string.Join(", ", method.Parameters.Select(EmitParameter));
+        string signature = method.IsConstructor
+            ? $"{modifiers}{method.Name}({parameters})"
+            : $"{modifiers}{EmitType(method.ReturnType!)} {method.Name}({parameters})";
+
+        switch (method.Body)
+        {
+            case ExpressionMethodBody expressionBody:
+                _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                break;
+            case BlockMethodBody blockBody:
+                _writer.WriteLine(signature);
+                _writer.WriteLine("{");
+                _writer.Indent();
+                EmitBlockContents(blockBody.Block, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType)));
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                break;
+        }
+    }
+
+    private void EmitFunction(FunctionDeclaration function, bool includeAccessibility, bool isStatic)
+    {
+        string parameters = string.Join(", ", function.Parameters.Select(EmitParameter));
+        string prefix = includeAccessibility ? "public " : string.Empty;
+        if (isStatic)
+        {
+            prefix += "static ";
+        }
+
+        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}({parameters})");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        EmitBlockContents(function.Body, GetIsVoid(function.ReturnType));
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private void EmitMain(IReadOnlyList<Statement> statements)
+    {
+        _writer.WriteLine("public static void Main()");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        EmitBlockContents(new BlockStatement(statements), isVoidLike: true);
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private void EmitBlockContents(BlockStatement block, bool isVoidLike)
+    {
+        Expression? implicitReturn = GetImplicitReturnExpression(block);
+        int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
+
+        for (int i = 0; i < regularCount; i++)
+        {
+            EmitStatement(block.Statements[i]);
+        }
+
+        if (implicitReturn is not null)
+        {
+            if (isVoidLike)
+            {
+                _writer.WriteLine($"{EmitExpression(implicitReturn)};");
+            }
+            else
+            {
+                _writer.WriteLine($"return {EmitExpression(implicitReturn)};");
+            }
+        }
+        else if (!isVoidLike && !ContainsExplicitReturn(block))
+        {
+            _writer.WriteLine("return default!;");
+        }
+    }
+
+    private void EmitStatement(Statement statement)
+    {
+        switch (statement)
+        {
+            case BlockStatement block:
+                _writer.WriteLine("{");
+                _writer.Indent();
+                EmitBlockContents(block, isVoidLike: true);
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                break;
+            case DeclarationStatement declaration:
+                EmitDeclaration(declaration, isField: false, modifiers: null);
+                break;
+            case ExpressionStatement expressionStatement:
+                _writer.WriteLine(expressionStatement.Expression is AssignmentExpression assignmentExpression
+                    ? $"{EmitStatementAssignmentExpression(assignmentExpression)};"
+                    : $"{EmitExpression(expressionStatement.Expression)};");
+                break;
+            case AssignmentStatement assignment:
+                EmitAssignment(assignment);
+                break;
+            case OutputStatement output:
+                if (!TryEmitLoweredOutput(output))
+                {
+                    _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({EmitExpression(output.Expression)});");
+                }
+                break;
+            case IfStatement ifStatement:
+                EmitIfStatement(ifStatement);
+                break;
+            case WhileStatement whileStatement:
+                _writer.WriteLine($"while ({EmitExpression(whileStatement.Condition)})");
+                EmitEmbeddedStatement(whileStatement.Body);
+                break;
+            case ForInStatement forIn:
+                EmitForInStatement(forIn);
+                break;
+            case CStyleForStatement cStyleFor:
+                _writer.WriteLine($"for ({cStyleFor.HeaderText})");
+                EmitEmbeddedStatement(cStyleFor.Body);
+                break;
+            case FastForStatement fastFor:
+                EmitFastForStatement(fastFor);
+                break;
+            case ReturnStatement returnStatement:
+                _writer.WriteLine(returnStatement.Expression is null
+                    ? "return;"
+                    : $"return {EmitExpression(returnStatement.Expression)};");
+                break;
+            case BreakStatement:
+                _writer.WriteLine("break;");
+                break;
+            case ContinueStatement:
+                _writer.WriteLine("continue;");
+                break;
+            case LocalFunctionStatement localFunction:
+                EmitFunction(localFunction.Function, includeAccessibility: false, isStatic: false);
+                break;
+        }
+    }
+
+    private void EmitEmbeddedStatement(Statement statement)
+    {
+        if (statement is BlockStatement block)
+        {
+            EmitStatement(block);
+            return;
+        }
+
+        _writer.WriteLine("{");
+        _writer.Indent();
+        EmitStatement(statement);
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private void EmitDeclaration(DeclarationStatement declaration, bool isField, IReadOnlyList<string>? modifiers)
+    {
+        string prefix = modifiers is { Count: > 0 } ? string.Join(" ", modifiers) + " " : string.Empty;
+
+        if (declaration.IsInputShorthand)
+        {
+            if (isField)
+            {
+                _writer.WriteLine($"{prefix}// input shorthand is not supported for fields");
+            }
+            else
+            {
+                EmitInputDeclaration(declaration);
+            }
+            return;
+        }
+
+        if (isField)
+        {
+            EmitFieldDeclaration(prefix, declaration);
+            return;
+        }
+
+        if (declaration.Targets.Count == 1 && declaration.Targets[0] is TupleTarget tupleTarget)
+        {
+            string initializer = declaration.Initializer is null ? "default!" : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+            _writer.WriteLine($"var {EmitBindingPattern(tupleTarget)} = {initializer};");
+            return;
+        }
+
+        if (declaration.Targets.Count > 1)
+        {
+            EmitMultiDeclaration(declaration);
+            return;
+        }
+
+        BindingTarget target = declaration.Targets[0];
+        if (target is DiscardTarget)
+        {
+            if (declaration.Initializer is not null)
+            {
+                _writer.WriteLine($"_ = {EmitExpression(declaration.Initializer, declaration.ExplicitType)};");
+            }
+
+            return;
+        }
+
+        string name = EmitBindingPattern(target);
+        if (declaration.ExplicitType is SizedArrayTypeSyntax sizedType && declaration.Initializer is null)
+        {
+            EmitSizedArrayDeclaration(name, sizedType);
+            return;
+        }
+
+        if (declaration.Initializer is not null
+            && TryEmitLoweredDeclarationInitializer(declaration, name))
+        {
+            return;
+        }
+
+        string typeText = declaration.ExplicitType is null ? "var" : EmitType(NormalizeSizedType(declaration.ExplicitType));
+        string initializerText = declaration.Initializer is null
+            ? EmitImplicitInitializer(declaration.ExplicitType)
+            : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+        _writer.WriteLine($"{typeText} {name} = {initializerText};");
+    }
+
+    private void EmitFieldDeclaration(string prefix, DeclarationStatement declaration)
+    {
+        if (declaration.Targets.Count != 1 || declaration.Targets[0] is not NameTarget and not DiscardTarget)
+        {
+            string comment = declaration.Initializer is null
+                ? "unsupported field declaration"
+                : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+            _writer.WriteLine($"{prefix}// {comment}");
+            return;
+        }
+
+        if (declaration.Targets[0] is DiscardTarget)
+        {
+            return;
+        }
+
+        string name = EmitBindingPattern(declaration.Targets[0]);
+        string typeText = declaration.ExplicitType is null ? "object" : EmitType(NormalizeSizedType(declaration.ExplicitType));
+        string initializer = declaration.Initializer is null
+            ? EmitImplicitInitializer(declaration.ExplicitType)
+            : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+
+        if (declaration.ExplicitType is SizedArrayTypeSyntax sizedType && declaration.Initializer is null)
+        {
+            initializer = EmitSizedArrayCreationExpression(sizedType);
+            typeText = EmitType(new ArrayTypeSyntax(sizedType.ElementType, sizedType.Dimensions.Count));
+        }
+
+        _writer.WriteLine($"{prefix}{typeText} {name} = {initializer};");
+    }
+
+    private string EmitImplicitInitializer(TypeSyntax? explicitType)
+    {
+        if (explicitType is NamedTypeSyntax named && IsKnownAutoConstructType(named))
+        {
+            return "new()";
+        }
+
+        return "default!";
+    }
+
+    private bool TryEmitLoweredDeclarationInitializer(DeclarationStatement declaration, string name)
+    {
+        if (declaration.Initializer is null)
+        {
+            return false;
+        }
+
+        TypeSyntax? declaredType = NormalizeSizedTypeOrNull(declaration.ExplicitType ?? _semantic?.GetExpressionType(declaration.Initializer));
+        if (declaredType is null)
+        {
+            return false;
+        }
+
+        string typeText = EmitType(declaredType);
+        return declaration.Initializer switch
+        {
+            CollectionExpression collection => TryEmitLoweredCollectionDeclaration(name, typeText, declaredType, collection),
+            CallExpression call => TryEmitLoweredCallDeclaration(name, typeText, declaredType, call),
+            AggregationExpression aggregation => TryEmitLoweredAggregationDeclaration(name, typeText, declaredType, aggregation),
+            _ => false,
+        };
+    }
+
+    private bool TryEmitLoweredCollectionDeclaration(string name, string typeText, TypeSyntax declaredType, CollectionExpression collection)
+    {
+        TypeSyntax? elementType = GetCollectionElementType(declaredType);
+        if (elementType is null)
+        {
+            return false;
+        }
+
+        if (declaredType is ArrayTypeSyntax
+            && collection.Elements.Count == 1)
+        {
+            switch (collection.Elements[0])
+            {
+                case RangeElement rangeElement when !IsLongRange(rangeElement.Range, declaredType):
+                {
+                    string itemName = NextTemporary("value");
+                    EmitRangeArrayInitialization(name, typeText, elementType, rangeElement.Range, itemName, null, itemName);
+                    return true;
+                }
+                case BuilderElement builderElement when builderElement.Source is RangeExpression range && !IsLongRange(range, declaredType):
+                {
+                    string itemName = ChooseBindingName(builderElement.ItemTarget, "item");
+                    string? indexName = builderElement.IndexTarget is null ? null : ChooseBindingName(builderElement.IndexTarget, "index");
+                    string valueExpression = EmitLambdaBodyExpression(builderElement.Body, builderElement.IndexTarget, indexName, builderElement.ItemTarget, itemName);
+                    EmitRangeArrayInitialization(name, typeText, elementType, range, itemName, indexName, valueExpression);
+                    return true;
+                }
+            }
+        }
+
+        bool isList = declaredType is NamedTypeSyntax named && IsListType(named);
+        bool isLinkedList = declaredType is NamedTypeSyntax linked && IsLinkedListType(linked);
+        string tempCollection = isList || isLinkedList ? name : NextTemporary("items");
+        string addCall(string value) => isLinkedList ? $"{tempCollection}.AddLast({value});" : $"{tempCollection}.Add({value});";
+
+        _writer.WriteLine(isLinkedList
+            ? $"{typeText} {tempCollection} = new();"
+            : isList
+                ? $"{typeText} {tempCollection} = new();"
+                : $"List<{EmitType(elementType)}> {tempCollection} = new();");
+
+        foreach (CollectionElement element in collection.Elements)
+        {
+            switch (element)
+            {
+                case ExpressionElement expressionElement:
+                    _writer.WriteLine(addCall(EmitExpression(expressionElement.Expression, elementType)));
+                    break;
+                case SpreadElement spreadElement:
+                {
+                    string spreadName = NextTemporary("spread");
+                    _writer.WriteLine($"foreach (var {spreadName} in {EmitExpression(spreadElement.Expression)})");
+                    _writer.WriteLine("{");
+                    _writer.Indent();
+                    _writer.WriteLine(addCall(spreadName));
+                    _writer.Unindent();
+                    _writer.WriteLine("}");
+                    break;
+                }
+                case RangeElement rangeElement:
+                {
+                    string itemName = NextTemporary("value");
+                    _writer.WriteLine(EmitLoopOverSource(rangeElement.Range, itemName, addCall(itemName)));
+                    break;
+                }
+                case BuilderElement builderElement:
+                {
+                    string itemName = ChooseBindingName(builderElement.ItemTarget, "item");
+                    string? indexName = builderElement.IndexTarget is null ? null : ChooseBindingName(builderElement.IndexTarget, "index");
+                    string valueExpression = EmitLambdaBodyExpression(builderElement.Body, builderElement.IndexTarget, indexName, builderElement.ItemTarget, itemName);
+                    _writer.WriteLine(EmitLoopOverSource(builderElement.Source, itemName, addCall(valueExpression), indexName));
+                    break;
+                }
+            }
+        }
+
+        if (!isList && !isLinkedList)
+        {
+            _writer.WriteLine($"{typeText} {name} = {tempCollection}.ToArray();");
+        }
+
+        return true;
+    }
+
+    private void EmitRangeArrayInitialization(string name, string typeText, TypeSyntax elementType, RangeExpression range, string itemName, string? indexName, string valueExpression)
+    {
+        string startName = NextTemporary("start");
+        string endName = NextTemporary("end");
+        string stepName = NextTemporary("step");
+        string countName = NextTemporary("count");
+        string absStepName = NextTemporary("absStep");
+        string slotName = NextTemporary("slot");
+        string forwardCount = range.Kind == RangeKind.RightExclusive
+            ? $"{startName} < {endName} ? (({endName} - {startName} - 1) / {stepName}) + 1 : 0"
+            : $"{startName} <= {endName} ? (({endName} - {startName}) / {stepName}) + 1 : 0";
+        string backwardCount = range.Kind == RangeKind.RightExclusive
+            ? $"{startName} > {endName} ? (({startName} - {endName} - 1) / {absStepName}) + 1 : 0"
+            : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
+        string forwardOp = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+        string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
+
+        _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
+        _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
+        _writer.WriteLine($"int {stepName} = {EmitRangeStepExpression(range, startName, endName, useLong: false)};");
+        _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+        _writer.WriteLine($"int {absStepName} = {stepName} > 0 ? {stepName} : -{stepName};");
+        _writer.WriteLine($"int {countName} = {stepName} > 0 ? {forwardCount} : {backwardCount};");
+        _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{countName}];");
+        _writer.WriteLine($"int {slotName} = 0;");
+        string loopHeader = indexName is null
+            ? $"for (int {itemName} = {startName}; {stepName} > 0 ? {itemName} {forwardOp} {endName} : {itemName} {backwardOp} {endName}; {itemName} += {stepName})"
+            : $"for (int {itemName} = {startName}, {indexName} = 0; {stepName} > 0 ? {itemName} {forwardOp} {endName} : {itemName} {backwardOp} {endName}; {itemName} += {stepName}, {indexName}++)";
+        _writer.WriteLine(loopHeader);
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"{name}[{slotName}++] = {valueExpression};");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private bool TryEmitLoweredCallDeclaration(string name, string typeText, TypeSyntax declaredType, CallExpression call)
+    {
+        string? intrinsicName = call.Callee switch
+        {
+            IdentifierExpression identifierExpression => identifierExpression.Name,
+            MemberAccessExpression memberAccess when PscpIntrinsicCatalog.IntrinsicCallNames.Contains(memberAccess.MemberName) => memberAccess.MemberName,
+            _ => null,
+        };
+        Expression? receiver = call.Callee is MemberAccessExpression member ? member.Receiver : null;
+        if (intrinsicName is null)
+        {
+            return false;
+        }
+
+        if (intrinsicName == "sum" && TryGetSourceOnlyCall(receiver, call.Arguments, out Expression? sumSource))
+        {
+            string itemName = sumSource is GeneratorExpression generator ? ChooseBindingName(generator.ItemTarget, "item") : NextTemporary("item");
+            _writer.WriteLine($"{typeText} {name} = default;");
+            if (sumSource is GeneratorExpression sumGenerator)
+            {
+                string? indexName = sumGenerator.IndexTarget is null ? null : ChooseBindingName(sumGenerator.IndexTarget, "index");
+                string valueExpression = EmitLambdaBodyExpression(sumGenerator.Body, sumGenerator.IndexTarget, indexName, sumGenerator.ItemTarget, itemName);
+                _writer.WriteLine(EmitLoopOverSource(sumGenerator.Source, itemName, $"{name} += {valueExpression};", indexName));
+            }
+            else
+            {
+                _writer.WriteLine(EmitLoopOverSource(sumSource!, itemName, $"{name} += {itemName};"));
+            }
+            return true;
+        }
+
+        if ((intrinsicName == "min" || intrinsicName == "max") && TryGetSourceOnlyCall(receiver, call.Arguments, out Expression? minMaxSource))
+        {
+            string itemName = NextTemporary("item");
+            string hasValueName = NextTemporary("hasValue");
+            _writer.WriteLine($"bool {hasValueName} = false;");
+            _writer.WriteLine($"{typeText} {name} = default!;");
+            _writer.WriteLine(EmitLoopOverSource(minMaxSource!, itemName, $"if (!{hasValueName} || {EmitPreferredComparison(itemName, name, declaredType, preferLower: intrinsicName == "min")}) {{ {name} = {itemName}; {hasValueName} = true; }}"));
+            return true;
+        }
+
+        if (intrinsicName == "sumBy" && TryGetSourceAndUnaryLambdaCall(receiver, call.Arguments, out Expression? sumBySource, out LambdaExpression? sumBySelector))
+        {
+            string itemName = ChooseBindingName(sumBySelector!.Parameters[0].Target, "item");
+            string selectorExpression = EmitLambdaBodyExpression(sumBySelector.Body, null, null, sumBySelector.Parameters[0].Target, itemName);
+            _writer.WriteLine($"{typeText} {name} = default;");
+            _writer.WriteLine(EmitLoopOverSource(sumBySource!, itemName, $"{name} += {selectorExpression};"));
+            return true;
+        }
+
+        if ((intrinsicName == "minBy" || intrinsicName == "maxBy") && TryGetSourceAndUnaryLambdaCall(receiver, call.Arguments, out Expression? minBySource, out LambdaExpression? minBySelector))
+        {
+            TypeSyntax? keyType = minBySelector!.Body switch
+            {
+                LambdaExpressionBody expressionBody => _semantic?.GetExpressionType(expressionBody.Expression),
+                LambdaBlockBody blockBody => blockBody.Block.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail
+                    ? _semantic?.GetExpressionType(tail.Expression)
+                    : null,
+                _ => null,
+            };
+
+            if (keyType is null)
+            {
+                return false;
+            }
+
+            string itemName = ChooseBindingName(minBySelector.Parameters[0].Target, "item");
+            string selectorExpression = EmitLambdaBodyExpression(minBySelector.Body, null, null, minBySelector.Parameters[0].Target, itemName);
+            string hasValueName = NextTemporary("hasValue");
+            string bestKeyName = NextTemporary("bestKey");
+            string keyName = NextTemporary("key");
+            _writer.WriteLine($"bool {hasValueName} = false;");
+            _writer.WriteLine($"{typeText} {name} = default!;");
+            _writer.WriteLine($"{EmitType(keyType)} {bestKeyName} = default!;");
+            _writer.WriteLine(EmitLoopOverSource(minBySource!, itemName, $"var {keyName} = {selectorExpression}; if (!{hasValueName} || {EmitPreferredComparison(keyName, bestKeyName, keyType, preferLower: intrinsicName == "minBy")}) {{ {name} = {itemName}; {bestKeyName} = {keyName}; {hasValueName} = true; }}"));
+            return true;
+        }
+
+        if (TryGetSourceWithOptionalUnaryLambdaCall(receiver, call.Arguments, out Expression? predicateSource, out LambdaExpression? predicate))
+        {
+            string itemName = predicate is null ? NextTemporary("item") : ChooseBindingName(predicate.Parameters[0].Target, "item");
+            string predicateExpression = predicate is null ? "true" : EmitLambdaBodyExpression(predicate.Body, null, null, predicate.Parameters[0].Target, itemName);
+            switch (intrinsicName)
+            {
+                case "count":
+                    _writer.WriteLine($"{typeText} {name} = 0;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if ({predicateExpression}) {{ {name}++; }}"));
+                    return true;
+                case "any":
+                    _writer.WriteLine($"{typeText} {name} = false;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if ({predicateExpression}) {{ {name} = true; break; }}"));
+                    return true;
+                case "all":
+                    _writer.WriteLine($"{typeText} {name} = true;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if (!({predicateExpression})) {{ {name} = false; break; }}"));
+                    return true;
+                case "find":
+                    _writer.WriteLine($"{typeText} {name} = default!;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if ({predicateExpression}) {{ {name} = {itemName}; break; }}"));
+                    return true;
+                case "findIndex":
+                {
+                    string indexName = NextTemporary("index");
+                    _writer.WriteLine($"{typeText} {name} = -1;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if ({predicateExpression}) {{ {name} = {indexName}; break; }}", indexName));
+                    return true;
+                }
+                case "findLastIndex":
+                {
+                    string indexName = NextTemporary("index");
+                    _writer.WriteLine($"{typeText} {name} = -1;");
+                    _writer.WriteLine(EmitLoopOverSource(predicateSource!, itemName, $"if ({predicateExpression}) {{ {name} = {indexName}; }}", indexName));
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryEmitLoweredAggregationDeclaration(string name, string typeText, TypeSyntax declaredType, AggregationExpression aggregation)
+    {
+        string itemName = ChooseBindingName(aggregation.ItemTarget, "item");
+        string? indexName = aggregation.IndexTarget is null ? null : ChooseBindingName(aggregation.IndexTarget, "index");
+        string aliases = EmitBindingAliasStatements(aggregation.IndexTarget, indexName, aggregation.ItemTarget, itemName);
+        string prefix = string.IsNullOrWhiteSpace(aliases) ? string.Empty : aliases + " ";
+        string wherePrefix = aggregation.WhereExpression is null ? string.Empty : $"if (!({EmitExpression(aggregation.WhereExpression)})) continue; ";
+
+        switch (aggregation.AggregatorName)
+        {
+            case "sum":
+                _writer.WriteLine($"{typeText} {name} = default;");
+                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}{name} += {EmitExpression(aggregation.Body)};", indexName));
+                return true;
+            case "count":
+                _writer.WriteLine($"{typeText} {name} = 0;");
+                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}if ({EmitExpression(aggregation.Body)}) {{ {name}++; }}", indexName));
+                return true;
+            case "min":
+            case "max":
+            {
+                string hasValueName = NextTemporary("hasValue");
+                string valueName = NextTemporary("value");
+                _writer.WriteLine($"bool {hasValueName} = false;");
+                _writer.WriteLine($"{typeText} {name} = default!;");
+                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {EmitPreferredComparison(valueName, name, declaredType, preferLower: aggregation.AggregatorName == "min")}) {{ {name} = {valueName}; {hasValueName} = true; }}", indexName));
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryEmitLoweredOutput(OutputStatement output)
+    {
+        TypeSyntax? outputType = _semantic?.GetExpressionType(output.Expression);
+        if (outputType is null)
+        {
+            return false;
+        }
+
+        string tempName = NextTemporary("output");
+        string typeText = EmitType(NormalizeSizedType(outputType));
+        return output.Expression switch
+        {
+            CallExpression call => EmitLoweredOutputFromCall(output, tempName, typeText, call),
+            AggregationExpression aggregation => EmitLoweredOutputFromAggregation(output, tempName, typeText, aggregation),
+            _ => false,
+        };
+    }
+
+    private bool EmitLoweredOutputFromCall(OutputStatement output, string tempName, string typeText, CallExpression call)
+    {
+        if (!TryEmitLoweredCallDeclaration(tempName, typeText, NormalizeSizedType(_semantic!.GetExpressionType(call)!), call))
+        {
+            return false;
+        }
+
+        _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        return true;
+    }
+
+    private bool EmitLoweredOutputFromAggregation(OutputStatement output, string tempName, string typeText, AggregationExpression aggregation)
+    {
+        TypeSyntax? aggregationType = _semantic?.GetExpressionType(aggregation);
+        if (aggregationType is null
+            || !TryEmitLoweredAggregationDeclaration(tempName, typeText, NormalizeSizedType(aggregationType), aggregation))
+        {
+            return false;
+        }
+
+        _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        return true;
+    }
+
+    private void EmitMultiDeclaration(DeclarationStatement declaration)
+    {
+        IReadOnlyList<BindingTarget> targets = declaration.Targets;
+        string initializer = declaration.Initializer is null ? "default!" : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+        if (declaration.ExplicitType is TupleTypeSyntax tupleType && tupleType.Elements.Count == targets.Count)
+        {
+            string left = $"({string.Join(", ", targets.Select((target, index) => EmitTypedBindingPattern(target, tupleType.Elements[index])) )})";
+            _writer.WriteLine($"{left} = {initializer};");
+            return;
+        }
+
+        string targetText = declaration.ExplicitType is null
+            ? $"var ({string.Join(", ", targets.Select(EmitBindingPattern))})"
+            : $"({string.Join(", ", targets.Select(target => $"{EmitType(NormalizeSizedType(declaration.ExplicitType!))} {EmitBindingPattern(target)}"))})";
+        _writer.WriteLine($"{targetText} = {initializer};");
+    }
+
+    private void EmitAssignment(AssignmentStatement assignment)
+        => _writer.WriteLine($"{EmitStatementAssignmentExpression(new AssignmentExpression(assignment.Target, assignment.Operator, assignment.Value, false))};");
+
+    private void EmitIfStatement(IfStatement ifStatement)
+    {
+        _writer.WriteLine($"if ({EmitExpression(ifStatement.Condition)})");
+        EmitEmbeddedStatement(ifStatement.ThenBranch);
+        if (ifStatement.ElseBranch is not null)
+        {
+            _writer.WriteLine("else");
+            EmitEmbeddedStatement(ifStatement.ElseBranch);
+        }
+    }
+
+    private void EmitForInStatement(ForInStatement forIn)
+    {
+        if (forIn.Source is RangeExpression range)
+        {
+            EmitRangeForStatement(forIn.Iterator, range, forIn.Body);
+            return;
+        }
+
+        string iterator = EmitBindingPattern(forIn.Iterator);
+        _writer.WriteLine($"foreach (var {iterator} in {EmitEnumerable(forIn.Source)})");
+        EmitEmbeddedStatement(forIn.Body);
+    }
+
+    private void EmitRangeForStatement(BindingTarget iteratorTarget, RangeExpression range, Statement body)
+    {
+        string iterator = EmitBindingPattern(iteratorTarget);
+        string iteratorType = IsLongRange(range, null) ? "long" : "int";
+        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+        string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
+        string startName = NextTemporary("start");
+        string endName = NextTemporary("end");
+        string stepName = NextTemporary("step");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"{iteratorType} {startName} = {EmitExpression(range.Start)};");
+        _writer.WriteLine($"{iteratorType} {endName} = {EmitExpression(range.End)};");
+        if (range.Step is null)
+        {
+            string op = iteratorType == "long" ? "1L" : "1";
+            _writer.WriteLine($"{iteratorType} {stepName} = {startName} <= {endName} ? {op} : -{op};");
+        }
+        else
+        {
+            _writer.WriteLine($"{iteratorType} {stepName} = {EmitExpression(range.Step)};");
+        }
+        _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+        _writer.WriteLine($"for ({iteratorType} {iterator} = {startName}; {stepName} > 0 ? {iterator} {comparison} {endName} : {iterator} {decrementComparison} {endName}; {iterator} += {stepName})");
+        EmitEmbeddedStatement(body);
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private void EmitFastForStatement(FastForStatement fastFor)
+    {
+        if (fastFor.Source is RangeExpression range)
+        {
+            string itemName = ChooseBindingName(fastFor.ItemTarget, "item");
+            string? indexName = fastFor.IndexTarget is null ? null : ChooseBindingName(fastFor.IndexTarget, "index");
+            string aliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
+            string prefix = string.IsNullOrWhiteSpace(aliases) ? string.Empty : aliases + " ";
+            _writer.WriteLine(EmitLoopOverSource(range, itemName, $"{prefix}{EmitInlineStatement(fastFor.Body)}", indexName));
+            return;
+        }
+
+        string fallbackItemName = EmitBindingPattern(fastFor.ItemTarget);
+        if (fastFor.IndexTarget is null)
+        {
+            _writer.WriteLine($"foreach (var {fallbackItemName} in {EmitEnumerable(fastFor.Source)})");
+            EmitEmbeddedStatement(fastFor.Body);
+            return;
+        }
+
+        string fallbackIndexName = EmitBindingPattern(fastFor.IndexTarget);
+        _writer.WriteLine("{");
+        _writer.Indent();
+        _writer.WriteLine($"int {fallbackIndexName} = 0;");
+        _writer.WriteLine($"foreach (var {fallbackItemName} in {EmitEnumerable(fastFor.Source)})");
+        _writer.WriteLine("{");
+        _writer.Indent();
+        EmitStatement(fastFor.Body);
+        _writer.WriteLine($"{fallbackIndexName}++;");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+        _writer.Unindent();
+        _writer.WriteLine("}");
+    }
+
+    private string EmitParameter(ParameterSyntax parameter)
+    {
+        string modifier = EmitArgumentModifier(parameter.Modifier);
+        return string.IsNullOrEmpty(modifier)
+            ? $"{EmitType(parameter.Type)} {EmitBindingPattern(parameter.Target)}"
+            : $"{modifier} {EmitType(parameter.Type)} {EmitBindingPattern(parameter.Target)}";
+    }
+
+    private static string EmitArgumentModifier(ArgumentModifier modifier)
+        => modifier switch
+        {
+            ArgumentModifier.Ref => "ref",
+            ArgumentModifier.Out => "out",
+            ArgumentModifier.In => "in",
+            _ => string.Empty,
+        };
+
+    private static bool GetIsVoid(TypeSyntax type)
+        => type is NamedTypeSyntax named && named.Name == "void";
+
+    private static TypeSyntax NormalizeSizedType(TypeSyntax type)
+        => type is SizedArrayTypeSyntax sized ? new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count) : type;
+
+    private static bool IsBareInvocation(Expression expression)
+        => expression is CallExpression;
+
+    private static Expression? GetImplicitReturnExpression(BlockStatement block)
+    {
+        if (block.Statements.Count == 0)
+        {
+            return null;
+        }
+
+        if (block.Statements[^1] is not ExpressionStatement { HasSemicolon: false } expressionStatement)
+        {
+            return null;
+        }
+
+        if (expressionStatement.Expression is AssignmentExpression { IsExplicitValueAssignment: false })
+        {
+            return null;
+        }
+
+        return IsBareInvocation(expressionStatement.Expression) ? null : expressionStatement.Expression;
+    }
+
+    private static bool ContainsExplicitReturn(BlockStatement block)
+        => block.Statements.Any(statement => statement is ReturnStatement);
+
+    private string NextTemporary(string prefix)
+        => $"__{prefix}{_temporaryId++}";
+
+    private static string GetEmittedTypeHeader(TypeDeclaration declaration)
+    {
+        if (!declaration.Members.OfType<OrderingShorthandMember>().Any()
+            || declaration.HeaderText.Contains("IComparable<", StringComparison.Ordinal))
+        {
+            return declaration.HeaderText;
+        }
+
+        return declaration.HeaderText.Contains(':', StringComparison.Ordinal)
+            ? declaration.HeaderText + $", System.IComparable<{declaration.Name}>"
+            : declaration.HeaderText + $" : System.IComparable<{declaration.Name}>";
+    }
+
+    private string GetCurrentDeclaringTypeName()
+        => _currentTypeStack.Count == 0 ? "object" : _currentTypeStack.Peek();
+
+    partial void EmitRuntimeHelpers();
+}
+
+
+

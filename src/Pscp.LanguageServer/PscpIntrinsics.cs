@@ -1,0 +1,218 @@
+namespace Pscp.LanguageServer;
+
+internal static class PscpIntrinsics
+{
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> Globals =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["stdin"] = new("stdin", 6, "intrinsic object", "Contest-oriented input helper object."),
+            ["stdout"] = new("stdout", 6, "intrinsic object", "Contest-oriented output helper object."),
+            ["Array"] = new("Array", 7, "type", "Built-in .NET array type with `Array.zero(n)` helper surface."),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdinMembers =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["read"] = Completion("read", "read<T>()", "Reads one token as `T`.", 2, "read<T>()"),
+            ["int"] = Completion("int", "int()", "Reads one integer token.", 2),
+            ["long"] = Completion("long", "long()", "Reads one long integer token.", 2),
+            ["double"] = Completion("double", "double()", "Reads one floating-point token.", 2),
+            ["decimal"] = Completion("decimal", "decimal()", "Reads one decimal token.", 2),
+            ["bool"] = Completion("bool", "bool()", "Reads one boolean token.", 2),
+            ["char"] = Completion("char", "char()", "Reads one character token.", 2),
+            ["str"] = Completion("str", "str()", "Reads one string token.", 2),
+            ["line"] = Completion("line", "line()", "Reads one full input line.", 2),
+            ["lines"] = Completion("lines", "lines(${1:n})", "Reads `n` full lines.", 15, "lines($1)"),
+            ["words"] = Completion("words", "words()", "Reads one line and splits it into words.", 2),
+            ["chars"] = Completion("chars", "chars()", "Reads one line as `char[]`.", 2),
+            ["array"] = Completion("array", "array<T>(${1:n})", "Reads `n` values and returns `T[]`.", 15, "array<T>($1)"),
+            ["list"] = Completion("list", "list<T>(${1:n})", "Reads `n` values and returns `List<T>`.", 15, "list<T>($1)"),
+            ["linkedList"] = Completion("linkedList", "linkedList<T>(${1:n})", "Reads `n` values and returns `LinkedList<T>`.", 15, "linkedList<T>($1)"),
+            ["tuple2"] = Completion("tuple2", "tuple2<T1, T2>()", "Reads a 2-tuple.", 2),
+            ["tuple3"] = Completion("tuple3", "tuple3<T1, T2, T3>()", "Reads a 3-tuple.", 2),
+            ["tuples2"] = Completion("tuples2", "tuples2<T1, T2>(${1:n})", "Reads `n` tuples of arity 2.", 15, "tuples2<T1, T2>($1)"),
+            ["tuples3"] = Completion("tuples3", "tuples3<T1, T2, T3>(${1:n})", "Reads `n` tuples of arity 3.", 15, "tuples3<T1, T2, T3>($1)"),
+            ["nestedArray"] = Completion("nestedArray", "nestedArray<T>(${1:n}, ${2:m})", "Reads an `n x m` nested array of `T`.", 15, "nestedArray<T>($1, $2)"),
+            ["gridInt"] = Completion("gridInt", "gridInt(${1:n}, ${2:m})", "Reads an `int` grid.", 15, "gridInt($1, $2)"),
+            ["gridLong"] = Completion("gridLong", "gridLong(${1:n}, ${2:m})", "Reads a `long` grid.", 15, "gridLong($1, $2)"),
+            ["charGrid"] = Completion("charGrid", "charGrid(${1:n})", "Reads `n` lines as `char[][]`.", 15, "charGrid($1)"),
+            ["wordGrid"] = Completion("wordGrid", "wordGrid(${1:n})", "Reads `n` lines as `string[][]`.", 15, "wordGrid($1)"),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdoutMembers =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["write"] = Completion("write", "write(${1:value})", "Writes a value without a trailing newline.", 15, "write($1)"),
+            ["writeln"] = Completion("writeln", "writeln(${1:value})", "Writes a value with a trailing newline.", 15, "writeln($1)"),
+            ["flush"] = Completion("flush", "flush()", "Flushes buffered output.", 2),
+            ["lines"] = Completion("lines", "lines(${1:values})", "Writes one element per line.", 15, "lines($1)"),
+            ["grid"] = Completion("grid", "grid(${1:grid})", "Writes a grid line by line.", 15, "grid($1)"),
+            ["join"] = Completion("join", "join(${1:sep}, ${2:values})", "Writes values joined by a separator.", 15, "join($1, $2)"),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ArrayMembers =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["zero"] = Completion("zero", "zero(${1:n})", "Creates a zero-initialized array from type context.", 15, "zero($1)"),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ComparatorMembers =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["asc"] = new("asc", 10, "ascending comparer", "Comparator sugar that resolves to the default ascending comparer for the receiver type."),
+            ["desc"] = new("desc", 10, "descending comparer", "Comparator sugar that resolves to the default descending comparer for the receiver type."),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> IntrinsicFunctions =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["sum"] = Function("sum", "sum(${1:values})", "Sums the elements of an iterable.", "sum($1)"),
+            ["sumBy"] = Function("sumBy", "sumBy(${1:values}, ${2:selector})", "Maps each element and sums the projected values.", "sumBy($1, $2)"),
+            ["min"] = Function("min", "min(${1:left}, ${2:right})", "Returns the smaller of two values, or the minimum element of a sequence.", "min($1, $2)"),
+            ["max"] = Function("max", "max(${1:left}, ${2:right})", "Returns the larger of two values, or the maximum element of a sequence.", "max($1, $2)"),
+            ["minBy"] = Function("minBy", "minBy(${1:values}, ${2:keySelector})", "Returns the element whose key is minimal.", "minBy($1, $2)"),
+            ["maxBy"] = Function("maxBy", "maxBy(${1:values}, ${2:keySelector})", "Returns the element whose key is maximal.", "maxBy($1, $2)"),
+            ["count"] = Function("count", "count(${1:values}, ${2:predicate})", "Counts the elements that satisfy the predicate.", "count($1, $2)"),
+            ["any"] = Function("any", "any(${1:values}, ${2:predicate})", "Returns whether any element satisfies the predicate.", "any($1, $2)"),
+            ["all"] = Function("all", "all(${1:values}, ${2:predicate})", "Returns whether all elements satisfy the predicate.", "all($1, $2)"),
+            ["find"] = Function("find", "find(${1:values}, ${2:predicate})", "Returns the first matching element, or the default value.", "find($1, $2)"),
+            ["findIndex"] = Function("findIndex", "findIndex(${1:values}, ${2:predicate})", "Returns the index of the first matching element, or `-1`.", "findIndex($1, $2)"),
+            ["findLastIndex"] = Function("findLastIndex", "findLastIndex(${1:values}, ${2:predicate})", "Returns the index of the last matching element, or `-1`.", "findLastIndex($1, $2)"),
+            ["sort"] = Function("sort", "sort(${1:values})", "Returns the values sorted by their default ordering.", "sort($1)"),
+            ["sortBy"] = Function("sortBy", "sortBy(${1:values}, ${2:keySelector})", "Returns the values sorted by the projected key.", "sortBy($1, $2)"),
+            ["sortWith"] = Function("sortWith", "sortWith(${1:values}, ${2:comparer})", "Returns the values sorted with a custom comparer.", "sortWith($1, $2)"),
+            ["distinct"] = Function("distinct", "distinct(${1:values})", "Returns distinct elements preserving source order where possible.", "distinct($1)"),
+            ["reverse"] = Function("reverse", "reverse(${1:values})", "Returns the values in reverse order.", "reverse($1)"),
+            ["copy"] = Function("copy", "copy(${1:values})", "Returns a copied materialized sequence.", "copy($1)"),
+            ["groupCount"] = Function("groupCount", "groupCount(${1:values})", "Counts occurrences of each distinct value.", "groupCount($1)"),
+            ["freq"] = Function("freq", "freq(${1:values})", "Alias of `groupCount`.", "freq($1)"),
+            ["index"] = Function("index", "index(${1:values})", "Maps each distinct value to its first index.", "index($1)"),
+            ["chmin"] = Function("chmin", "chmin(ref ${1:target}, ${2:value})", "Updates `target` when `value` is smaller, and returns whether it changed.", "chmin(ref $1, $2)"),
+            ["chmax"] = Function("chmax", "chmax(ref ${1:target}, ${2:value})", "Updates `target` when `value` is larger, and returns whether it changed.", "chmax(ref $1, $2)"),
+        };
+
+    public static readonly IReadOnlyDictionary<string, PscpSignatureEntry> Signatures =
+        new Dictionary<string, PscpSignatureEntry>(StringComparer.Ordinal)
+        {
+            ["stdin.read"] = new("stdin.read<T>()", Array.Empty<string>(), "Reads one token as `T`."),
+            ["stdin.int"] = new("stdin.int()", Array.Empty<string>(), "Reads one integer token."),
+            ["stdin.long"] = new("stdin.long()", Array.Empty<string>(), "Reads one long integer token."),
+            ["stdin.double"] = new("stdin.double()", Array.Empty<string>(), "Reads one floating-point token."),
+            ["stdin.decimal"] = new("stdin.decimal()", Array.Empty<string>(), "Reads one decimal token."),
+            ["stdin.bool"] = new("stdin.bool()", Array.Empty<string>(), "Reads one boolean token."),
+            ["stdin.char"] = new("stdin.char()", Array.Empty<string>(), "Reads one character token."),
+            ["stdin.str"] = new("stdin.str()", Array.Empty<string>(), "Reads one string token."),
+            ["stdin.line"] = new("stdin.line()", Array.Empty<string>(), "Reads one full input line."),
+            ["stdin.lines"] = new("stdin.lines(n)", new[] { "n" }, "Reads `n` lines."),
+            ["stdin.words"] = new("stdin.words()", Array.Empty<string>(), "Reads one line and splits it into words."),
+            ["stdin.chars"] = new("stdin.chars()", Array.Empty<string>(), "Reads one line as `char[]`."),
+            ["stdin.array"] = new("stdin.array<T>(n)", new[] { "n" }, "Reads `n` tokens into an array."),
+            ["stdin.list"] = new("stdin.list<T>(n)", new[] { "n" }, "Reads `n` tokens into a list."),
+            ["stdin.linkedList"] = new("stdin.linkedList<T>(n)", new[] { "n" }, "Reads `n` tokens into a linked list."),
+            ["stdin.tuple2"] = new("stdin.tuple2<T1, T2>()", Array.Empty<string>(), "Reads a 2-tuple."),
+            ["stdin.tuple3"] = new("stdin.tuple3<T1, T2, T3>()", Array.Empty<string>(), "Reads a 3-tuple."),
+            ["stdin.tuples2"] = new("stdin.tuples2<T1, T2>(n)", new[] { "n" }, "Reads `n` 2-tuples."),
+            ["stdin.tuples3"] = new("stdin.tuples3<T1, T2, T3>(n)", new[] { "n" }, "Reads `n` 3-tuples."),
+            ["stdin.nestedArray"] = new("stdin.nestedArray<T>(n, m)", new[] { "n", "m" }, "Reads a nested `n x m` array."),
+            ["stdin.gridInt"] = new("stdin.gridInt(n, m)", new[] { "n", "m" }, "Reads an integer grid."),
+            ["stdin.gridLong"] = new("stdin.gridLong(n, m)", new[] { "n", "m" }, "Reads a long integer grid."),
+            ["stdin.charGrid"] = new("stdin.charGrid(n)", new[] { "n" }, "Reads `n` lines as a character grid."),
+            ["stdin.wordGrid"] = new("stdin.wordGrid(n)", new[] { "n" }, "Reads `n` lines as a word grid."),
+            ["stdout.write"] = new("stdout.write(value)", new[] { "value" }, "Writes one rendered value without newline."),
+            ["stdout.writeln"] = new("stdout.writeln(value)", new[] { "value" }, "Writes one rendered value with newline."),
+            ["stdout.flush"] = new("stdout.flush()", Array.Empty<string>(), "Flushes buffered output."),
+            ["stdout.lines"] = new("stdout.lines(values)", new[] { "values" }, "Writes one value per line."),
+            ["stdout.grid"] = new("stdout.grid(grid)", new[] { "grid" }, "Writes a grid line by line."),
+            ["stdout.join"] = new("stdout.join(sep, values)", new[] { "sep", "values" }, "Writes values joined by a separator."),
+            ["Array.zero"] = new("Array.zero(n)", new[] { "n" }, "Creates a zero-initialized array from the target type context."),
+            ["sum"] = new("sum(values)", new[] { "values" }, "Sums the elements of an iterable."),
+            ["sumBy"] = new("sumBy(values, selector)", new[] { "values", "selector" }, "Maps each element and sums the projected values."),
+            ["min"] = new("min(left, right)", new[] { "left", "right" }, "Returns the smaller of two values."),
+            ["max"] = new("max(left, right)", new[] { "left", "right" }, "Returns the larger of two values."),
+            ["minBy"] = new("minBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the element whose key is minimal."),
+            ["maxBy"] = new("maxBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the element whose key is maximal."),
+            ["count"] = new("count(values, predicate)", new[] { "values", "predicate" }, "Counts matching elements."),
+            ["any"] = new("any(values, predicate)", new[] { "values", "predicate" }, "Returns whether any element matches."),
+            ["all"] = new("all(values, predicate)", new[] { "values", "predicate" }, "Returns whether all elements match."),
+            ["find"] = new("find(values, predicate)", new[] { "values", "predicate" }, "Returns the first matching element."),
+            ["findIndex"] = new("findIndex(values, predicate)", new[] { "values", "predicate" }, "Returns the first matching index, or `-1`."),
+            ["findLastIndex"] = new("findLastIndex(values, predicate)", new[] { "values", "predicate" }, "Returns the last matching index, or `-1`."),
+            ["sort"] = new("sort(values)", new[] { "values" }, "Returns the values sorted by their default ordering."),
+            ["sortBy"] = new("sortBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the values sorted by a projected key."),
+            ["sortWith"] = new("sortWith(values, comparer)", new[] { "values", "comparer" }, "Returns the values sorted with a custom comparer."),
+            ["distinct"] = new("distinct(values)", new[] { "values" }, "Returns distinct values."),
+            ["reverse"] = new("reverse(values)", new[] { "values" }, "Returns the values in reverse order."),
+            ["copy"] = new("copy(values)", new[] { "values" }, "Returns a copied materialized sequence."),
+            ["groupCount"] = new("groupCount(values)", new[] { "values" }, "Counts occurrences of each distinct value."),
+            ["freq"] = new("freq(values)", new[] { "values" }, "Alias of `groupCount`."),
+            ["index"] = new("index(values)", new[] { "values" }, "Maps each distinct value to its first index."),
+            ["chmin"] = new("chmin(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is smaller."),
+            ["chmax"] = new("chmax(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is larger."),
+        };
+
+    public static readonly IReadOnlyDictionary<string, string> HoverDocs = CreateHoverDocs();
+
+    public static readonly IReadOnlySet<string> Keywords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "let", "var", "mut", "rec", "if", "then", "else", "for", "in", "do", "while",
+        "break", "continue", "return", "true", "false", "null", "and", "or", "xor", "not",
+        "match", "when", "where", "new", "class", "struct", "record", "namespace", "using",
+        "ref", "out", "is", "public", "private", "protected", "internal", "this", "base",
+        "operator", "switch",
+    };
+
+    public static readonly IReadOnlySet<string> BuiltinTypes = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "int", "long", "double", "decimal", "bool", "char", "string", "void", "List", "LinkedList",
+        "Queue", "Stack", "HashSet", "Dictionary", "PriorityQueue", "SortedSet",
+        "IEnumerable", "IComparable", "Comparer", "Array",
+    };
+
+    public static readonly IReadOnlyDictionary<string, string> TypeCompletionDetails =
+        BuiltinTypes.ToDictionary(
+            value => value,
+            value => value switch
+            {
+                "Array" => ".NET type",
+                "IEnumerable" or "IComparable" => ".NET interface",
+                "Comparer" => ".NET utility type",
+                _ => "type",
+            },
+            StringComparer.Ordinal);
+
+    public static bool IsTypeLikeReceiverName(string receiverName)
+    {
+        string normalized = StripGenericSuffix(receiverName);
+        if (normalized.EndsWith("[]", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^2];
+        }
+
+        return BuiltinTypes.Contains(normalized)
+            || (!string.IsNullOrWhiteSpace(normalized) && (char.IsUpper(normalized[0]) || normalized[0] == '('));
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateHoverDocs()
+    {
+        Dictionary<string, string> docs = Signatures.ToDictionary(
+            pair => pair.Key,
+            pair => $"```pscp\n{pair.Value.Label}\n```\n\n{pair.Value.Documentation}",
+            StringComparer.Ordinal);
+
+        docs["comparer.asc"] = "```pscp\nT.asc\n```\n\nComparator sugar that resolves to the default ascending comparer for the receiver type.";
+        docs["comparer.desc"] = "```pscp\nT.desc\n```\n\nComparator sugar that resolves to the default descending comparer for the receiver type.";
+        return docs;
+    }
+
+    private static string StripGenericSuffix(string name)
+    {
+        int genericIndex = name.IndexOf('<');
+        return genericIndex >= 0 ? name[..genericIndex] : name;
+    }
+
+    private static PscpCompletionEntry Completion(string label, string detail, string documentation, int kind, string? insertText = null)
+        => new(label, kind, detail, documentation, insertText, insertText is null ? null : 2, label);
+
+    private static PscpCompletionEntry Function(string label, string detail, string documentation, string insertText)
+        => new(label, 3, detail, documentation, insertText, 2, label);
+}
