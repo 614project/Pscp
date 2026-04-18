@@ -304,7 +304,7 @@ artifacts\vscode\local.pscp-vscode-0.1.0.vsix
 설치 방법:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.1.0.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.5.1.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.
