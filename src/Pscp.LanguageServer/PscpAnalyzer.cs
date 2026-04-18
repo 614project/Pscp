@@ -17,12 +17,12 @@ internal sealed partial class PscpAnalyzer
         AnalyzerState state = new(snapshot, tokens);
         foreach (Diagnostic diagnostic in lexer.Diagnostics)
         {
-            state.AddDiagnostic("PSCP1000", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Error);
+            state.AddDiagnostic("PSCP1000", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
         }
 
         foreach (Diagnostic diagnostic in parser.Diagnostics)
         {
-            state.AddDiagnostic("PSCP1001", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Error);
+            state.AddDiagnostic("PSCP1001", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
         }
 
         Scope globalScope = state.CreateScope(null, 0, snapshot.Text.Length);
@@ -46,6 +46,9 @@ internal sealed partial class PscpAnalyzer
             state.AddDiagnostic("PSCP3001", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Warning);
         }
     }
+
+    private static ServerDiagnosticSeverity ToServerSeverity(DiagnosticSeverity severity)
+        => severity == DiagnosticSeverity.Warning ? ServerDiagnosticSeverity.Warning : ServerDiagnosticSeverity.Error;
 
     private void InitializeIntrinsics(AnalyzerState state, Scope globalScope)
     {

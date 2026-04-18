@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const extensionPackage = require('./package.json');
 
 const SEMANTIC_TOKEN_TYPES = [
   'namespace',
@@ -44,7 +45,7 @@ const SEMANTIC_TOKEN_MODIFIERS = [
 
 let client;
 
-function activate(context) {
+async function activate(context) {
   const output = vscode.window.createOutputChannel('PSCP');
   const diagnostics = vscode.languages.createDiagnosticCollection('pscp');
   const selector = [{ language: 'pscp' }];
@@ -168,10 +169,13 @@ function activate(context) {
     }
   }, legend));
 
-  client.start().catch((error) => {
+  try {
+    output.appendLine(`Activating PSCP extension ${extensionPackage.version}.`);
+    await client.start();
+  } catch (error) {
     output.appendLine(String(error));
     vscode.window.showErrorMessage(`Failed to start PSCP language server: ${error.message}`);
-  });
+  }
 }
 
 function deactivate() {
@@ -223,7 +227,7 @@ class PscpClient {
       processId: process.pid,
       clientInfo: {
         name: 'vscode-pscp',
-        version: '0.4.0'
+        version: extensionPackage.version
       },
       rootUri: vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
         ? vscode.workspace.workspaceFolders[0].uri.toString()
@@ -427,6 +431,12 @@ function createDotnetEnvironment(repoRoot) {
 }
 
 async function resolveLanguageServerLaunch(context, output) {
+  const repoRoot = path.resolve(context.extensionPath, '..', '..');
+  const env = createDotnetEnvironment(repoRoot);
+  const serverProject = path.join(repoRoot, 'src', 'Pscp.LanguageServer', 'Pscp.LanguageServer.csproj');
+  const serverDll = path.join(repoRoot, 'src', 'Pscp.LanguageServer', 'bin', 'Debug', 'net10.0', 'Pscp.LanguageServer.dll');
+  const repoFallbackAvailable = fs.existsSync(serverProject);
+
   const config = vscode.workspace.getConfiguration('pscp');
   const explicitLanguageServer = normalizeConfiguredPath(config.get('languageServerPath'));
   if (explicitLanguageServer) {
@@ -440,26 +450,22 @@ async function resolveLanguageServerLaunch(context, output) {
   if (explicitSdk) {
     const launch = createSdkLaunch(explicitSdk);
     if (launch) {
+      noteSdkVersion(launch, output, repoFallbackAvailable, true);
       return launch;
     }
   }
 
   for (const candidate of getInstalledSdkCandidates()) {
     const launch = createSdkLaunch(candidate);
-    if (launch) {
+    if (launch && noteSdkVersion(launch, output, repoFallbackAvailable, false)) {
       return launch;
     }
   }
 
   const pathLaunch = createPathSdkLaunch();
-  if (pathLaunch) {
+  if (pathLaunch && noteSdkVersion(pathLaunch, output, repoFallbackAvailable, false)) {
     return pathLaunch;
   }
-
-  const repoRoot = path.resolve(context.extensionPath, '..', '..');
-  const env = createDotnetEnvironment(repoRoot);
-  const serverProject = path.join(repoRoot, 'src', 'Pscp.LanguageServer', 'Pscp.LanguageServer.csproj');
-  const serverDll = path.join(repoRoot, 'src', 'Pscp.LanguageServer', 'bin', 'Debug', 'net10.0', 'Pscp.LanguageServer.dll');
 
   if (!fs.existsSync(serverProject)) {
     throw new Error('Could not locate an installed PSCP SDK or a repository language server project.');
@@ -496,7 +502,8 @@ function createDirectServerLaunch(candidate) {
     command: candidate,
     args: [],
     cwd: path.dirname(candidate),
-    env: process.env
+    env: process.env,
+    sdkExecutable: candidate
   };
 }
 
@@ -517,7 +524,8 @@ function createSdkLaunch(candidate) {
     command: sdkExecutable,
     args: ['lsp'],
     cwd: path.dirname(sdkExecutable),
-    env: process.env
+    env: process.env,
+    sdkExecutable
   };
 }
 
@@ -577,6 +585,70 @@ function runProcess(command, args, options, output) {
       }
     });
   });
+}
+
+function noteSdkVersion(launch, output, repoFallbackAvailable, treatAsExplicit) {
+  const versionInfo = probeSdkVersion(launch);
+  if (!versionInfo) {
+    output.appendLine(`Using PSCP SDK without version probe: ${launch.label}`);
+    return true;
+  }
+
+  output.appendLine(`Found PSCP SDK ${versionInfo.toolVersion} (language ${versionInfo.languageVersion}) via ${launch.label}`);
+  if (treatAsExplicit) {
+    return true;
+  }
+
+  if (compareVersions(versionInfo.toolVersion, extensionPackage.version) < 0) {
+    output.appendLine(`Installed SDK ${versionInfo.toolVersion} is older than extension ${extensionPackage.version}.`);
+    if (repoFallbackAvailable) {
+      output.appendLine('Falling back to repository language server build for a newer server implementation.');
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function probeSdkVersion(launch) {
+  if (!launch.sdkExecutable) {
+    return null;
+  }
+
+  const result = cp.spawnSync(launch.sdkExecutable, ['version'], {
+    cwd: launch.cwd,
+    env: launch.env,
+    windowsHide: true,
+    encoding: 'utf8'
+  });
+
+  if (result.status !== 0 || !result.stdout) {
+    return null;
+  }
+
+  const match = /pscp CLI (\d+\.\d+\.\d+) \(language (\d+\.\d+)\)/i.exec(result.stdout);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    toolVersion: match[1],
+    languageVersion: match[2]
+  };
+}
+
+function compareVersions(left, right) {
+  const leftParts = String(left).split('.').map((value) => Number.parseInt(value, 10) || 0);
+  const rightParts = String(right).split('.').map((value) => Number.parseInt(value, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  return 0;
 }
 
 function toTextDocument(document) {
@@ -782,6 +854,8 @@ function mapCompletionKind(kind) {
       return vscode.CompletionItemKind.Variable;
     case 7:
       return vscode.CompletionItemKind.Class;
+    case 9:
+      return vscode.CompletionItemKind.Module;
     case 10:
       return vscode.CompletionItemKind.Property;
     case 14:

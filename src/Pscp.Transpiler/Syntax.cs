@@ -115,8 +115,8 @@ public enum HelperEmissionMode
 
 public static class PscpVersionInfo
 {
-    public const string LanguageVersion = "0.4";
-    public const string ToolVersion = "0.4.1";
+    public const string LanguageVersion = "0.5";
+    public const string ToolVersion = "0.5.1";
 }
 
 public sealed record Diagnostic(string Message, TextSpan Span, DiagnosticSeverity Severity = DiagnosticSeverity.Error);
@@ -441,6 +441,8 @@ public sealed record MemberAccessExpression(Expression Receiver, string MemberNa
 public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expression> Arguments) : Expression;
 
 public sealed record WithExpression(Expression Receiver, string InitializerText) : Expression;
+
+public sealed record SwitchExpression(Expression Receiver, string SwitchText) : Expression;
 
 public sealed record FromEndExpression(Expression Operand) : Expression;
 

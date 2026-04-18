@@ -536,8 +536,6 @@ public sealed class Lexer
             "or" => TokenKind.Or,
             "xor" => TokenKind.Xor,
             "not" => TokenKind.Not,
-            "match" => TokenKind.Match,
-            "when" => TokenKind.When,
             "where" => TokenKind.Where,
             "new" => TokenKind.New,
             "class" => TokenKind.Class,

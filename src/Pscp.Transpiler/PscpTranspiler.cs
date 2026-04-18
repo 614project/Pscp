@@ -17,7 +17,7 @@ public static class PscpTranspiler
         diagnostics.AddRange(parser.Diagnostics);
 
         SemanticAnalysisResult? semantic = null;
-        if (diagnostics.Count == 0)
+        if (diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Error))
         {
             semantic = PscpSemanticAnalyzer.Analyze(tokens, program);
             diagnostics.AddRange(semantic.Diagnostics);

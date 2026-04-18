@@ -221,6 +221,17 @@ internal sealed partial class PscpAnalyzer
             return;
         }
 
+        if (PscpExternalMetadata.TryGetTopLevelEntry(token.Text, out PscpCompletionEntry? externalTopLevel))
+        {
+            state.MarkToken(tokenIndex, PscpExternalMetadata.IsKnownNamespace(token.Text) ? "namespace" : "type", "defaultLibrary");
+            if (!string.IsNullOrWhiteSpace(externalTopLevel?.Documentation))
+            {
+                state.SetHover(tokenIndex, externalTopLevel.Documentation!);
+            }
+
+            return;
+        }
+
         if (IsMemberName(state.Tokens, tokenIndex))
         {
             AnalyzeMemberUsage(state, scope, tokenIndex);
@@ -296,8 +307,9 @@ internal sealed partial class PscpAnalyzer
         }
 
         int? receiverTokenIndex = PreviousNonTrivia(state.Tokens, dot - 1);
+        bool instanceContext = false;
         string? receiverName = receiverTokenIndex is int receiver
-            ? ResolveReceiverName(state, scope, receiver)
+            ? ResolveReceiverName(state, scope, receiver, out instanceContext, out _)
             : null;
         bool isCallable = LooksLikeCallableIdentifier(state.Tokens, tokenIndex);
         state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
@@ -319,6 +331,17 @@ internal sealed partial class PscpAnalyzer
             if (hoverKey is not null && PscpIntrinsics.HoverDocs.TryGetValue(hoverKey, out string? hover))
             {
                 state.SetHover(tokenIndex, hover);
+            }
+
+            return;
+        }
+
+        if (PscpExternalMetadata.TryGetMemberEntry(receiverName, instanceContext, state.Tokens[tokenIndex].Text, out PscpCompletionEntry? externalMember))
+        {
+            ApplyExternalCompletionClassification(state, tokenIndex, externalMember!);
+            if (!string.IsNullOrWhiteSpace(externalMember?.Documentation))
+            {
+                state.SetHover(tokenIndex, externalMember.Documentation!);
             }
         }
     }
@@ -351,24 +374,40 @@ internal sealed partial class PscpAnalyzer
         return next is int nextIndex && tokens[nextIndex].Kind == TokenKind.OpenParen;
     }
 
-    private static string? ResolveReceiverName(AnalyzerState state, Scope scope, int tokenIndex)
+    private static void ApplyExternalCompletionClassification(AnalyzerState state, int tokenIndex, PscpCompletionEntry completion)
     {
+        string tokenType = completion.Kind switch
+        {
+            2 => "method",
+            7 => "type",
+            9 => "namespace",
+            10 => "property",
+            _ => "property",
+        };
+        state.MarkToken(tokenIndex, tokenType, "defaultLibrary");
+    }
+
+    private static string? ResolveReceiverName(AnalyzerState state, Scope scope, int tokenIndex, out bool instanceContext, out PscpServerSymbol? receiverSymbol)
+    {
+        instanceContext = false;
+        receiverSymbol = null;
         if (!IsIdentifier(state.Tokens, tokenIndex))
         {
             return null;
         }
 
         Token token = state.Tokens[tokenIndex];
-        if (state.TryResolve(scope, token.Text, token.Position, out PscpServerSymbol? symbol) && symbol is not null)
+        if (state.TryResolve(scope, token.Text, token.Position, out receiverSymbol) && receiverSymbol is not null)
         {
-            if (symbol.Kind == PscpServerSymbolKind.Intrinsic)
+            if (receiverSymbol.Kind == PscpServerSymbolKind.Intrinsic)
             {
-                return symbol.Name;
+                return receiverSymbol.Name;
             }
 
-            if (!string.IsNullOrWhiteSpace(symbol.TypeDisplay))
+            if (!string.IsNullOrWhiteSpace(receiverSymbol.TypeDisplay))
             {
-                return symbol.TypeDisplay;
+                instanceContext = true;
+                return receiverSymbol.TypeDisplay;
             }
         }
 
@@ -653,7 +692,6 @@ internal sealed partial class PscpAnalyzer
     {
         return member switch
         {
-            "read" => BuildSingleGenericType(state.Tokens, start, openParen, "object"),
             "int" => "int",
             "long" => "long",
             "double" => "double",
@@ -696,7 +734,11 @@ internal sealed partial class PscpAnalyzer
             "find" or "minBy" or "maxBy" => InferFirstArgumentElementType(state, scope, openParen),
             "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" => InferFirstArgumentMaterializedType(state, scope, openParen),
             "abs" => InferFirstArgumentType(state, scope, openParen),
-            "sqrt" => "double",
+            "sqrt" or "pow" => "double",
+            "clamp" => InferPromotedArgumentType(state, scope, openParen, 3),
+            "gcd" or "lcm" => InferPromotedArgumentType(state, scope, openParen, 2),
+            "floor" or "ceil" or "round" => InferMathRoundingReturnType(state, scope, openParen),
+            "popcount" or "bitLength" => "int",
             "groupCount" or "freq" or "index" => InferDictionaryTypeFromFirstArgument(state, scope, openParen),
             _ => null,
         };
@@ -832,6 +874,28 @@ internal sealed partial class PscpAnalyzer
         return string.IsNullOrWhiteSpace(elementType) ? null : $"Dictionary<{elementType}, int>";
     }
 
+    private string? InferPromotedArgumentType(AnalyzerState state, Scope scope, int openParen, int count)
+    {
+        if (!TryReadArgumentBounds(state.Tokens, openParen, count, out IReadOnlyList<(int Start, int EndExclusive)>? bounds) || bounds is null)
+        {
+            return null;
+        }
+
+        string? promoted = null;
+        foreach ((int start, int endExclusive) in bounds)
+        {
+            promoted = PromoteNumericType(promoted, InferExpressionType(state, scope, start, endExclusive));
+        }
+
+        return promoted;
+    }
+
+    private string InferMathRoundingReturnType(AnalyzerState state, Scope scope, int openParen)
+    {
+        string? argumentType = InferFirstArgumentType(state, scope, openParen);
+        return argumentType == "decimal" ? "decimal" : "double";
+    }
+
     private static bool TryReadFirstArgumentBounds(IReadOnlyList<Token> tokens, int openParen, out int argumentStart, out int argumentEnd)
     {
         argumentStart = SkipSeparators(tokens, openParen + 1, tokens.Count);
@@ -851,6 +915,40 @@ internal sealed partial class PscpAnalyzer
         int firstComma = FindTopLevelToken(tokens, argumentStart, closeParen, TokenKind.Comma);
         argumentEnd = firstComma >= 0 ? firstComma : closeParen;
         return argumentStart < argumentEnd;
+    }
+
+    private static bool TryReadArgumentBounds(IReadOnlyList<Token> tokens, int openParen, int count, out IReadOnlyList<(int Start, int EndExclusive)>? bounds)
+    {
+        bounds = null;
+        int closeParen = FindMatching(tokens, openParen, TokenKind.OpenParen, TokenKind.CloseParen, tokens.Count);
+        if (closeParen < 0)
+        {
+            return false;
+        }
+
+        List<int> separators = FindTopLevelSeparators(tokens, openParen + 1, closeParen, TokenKind.Comma);
+        List<(int Start, int EndExclusive)> result = [];
+        int segmentStart = openParen + 1;
+        foreach (int separator in separators.Concat([closeParen]))
+        {
+            int start = segmentStart;
+            int endExclusive = separator;
+            TrimExpressionBounds(tokens, ref start, ref endExclusive);
+            if (start < endExclusive)
+            {
+                result.Add((start, endExclusive));
+            }
+
+            segmentStart = separator + 1;
+        }
+
+        if (result.Count != count)
+        {
+            return false;
+        }
+
+        bounds = result;
+        return true;
     }
 
     private static bool TryReadGenericArgumentSlice(IReadOnlyList<Token> tokens, int start, int openParen, out int genericStart, out int genericEnd)

@@ -78,13 +78,14 @@ internal static class PscpInstaller
             ? UninstallWorkerAsync(options.InstallDirectory, options.WaitForPid, options.StagingDirectory, sink)
             : options.Uninstall
                 ? UninstallAsync(options.InstallDirectory, sink, showUiInWorker: !options.NoUi && Environment.UserInteractive)
-                : InstallAsync(options.InstallDirectory, sink);
+                : InstallAsync(options.InstallDirectory, sink, options.NoIntegrate);
 
     private static InstallerOptions ParseOptions(string[] args)
     {
         bool uninstall = false;
         bool uninstallWorker = false;
         bool noUi = false;
+        bool noIntegrate = false;
         bool showUi = false;
         string installDirectory = GetDefaultInstallDirectory();
         string? stagingDirectory = null;
@@ -113,6 +114,9 @@ internal static class PscpInstaller
                 case "--quiet":
                     noUi = true;
                     break;
+                case "--no-integrate":
+                    noIntegrate = true;
+                    break;
                 case "--show-ui":
                     showUi = true;
                     break;
@@ -121,7 +125,7 @@ internal static class PscpInstaller
             }
         }
 
-        return new InstallerOptions(uninstall, uninstallWorker, noUi, showUi, installDirectory, stagingDirectory, waitForPid);
+        return new InstallerOptions(uninstall, uninstallWorker, noUi, noIntegrate, showUi, installDirectory, stagingDirectory, waitForPid);
     }
 
     private static bool ShouldShowUiInCurrentProcess(InstallerOptions options)
@@ -132,7 +136,7 @@ internal static class PscpInstaller
     private static string GetWindowTitle(InstallerOptions options)
         => options.Uninstall ? "PSCP SDK Removal" : "PSCP SDK Setup";
 
-    private static async Task<int> InstallAsync(string installDirectory, IInstallerStatusSink sink)
+    private static async Task<int> InstallAsync(string installDirectory, IInstallerStatusSink sink, bool noIntegrate)
     {
         installDirectory = NormalizePath(installDirectory);
         string tempDirectory = Path.Combine(Path.GetTempPath(), "pscp-installer", Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
@@ -163,17 +167,26 @@ internal static class PscpInstaller
 
             WriteInstallManifest(installDirectory);
 
-            bool pathUpdated = TryRunWindowsIntegration(sink, "add PSCP to PATH", () => AddToUserPath(installDirectory));
-            bool uninstallerRegistered = TryRunWindowsIntegration(sink, "register PSCP for uninstall", () => WriteUninstallRegistration(installDirectory, uninstallExe));
-            if (pathUpdated || uninstallerRegistered)
+            bool pathUpdated = false;
+            bool uninstallerRegistered = false;
+            if (!noIntegrate)
             {
-                BroadcastEnvironmentChange();
+                pathUpdated = TryRunWindowsIntegration(sink, "add PSCP to PATH", () => AddToUserPath(installDirectory));
+                uninstallerRegistered = TryRunWindowsIntegration(sink, "register PSCP for uninstall", () => WriteUninstallRegistration(installDirectory, uninstallExe));
+                if (pathUpdated || uninstallerRegistered)
+                {
+                    BroadcastEnvironmentChange();
+                }
             }
 
             sink.Info($"Installed {DisplayName} to {installDirectory}");
             if (pathUpdated)
             {
                 sink.Info("You may need to reopen terminals for PATH changes to appear.");
+            }
+            else if (noIntegrate)
+            {
+                sink.Info("Skipped PATH and uninstall registration.");
             }
 
             return 0;
@@ -1064,6 +1077,7 @@ internal static class PscpInstaller
         bool Uninstall,
         bool UninstallWorker,
         bool NoUi,
+        bool NoIntegrate,
         bool ShowUi,
         string InstallDirectory,
         string? StagingDirectory,

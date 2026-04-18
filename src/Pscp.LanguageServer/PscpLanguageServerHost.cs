@@ -785,7 +785,7 @@ public static class PscpLanguageServerHost
                     receiverIndex--;
                 }
 
-                foreach (PscpCompletionEntry item in GetIntrinsicMemberCompletions(analysis, receiverIndex))
+                foreach (PscpCompletionEntry item in GetMemberCompletions(analysis, receiverIndex))
                 {
                     items.Add(item);
                 }
@@ -796,6 +796,11 @@ public static class PscpLanguageServerHost
             foreach (KeyValuePair<string, PscpCompletionEntry> intrinsic in PscpIntrinsics.Globals)
             {
                 items.Add(intrinsic.Value);
+            }
+
+            foreach (PscpCompletionEntry entry in PscpExternalMetadata.GetTopLevelCompletions())
+            {
+                items.Add(entry);
             }
 
             foreach (KeyValuePair<string, PscpCompletionEntry> intrinsic in PscpIntrinsics.IntrinsicFunctions)
@@ -831,35 +836,55 @@ public static class PscpLanguageServerHost
             return Deduplicate(items);
         }
 
-        private static IEnumerable<PscpCompletionEntry> GetIntrinsicMemberCompletions(PscpAnalysisResult analysis, int receiverIndex)
+        private static IEnumerable<PscpCompletionEntry> GetMemberCompletions(PscpAnalysisResult analysis, int receiverIndex)
         {
             if (receiverIndex < 0 || receiverIndex >= analysis.Tokens.Count)
             {
                 return Array.Empty<PscpCompletionEntry>();
             }
 
-            string receiverName = analysis.Tokens[receiverIndex].Text;
+            string receiverName = BuildReceiverChain(analysis.Tokens, receiverIndex);
+            bool instanceContext = false;
+            PscpServerSymbol? receiverSymbol = null;
             if (analysis.TokenToSymbolId.TryGetValue(receiverIndex, out string? symbolId))
             {
-                PscpServerSymbol? symbol = analysis.Symbols.FirstOrDefault(candidate => candidate.Id == symbolId);
-                if (symbol?.IsIntrinsic == true)
+                receiverSymbol = analysis.Symbols.FirstOrDefault(candidate => candidate.Id == symbolId);
+                if (receiverSymbol?.IsIntrinsic == true)
                 {
-                    receiverName = symbol.Name;
+                    receiverName = receiverSymbol.Name;
                 }
-                else if (!string.IsNullOrWhiteSpace(symbol?.TypeDisplay))
+                else if (!string.IsNullOrWhiteSpace(receiverSymbol?.TypeDisplay))
                 {
-                    receiverName = symbol.TypeDisplay!;
+                    receiverName = receiverSymbol.TypeDisplay!;
+                    instanceContext = true;
                 }
             }
 
-            return receiverName switch
+            IEnumerable<PscpCompletionEntry> intrinsicMembers = receiverName switch
             {
                 "stdin" => PscpIntrinsics.StdinMembers.Values,
                 "stdout" => PscpIntrinsics.StdoutMembers.Values,
                 "Array" => PscpIntrinsics.ArrayMembers.Values,
-                _ when PscpIntrinsics.IsTypeLikeReceiverName(receiverName) => PscpIntrinsics.ComparatorMembers.Values,
                 _ => Array.Empty<PscpCompletionEntry>(),
             };
+
+            if (intrinsicMembers.Any())
+            {
+                return intrinsicMembers;
+            }
+
+            IEnumerable<PscpCompletionEntry> externalMembers = PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext);
+            if (externalMembers.Any())
+            {
+                return externalMembers;
+            }
+
+            if (ShouldOfferComparatorMembers(receiverName, instanceContext, receiverSymbol))
+            {
+                return PscpIntrinsics.ComparatorMembers.Values;
+            }
+
+            return Array.Empty<PscpCompletionEntry>();
         }
 
         private static List<PscpCompletionEntry> Deduplicate(IEnumerable<PscpCompletionEntry> items)
@@ -883,6 +908,58 @@ public static class PscpLanguageServerHost
                 PscpServerSymbolKind.Property => 10,
                 _ => 6,
             };
+        }
+
+        private static bool ShouldOfferComparatorMembers(string receiverName, bool instanceContext, PscpServerSymbol? receiverSymbol)
+        {
+            if (instanceContext)
+            {
+                return false;
+            }
+
+            if (receiverSymbol?.Kind == PscpServerSymbolKind.Type)
+            {
+                return true;
+            }
+
+            string normalized = PscpExternalMetadata.NormalizeTypeReceiver(receiverName);
+            return PscpIntrinsics.BuiltinTypes.Contains(normalized)
+                || receiverName.StartsWith('(')
+                || receiverName.EndsWith("[]", StringComparison.Ordinal);
+        }
+
+        private static string BuildReceiverChain(IReadOnlyList<Token> tokens, int receiverIndex)
+        {
+            List<string> segments = [tokens[receiverIndex].Text];
+            int cursor = receiverIndex - 1;
+            while (cursor >= 1)
+            {
+                while (cursor >= 0 && tokens[cursor].Kind is TokenKind.NewLine or TokenKind.Semicolon)
+                {
+                    cursor--;
+                }
+
+                if (cursor < 1 || tokens[cursor].Kind != TokenKind.Dot)
+                {
+                    break;
+                }
+
+                int previousIdentifier = cursor - 1;
+                while (previousIdentifier >= 0 && tokens[previousIdentifier].Kind is TokenKind.NewLine or TokenKind.Semicolon)
+                {
+                    previousIdentifier--;
+                }
+
+                if (previousIdentifier < 0 || tokens[previousIdentifier].Kind != TokenKind.Identifier)
+                {
+                    break;
+                }
+
+                segments.Insert(0, tokens[previousIdentifier].Text);
+                cursor = previousIdentifier - 1;
+            }
+
+            return string.Join(".", segments);
         }
 
         private static bool TryFindSignatureContext(PscpAnalysisResult analysis, int offset, out string? signatureKey, out int activeParameter)

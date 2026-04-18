@@ -25,6 +25,7 @@ internal sealed partial class CSharpEmitter
             MemberAccessExpression member => EmitMemberAccessExpression(member),
             IndexExpression index => EmitIndexExpression(index),
             WithExpression @with => $"{EmitExpression(@with.Receiver)} with {@with.InitializerText}",
+            SwitchExpression @switch => $"{EmitExpression(@switch.Receiver)} {@switch.SwitchText}",
             FromEndExpression fromEnd => $"^{EmitExpression(fromEnd.Operand)}",
             SliceExpression slice => EmitSliceExpression(slice),
             TupleProjectionExpression projection => $"{EmitExpression(projection.Receiver)}.Item{projection.Position}",
@@ -251,27 +252,77 @@ internal sealed partial class CSharpEmitter
     private bool TryEmitSpecializedStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
     {
         emitted = null;
+        if (TryParseSingleGenericMember(memberName, "read", out string? readTypeText)
+            && arguments.Count == 0)
+        {
+            return TryEmitInputReadByText(readTypeText!, out emitted);
+        }
+
         if (TryParseSingleGenericMember(memberName, "array", out string? arrayTypeText)
             && arguments.Count == 1
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } arrayLength)
         {
-            string suffix = arrayTypeText switch
-            {
-                "int" => "Int",
-                "long" => "Long",
-                "double" => "Double",
-                "decimal" => "Decimal",
-                "bool" => "Bool",
-                "char" => "Char",
-                "string" => "String",
-                _ => string.Empty,
-            };
+            return TryEmitExplicitArrayRead(arrayTypeText!, arrayLength.Expression, out emitted);
+        }
 
-            if (suffix.Length > 0)
-            {
-                emitted = $"stdin.array{suffix}({EmitExpression(arrayLength.Expression)})";
-                return true;
-            }
+        if (TryParseSingleGenericMember(memberName, "list", out string? listTypeText)
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } listLength
+            && TryEmitExplicitArrayRead(listTypeText!, listLength.Expression, out string? listArrayRead))
+        {
+            emitted = $"new List<{listTypeText!.Trim()}>({listArrayRead})";
+            return true;
+        }
+
+        if (TryParseSingleGenericMember(memberName, "linkedList", out string? linkedListTypeText)
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } linkedListLength
+            && TryEmitExplicitArrayRead(linkedListTypeText!, linkedListLength.Expression, out string? linkedListArrayRead))
+        {
+            emitted = $"new LinkedList<{linkedListTypeText!.Trim()}>({linkedListArrayRead})";
+            return true;
+        }
+
+        if (TryParseMultipleGenericMembers(memberName, "tuple2", out IReadOnlyList<string>? tuple2Types)
+            && tuple2Types is not null
+            && tuple2Types.Count == 2
+            && arguments.Count == 0
+            && TryEmitTupleReadByTexts(tuple2Types, out string? tuple2Read))
+        {
+            emitted = tuple2Read;
+            return true;
+        }
+
+        if (TryParseMultipleGenericMembers(memberName, "tuple3", out IReadOnlyList<string>? tuple3Types)
+            && tuple3Types is not null
+            && tuple3Types.Count == 3
+            && arguments.Count == 0
+            && TryEmitTupleReadByTexts(tuple3Types, out string? tuple3Read))
+        {
+            emitted = tuple3Read;
+            return true;
+        }
+
+        if (TryParseMultipleGenericMembers(memberName, "tuples2", out IReadOnlyList<string>? tuples2Types)
+            && tuples2Types is not null
+            && tuples2Types.Count == 2
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } tuples2Length
+            && TryEmitTupleSequenceReadByTexts(tuples2Types, tuples2Length.Expression, out string? tuples2Read))
+        {
+            emitted = tuples2Read;
+            return true;
+        }
+
+        if (TryParseMultipleGenericMembers(memberName, "tuples3", out IReadOnlyList<string>? tuples3Types)
+            && tuples3Types is not null
+            && tuples3Types.Count == 3
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } tuples3Length
+            && TryEmitTupleSequenceReadByTexts(tuples3Types, tuples3Length.Expression, out string? tuples3Read))
+        {
+            emitted = tuples3Read;
+            return true;
         }
 
         if (TryParseSingleGenericMember(memberName, "nestedArray", out string? nestedTypeText)
@@ -279,13 +330,7 @@ internal sealed partial class CSharpEmitter
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } rowCount
             && arguments[1] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } columnCount)
         {
-            emitted = nestedTypeText switch
-            {
-                "int" => $"stdin.gridInt({EmitExpression(rowCount.Expression)}, {EmitExpression(columnCount.Expression)})",
-                "long" => $"stdin.gridLong({EmitExpression(rowCount.Expression)}, {EmitExpression(columnCount.Expression)})",
-                _ => null,
-            };
-            return emitted is not null;
+            return TryEmitNestedArrayRead(nestedTypeText!, rowCount.Expression, columnCount.Expression, out emitted);
         }
 
         return false;
@@ -301,6 +346,206 @@ internal sealed partial class CSharpEmitter
 
         argumentText = memberName[(expectedRoot.Length + 1)..^1].Trim();
         return argumentText.Length > 0;
+    }
+
+    private bool TryEmitInputReadByText(string typeText, out string? emitted)
+    {
+        typeText = typeText.Trim();
+        emitted = typeText switch
+        {
+            "int" => "stdin.@int()",
+            "long" => "stdin.@long()",
+            "double" => "stdin.@double()",
+            "decimal" => "stdin.@decimal()",
+            "bool" => "stdin.@bool()",
+            "char" => "stdin.@char()",
+            "string" => "stdin.str()",
+            _ => null,
+        };
+
+        if (emitted is not null)
+        {
+            return true;
+        }
+
+        if (!TryParseTupleTypeText(typeText, out IReadOnlyList<string>? tupleElements) || tupleElements is null)
+        {
+            return false;
+        }
+
+        return TryEmitTupleReadByTexts(tupleElements, out emitted);
+    }
+
+    private bool TryEmitExplicitArrayRead(string typeText, Expression lengthExpression, out string? emitted)
+    {
+        typeText = typeText.Trim();
+        emitted = typeText switch
+        {
+            "int" => $"stdin.arrayInt({EmitExpression(lengthExpression)})",
+            "long" => $"stdin.arrayLong({EmitExpression(lengthExpression)})",
+            "double" => $"stdin.arrayDouble({EmitExpression(lengthExpression)})",
+            "decimal" => $"stdin.arrayDecimal({EmitExpression(lengthExpression)})",
+            "bool" => $"stdin.arrayBool({EmitExpression(lengthExpression)})",
+            "char" => $"stdin.arrayChar({EmitExpression(lengthExpression)})",
+            "string" => $"stdin.arrayString({EmitExpression(lengthExpression)})",
+            _ => null,
+        };
+
+        if (emitted is not null)
+        {
+            return true;
+        }
+
+        if (!TryParseTupleTypeText(typeText, out IReadOnlyList<string>? tupleTypes) || tupleTypes is null)
+        {
+            return false;
+        }
+
+        return TryEmitTupleSequenceReadByTexts(tupleTypes, lengthExpression, out emitted);
+    }
+
+    private bool TryEmitTupleReadByTexts(IReadOnlyList<string> elementTypes, out string? emitted)
+    {
+        emitted = null;
+        List<string> reads = [];
+        foreach (string elementType in elementTypes)
+        {
+            if (!TryEmitInputReadByText(elementType, out string? elementRead))
+            {
+                return false;
+            }
+
+            reads.Add(elementRead!);
+        }
+
+        emitted = $"({string.Join(", ", reads)})";
+        return true;
+    }
+
+    private bool TryEmitTupleSequenceReadByTexts(IReadOnlyList<string> elementTypes, Expression lengthExpression, out string? emitted)
+    {
+        emitted = null;
+        if (!TryEmitTupleReadByTexts(elementTypes, out string? tupleRead))
+        {
+            return false;
+        }
+
+        string tupleTypeText = $"({string.Join(", ", elementTypes.Select(type => type.Trim()))})";
+        string lengthName = NextTemporary("length");
+        string resultName = NextTemporary("result");
+        string indexName = NextTemporary("i");
+        emitted = EmitEval($"int {lengthName} = {EmitExpression(lengthExpression)}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
+        return true;
+    }
+
+    private bool TryEmitNestedArrayRead(string typeText, Expression rowCountExpression, Expression columnCountExpression, out string? emitted)
+    {
+        typeText = typeText.Trim();
+        emitted = typeText switch
+        {
+            "int" => $"stdin.gridInt({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "long" => $"stdin.gridLong({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            _ => null,
+        };
+
+        if (emitted is not null)
+        {
+            return true;
+        }
+
+        if (!TryEmitExplicitArrayRead(typeText, columnCountExpression, out string? rowRead))
+        {
+            return false;
+        }
+
+        string rowCountName = NextTemporary("rows");
+        string resultName = NextTemporary("result");
+        string indexName = NextTemporary("i");
+        emitted = EmitEval($"int {rowCountName} = {EmitExpression(rowCountExpression)}; {typeText}[][] {resultName} = new {typeText}[{rowCountName}][]; for (int {indexName} = 0; {indexName} < {rowCountName}; {indexName}++) {{ {resultName}[{indexName}] = {rowRead}; }} return {resultName};");
+        return true;
+    }
+
+    private static bool TryParseMultipleGenericMembers(string memberName, string expectedRoot, out IReadOnlyList<string>? argumentTexts)
+    {
+        argumentTexts = null;
+        if (!TryParseSingleGenericMember(memberName, expectedRoot, out string? rawArguments) || string.IsNullOrWhiteSpace(rawArguments))
+        {
+            return false;
+        }
+
+        List<string> parts = SplitTopLevelCommaSeparated(rawArguments!);
+        if (parts.Count == 0)
+        {
+            return false;
+        }
+
+        argumentTexts = parts;
+        return true;
+    }
+
+    private static bool TryParseTupleTypeText(string typeText, out IReadOnlyList<string>? elementTypes)
+    {
+        elementTypes = null;
+        typeText = typeText.Trim();
+        if (!typeText.StartsWith("(", StringComparison.Ordinal) || !typeText.EndsWith(")", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        List<string> parts = SplitTopLevelCommaSeparated(typeText[1..^1]);
+        if (parts.Count == 0)
+        {
+            return false;
+        }
+
+        elementTypes = parts;
+        return true;
+    }
+
+    private static List<string> SplitTopLevelCommaSeparated(string text)
+    {
+        List<string> parts = [];
+        int angleDepth = 0;
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int start = 0;
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            switch (text[i])
+            {
+                case '<':
+                    angleDepth++;
+                    break;
+                case '>':
+                    angleDepth = Math.Max(0, angleDepth - 1);
+                    break;
+                case '(':
+                    parenDepth++;
+                    break;
+                case ')':
+                    parenDepth = Math.Max(0, parenDepth - 1);
+                    break;
+                case '[':
+                    bracketDepth++;
+                    break;
+                case ']':
+                    bracketDepth = Math.Max(0, bracketDepth - 1);
+                    break;
+                case ',' when angleDepth == 0 && parenDepth == 0 && bracketDepth == 0:
+                    parts.Add(text[start..i].Trim());
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        string last = text[start..].Trim();
+        if (last.Length > 0)
+        {
+            parts.Add(last);
+        }
+
+        return parts;
     }
 
 
@@ -739,6 +984,11 @@ internal sealed partial class CSharpEmitter
             return;
         }
 
+        if (TryEmitDirectInputDeclaration(declaration, hoisted: false))
+        {
+            return;
+        }
+
         if (declaration.Targets.Count == 1 && declaration.Targets[0] is TupleTarget tupleTarget)
         {
             _writer.WriteLine($"var {EmitBindingPattern(tupleTarget)} = {EmitInputRead(declaration.ExplicitType)};");
@@ -773,6 +1023,71 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine($"{EmitType(NormalizeSizedType(declaration.ExplicitType))} {EmitBindingPattern(onlyTarget)} = {readExpression};");
     }
 
+    private bool TryEmitDirectInputDeclaration(DeclarationStatement declaration, bool hoisted)
+    {
+        if (declaration.ExplicitType is not SizedArrayTypeSyntax sized
+            || declaration.Targets.Count != 1
+            || declaration.Targets[0] is not NameTarget nameTarget)
+        {
+            return false;
+        }
+
+        return TryEmitDirectSizedInputInitialization(nameTarget.Name, sized, hoisted);
+    }
+
+    private bool TryEmitDirectSizedInputInitialization(string targetName, SizedArrayTypeSyntax sized, bool hoisted)
+    {
+        string normalizedTargetName = EmitBindingPattern(new NameTarget(targetName));
+        string elementRead = EmitInputRead(sized.ElementType);
+        if (elementRead == "default!")
+        {
+            return false;
+        }
+
+        string lengthName = NextTemporary("length");
+        string indexName = NextTemporary("i");
+        string elementTypeText = EmitType(sized.ElementType);
+        string arrayTypeText = EmitType(new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count));
+        string declarationPrefix = hoisted ? string.Empty : arrayTypeText + " ";
+
+        if (sized.Dimensions.Count == 1)
+        {
+            _writer.WriteLine($"int {lengthName} = {EmitExpression(sized.Dimensions[0])};");
+            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = new {elementTypeText}[{lengthName}];");
+            _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
+            _writer.WriteLine("{");
+            _writer.Indent();
+            _writer.WriteLine($"{normalizedTargetName}[{indexName}] = {elementRead};");
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return true;
+        }
+
+        if (sized.Dimensions.Count == 2)
+        {
+            string innerLengthName = NextTemporary("innerLength");
+            string innerIndexName = NextTemporary("j");
+            _writer.WriteLine($"int {lengthName} = {EmitExpression(sized.Dimensions[0])};");
+            _writer.WriteLine($"int {innerLengthName} = {EmitExpression(sized.Dimensions[1])};");
+            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = new {elementTypeText}[{lengthName}][];");
+            _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
+            _writer.WriteLine("{");
+            _writer.Indent();
+            _writer.WriteLine($"{normalizedTargetName}[{indexName}] = new {elementTypeText}[{innerLengthName}];");
+            _writer.WriteLine($"for (int {innerIndexName} = 0; {innerIndexName} < {innerLengthName}; {innerIndexName}++)");
+            _writer.WriteLine("{");
+            _writer.Indent();
+            _writer.WriteLine($"{normalizedTargetName}[{indexName}][{innerIndexName}] = {elementRead};");
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return true;
+        }
+
+        return false;
+    }
+
     private string EmitInputRead(TypeSyntax type)
     {
         return type switch
@@ -803,13 +1118,12 @@ internal sealed partial class CSharpEmitter
     {
         if (sized.ElementType is TupleTypeSyntax tuple && sized.Dimensions.Count == 1)
         {
-            string genericArgs = string.Join(", ", tuple.Elements.Select(element => EmitType(element)));
-            return tuple.Elements.Count switch
-            {
-                2 => $"stdin.tuples2<{genericArgs}>({EmitExpression(sized.Dimensions[0])})",
-                3 => $"stdin.tuples3<{genericArgs}>({EmitExpression(sized.Dimensions[0])})",
-                _ => "default!"
-            };
+            string tupleTypeText = $"({string.Join(", ", tuple.Elements.Select(EmitType))})";
+            string tupleRead = $"({string.Join(", ", tuple.Elements.Select(EmitInputRead))})";
+            string lengthName = NextTemporary("length");
+            string resultName = NextTemporary("result");
+            string indexName = NextTemporary("i");
+            return EmitEval($"int {lengthName} = {EmitExpression(sized.Dimensions[0])}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
         }
 
         if (sized.Dimensions.Count == 1)
@@ -1315,27 +1629,60 @@ internal sealed partial class CSharpEmitter
         return useLong ? "1L" : "1";
     }
 
+    private static bool CanInlineDirectRangeExpression(Expression expression)
+        => expression is IdentifierExpression
+            or LiteralExpression
+            or MemberAccessExpression
+            or IndexExpression
+            or TupleProjectionExpression;
+
     private string EmitLoopOverSource(Expression source, string itemName, string bodyStatements, string? indexName = null)
     {
         if (source is RangeExpression range)
         {
             bool useLong = IsLongRange(range, null);
             string numericType = useLong ? "long" : "int";
-            string startName = NextTemporary("start");
-            string endName = NextTemporary("end");
             string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-            string indexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
 
             if (range.Step is null)
             {
+                if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
+                {
+                    string directStart = EmitExpression(range.Start);
+                    string directEnd = EmitExpression(range.End);
+                    string directHeader = indexName is null
+                        ? $"for ({numericType} {itemName} = {directStart}; {itemName} {comparison} {directEnd}; {itemName}++)"
+                        : $"for ({numericType} {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++)";
+                    return $"{{ {directHeader} {{ {bodyStatements} }} }}";
+                }
+
+                string rangeStartName = NextTemporary("start");
+                string rangeEndName = NextTemporary("end");
+                string rangeIndexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
                 string update = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
-                return $"{{ {numericType} {startName} = {EmitExpression(range.Start)}; {numericType} {endName} = {EmitExpression(range.End)}; {indexPrefix}for ({numericType} {itemName} = {startName}; {itemName} {comparison} {endName}; {update}) {{ {bodyStatements} }} }}";
+                return $"{{ {numericType} {rangeStartName} = {EmitExpression(range.Start)}; {numericType} {rangeEndName} = {EmitExpression(range.End)}; {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStartName}; {itemName} {comparison} {rangeEndName}; {update}) {{ {bodyStatements} }} }}";
             }
 
+            string steppedStartName = NextTemporary("start");
+            string steppedEndName = NextTemporary("end");
             string stepName = NextTemporary("step");
             string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
             string updateWithStep = indexName is null ? $"{itemName} += {stepName}" : $"{itemName} += {stepName}, {indexName}++";
-            return $"{{ {numericType} {startName} = {EmitExpression(range.Start)}; {numericType} {endName} = {EmitExpression(range.End)}; {numericType} {stepName} = {EmitExpression(range.Step)}; if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\"); {indexPrefix}for ({numericType} {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {backwardOp} {endName}; {updateWithStep}) {{ {bodyStatements} }} }}";
+            string steppedIndexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
+            return $$"""
+                {
+                    {{numericType}} {{steppedStartName}} = {{EmitExpression(range.Start)}};
+                    {{numericType}} {{steppedEndName}} = {{EmitExpression(range.End)}};
+                    {{numericType}} {{stepName}} = {{EmitExpression(range.Step)}};
+                #if DEBUG
+                    if ({{stepName}} == 0) throw new InvalidOperationException("Range step cannot be zero.");
+                #endif
+                    {{steppedIndexPrefix}}for ({{numericType}} {{itemName}} = {{steppedStartName}}; {{stepName}} > 0 ? {{itemName}} {{comparison}} {{steppedEndName}} : {{itemName}} {{backwardOp}} {{steppedEndName}}; {{updateWithStep}})
+                    {
+                        {{bodyStatements}}
+                    }
+                }
+                """;
         }
 
         if (indexName is null)
@@ -1435,6 +1782,19 @@ internal sealed partial class CSharpEmitter
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
         if (range.Step is null)
         {
+            if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
+            {
+                string directStart = EmitExpression(range.Start);
+                string directEnd = EmitExpression(range.End);
+                string directCount = range.Kind == RangeKind.RightExclusive
+                    ? $"{directStart} < {directEnd} ? {directEnd} - {directStart} : 0"
+                    : $"{directStart} <= {directEnd} ? ({directEnd} - {directStart}) + 1 : 0";
+                string directLoop = indexName is null
+                    ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++) {{ {resultName}[{slotName}] = {valueExpression}; }}"
+                    : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++) {{ {resultName}[{indexName}] = {valueExpression}; }}";
+                return EmitEval($"{elementTypeText}[] {resultName} = new {elementTypeText}[{directCount}]; {directLoop} return {resultName};");
+            }
+
             string countExpression = range.Kind == RangeKind.RightExclusive
                 ? $"{startName} < {endName} ? {endName} - {startName} : 0"
                 : $"{startName} <= {endName} ? ({endName} - {startName}) + 1 : 0";
@@ -1452,7 +1812,24 @@ internal sealed partial class CSharpEmitter
             : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
         string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
         string loopUpdateWithStep = indexName is null ? $"{itemName} += {stepName}" : $"{itemName} += {stepName}, {indexName}++";
-        return EmitEval($"int {startName} = {EmitExpression(range.Start)}; int {endName} = {EmitExpression(range.End)}; int {stepName} = {EmitExpression(range.Step)}; if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\"); int {absStepName} = {stepName} > 0 ? {stepName} : -{stepName}; int {countName} = {stepName} > 0 ? {forwardCount} : {backwardCount}; {elementTypeText}[] {resultName} = new {elementTypeText}[{countName}]; int {slotName} = 0; {indexInit}for (int {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {backwardOp} {endName}; {loopUpdateWithStep}) {{ {resultName}[{slotName}++] = {valueExpression}; }} return {resultName};");
+        return EmitEval(
+            $$"""
+            int {{startName}} = {{EmitExpression(range.Start)}};
+            int {{endName}} = {{EmitExpression(range.End)}};
+            int {{stepName}} = {{EmitExpression(range.Step)}};
+            #if DEBUG
+            if ({{stepName}} == 0) throw new InvalidOperationException("Range step cannot be zero.");
+            #endif
+            int {{absStepName}} = {{stepName}} > 0 ? {{stepName}} : -{{stepName}};
+            int {{countName}} = {{stepName}} > 0 ? {{forwardCount}} : {{backwardCount}};
+            {{elementTypeText}}[] {{resultName}} = new {{elementTypeText}}[{{countName}}];
+            int {{slotName}} = 0;
+            {{indexInit}}for (int {{itemName}} = {{startName}}; {{stepName}} > 0 ? {{itemName}} {{comparison}} {{endName}} : {{itemName}} {{backwardOp}} {{endName}}; {{loopUpdateWithStep}})
+            {
+                {{resultName}}[{{slotName}}++] = {{valueExpression}};
+            }
+            return {{resultName}};
+            """);
     }
 
     private string EmitGeneralCollectionMaterialization(CollectionExpression collection, TypeSyntax? targetTypeHint, TypeSyntax? elementHint)
@@ -1566,7 +1943,8 @@ internal sealed partial class CSharpEmitter
             "minBy" or "maxBy" => TryEmitDirectMinMaxByIntrinsic(call, name, receiver, arguments, out emitted),
             "count" or "any" or "all" or "find" or "findIndex" or "findLastIndex" => TryEmitDirectPredicateIntrinsic(call, name, receiver, arguments, out emitted),
             "chmin" or "chmax" => TryEmitDirectCompareUpdateIntrinsic(name, arguments, out emitted),
-            "abs" or "sqrt" => TryEmitDirectMathIntrinsic(name, arguments, out emitted),
+            "abs" or "sqrt" or "clamp" or "gcd" or "lcm" or "floor" or "ceil" or "round" or "pow" or "popcount" or "bitLength"
+                => TryEmitDirectMathIntrinsic(name, arguments, out emitted),
             _ => false,
         });
     }
@@ -1696,20 +2074,106 @@ internal sealed partial class CSharpEmitter
     {
         emitted = null;
         if (!TryGetPositionalExpressionArguments(arguments, out IReadOnlyList<ExpressionArgumentSyntax>? positional)
-            || positional is null
-            || positional.Count != 1)
+            || positional is null)
         {
             return false;
         }
 
-        string operand = EmitExpression(positional[0].Expression);
         emitted = name switch
         {
-            "abs" => $"System.Math.Abs({operand})",
-            "sqrt" => $"System.Math.Sqrt({operand})",
+            "abs" when positional.Count == 1 => $"System.Math.Abs({EmitExpression(positional[0].Expression)})",
+            "sqrt" when positional.Count == 1 => $"System.Math.Sqrt({EmitExpression(positional[0].Expression)})",
+            "floor" when positional.Count == 1 => $"System.Math.Floor({EmitExpression(positional[0].Expression)})",
+            "ceil" when positional.Count == 1 => $"System.Math.Ceiling({EmitExpression(positional[0].Expression)})",
+            "round" when positional.Count == 1 => $"System.Math.Round({EmitExpression(positional[0].Expression)})",
+            "pow" when positional.Count == 2 => $"System.Math.Pow({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
+            "clamp" when positional.Count == 3 => EmitClampIntrinsic(positional),
+            "gcd" when positional.Count == 2 => EmitIntegralMathHelperCall("gcd", positional[0].Expression, positional[1].Expression),
+            "lcm" when positional.Count == 2 => EmitIntegralMathHelperCall("lcm", positional[0].Expression, positional[1].Expression),
+            "popcount" when positional.Count == 1 => EmitIntegralMathHelperCall("popcount", positional[0].Expression),
+            "bitLength" when positional.Count == 1 => EmitIntegralMathHelperCall("bitLength", positional[0].Expression),
             _ => null,
         };
         return emitted is not null;
+    }
+
+    private string? EmitClampIntrinsic(IReadOnlyList<ExpressionArgumentSyntax> positional)
+    {
+        TypeSyntax? commonType = PromoteMathType(positional.Select(argument => argument.Expression));
+        if (!PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType))
+        {
+            return null;
+        }
+
+        return $"System.Math.Clamp({EmitMathArgument(positional[0].Expression, commonType)}, {EmitMathArgument(positional[1].Expression, commonType)}, {EmitMathArgument(positional[2].Expression, commonType)})";
+    }
+
+    private string? EmitIntegralMathHelperCall(string helperName, params Expression[] expressions)
+    {
+        TypeSyntax? commonType = PromoteMathType(expressions);
+        if (!PscpIntrinsicCatalog.IsIntegralMathCompatible(commonType))
+        {
+            return null;
+        }
+
+        return $"__PscpSeq.{helperName}({string.Join(", ", expressions.Select(expression => EmitMathArgument(expression, commonType)))})";
+    }
+
+    private string EmitMathArgument(Expression expression, TypeSyntax? targetType)
+    {
+        string emitted = EmitExpression(expression);
+        return targetType is null || Equals(_semantic?.GetExpressionType(expression), targetType)
+            ? emitted
+            : $"({EmitType(targetType)})({emitted})";
+    }
+
+    private TypeSyntax? PromoteMathType(IEnumerable<Expression> expressions)
+    {
+        TypeSyntax? promoted = null;
+        foreach (Expression expression in expressions)
+        {
+            TypeSyntax? current = _semantic?.GetExpressionType(expression);
+            if (promoted is null)
+            {
+                promoted = current;
+                continue;
+            }
+
+            promoted = PromoteMathType(promoted, current);
+        }
+
+        return promoted;
+    }
+
+    private static TypeSyntax? PromoteMathType(TypeSyntax? left, TypeSyntax? right)
+    {
+        if (Equals(left, right))
+        {
+            return left;
+        }
+
+        if (left is not NamedTypeSyntax leftNamed || right is not NamedTypeSyntax rightNamed)
+        {
+            return left ?? right;
+        }
+
+        static int Rank(string name) => name switch
+        {
+            "int" => 0,
+            "long" => 1,
+            "double" => 2,
+            "decimal" => 3,
+            _ => -1,
+        };
+
+        int leftRank = Rank(leftNamed.Name);
+        int rightRank = Rank(rightNamed.Name);
+        if (leftRank < 0 || rightRank < 0)
+        {
+            return left ?? right;
+        }
+
+        return leftRank >= rightRank ? left : right;
     }
 
     private string EmitMinMaxLoop(Expression source, TypeSyntax resultType, string bestName, string hasValueName, bool preferLower)

@@ -32,7 +32,7 @@ internal sealed partial class CSharpEmitter
                 _writer.WriteLine();
             }
 
-            EmitSequenceHelpers();
+            EmitSequenceHelpers(programText, verbose);
             wroteBlock = true;
         }
 
@@ -109,9 +109,9 @@ internal sealed partial class CSharpEmitter
             """);
     }
 
-    private void EmitSequenceHelpers()
+    private void EmitSequenceHelpers(string programText, bool verbose)
     {
-        WriteRuntimeBlock(
+        string template =
             """
             public static class __PscpSeq
             {
@@ -122,6 +122,49 @@ internal sealed partial class CSharpEmitter
                 public static List<T> toList<T>(IEnumerable<T> sequence) => sequence.ToList();
                 public static LinkedList<T> toLinkedList<T>(IEnumerable<T> sequence) => new(sequence);
                 public static int compare<T>(T left, T right) => Comparer<T>.Default.Compare(left, right);
+                public static int gcd(int left, int right)
+                {
+                    uint a = left >= 0 ? (uint)left : (uint)(-(long)left);
+                    uint b = right >= 0 ? (uint)right : (uint)(-(long)right);
+                    while (b != 0)
+                    {
+                        uint next = a % b;
+                        a = b;
+                        b = next;
+                    }
+
+                    return unchecked((int)a);
+                }
+
+                public static long gcd(long left, long right)
+                {
+                    ulong a = left >= 0 ? (ulong)left : (ulong)(-(left + 1)) + 1UL;
+                    ulong b = right >= 0 ? (ulong)right : (ulong)(-(right + 1)) + 1UL;
+                    while (b != 0)
+                    {
+                        ulong next = a % b;
+                        a = b;
+                        b = next;
+                    }
+
+                    return unchecked((long)a);
+                }
+
+                public static int lcm(int left, int right) => left == 0 || right == 0 ? 0 : (int)Math.Abs((long)left / gcd(left, right) * right);
+                public static long lcm(long left, long right) => left == 0 || right == 0 ? 0L : Math.Abs((left / gcd(left, right)) * right);
+                public static int popcount(int value) => System.Numerics.BitOperations.PopCount(unchecked((uint)value));
+                public static int popcount(long value) => System.Numerics.BitOperations.PopCount(unchecked((ulong)value));
+                public static int bitLength(int value)
+                {
+                    uint magnitude = value >= 0 ? (uint)value : (uint)(-(long)value);
+                    return magnitude == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
+                }
+
+                public static int bitLength(long value)
+                {
+                    ulong magnitude = value >= 0 ? (ulong)value : (ulong)(-(value + 1)) + 1UL;
+                    return magnitude == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
+                }
 
                 public static IEnumerable<int> rangeInt(int start, int end, bool inclusive)
                     => rangeInt(start, end, 1, inclusive);
@@ -515,7 +558,178 @@ internal sealed partial class CSharpEmitter
                     return result;
                 }
             }
-            """);
+            """;
+
+        WriteRuntimeBlock(verbose ? template : PruneSequenceHelperMembers(template, programText));
+    }
+
+    private static string PruneSequenceHelperMembers(string template, string programText)
+    {
+        HashSet<string> required = GetRequiredSequenceHelperNames(programText);
+        if (required.Contains("freq"))
+        {
+            required.Add("groupCount");
+        }
+
+        string[] lines = template.Replace("\r", string.Empty).Split('\n');
+        System.Text.StringBuilder builder = new();
+        bool insideClass = false;
+
+        for (int i = 0; i < lines.Length;)
+        {
+            string line = lines[i];
+            string trimmed = line.TrimStart();
+
+            if (!insideClass)
+            {
+                builder.AppendLine(line);
+                if (trimmed == "{")
+                {
+                    insideClass = true;
+                }
+
+                i++;
+                continue;
+            }
+
+            if (trimmed == "}")
+            {
+                builder.AppendLine(line);
+                break;
+            }
+
+            if (!trimmed.StartsWith("public static ", StringComparison.Ordinal))
+            {
+                builder.AppendLine(line);
+                i++;
+                continue;
+            }
+
+            string memberName = GetSequenceHelperMemberName(trimmed);
+            List<string> memberLines = [];
+            int depth = 1;
+            int j = i;
+
+            while (j < lines.Length)
+            {
+                string current = lines[j];
+                memberLines.Add(current);
+                depth += CountOccurrences(current, '{');
+                depth -= CountOccurrences(current, '}');
+
+                bool expressionBodied = j == i
+                    && depth == 1
+                    && current.Contains("=>", StringComparison.Ordinal)
+                    && current.TrimEnd().EndsWith(';');
+
+                j++;
+                if (expressionBodied || (j > i + 1 && depth == 1))
+                {
+                    if (j < lines.Length && string.IsNullOrWhiteSpace(lines[j]))
+                    {
+                        memberLines.Add(lines[j]);
+                        j++;
+                    }
+
+                    break;
+                }
+            }
+
+            if (required.Contains(memberName))
+            {
+                foreach (string memberLine in memberLines)
+                {
+                    builder.AppendLine(memberLine);
+                }
+            }
+
+            i = j;
+        }
+
+        return builder.ToString().TrimEnd('\n');
+    }
+
+    private static HashSet<string> GetRequiredSequenceHelperNames(string programText)
+    {
+        HashSet<string> required = [];
+        string[] helperNames =
+        [
+            "arrayOf", "one", "concat", "toArray", "toList", "toLinkedList", "compare",
+            "gcd", "lcm", "popcount", "bitLength",
+            "rangeInt", "rangeLong",
+            "map", "filter", "fold", "scan", "mapFold",
+            "sum", "sumBy", "min", "max", "minBy", "maxBy",
+            "count", "any", "all", "find", "findIndex", "findLastIndex",
+            "sort", "sortBy", "sortWith",
+            "distinct", "reverse", "copy",
+            "groupCount", "freq", "index",
+            "chmin", "chmax",
+        ];
+
+        foreach (string helperName in helperNames)
+        {
+            if (programText.Contains("__PscpSeq." + helperName + "(", StringComparison.Ordinal)
+                || programText.Contains("." + helperName + "(", StringComparison.Ordinal))
+            {
+                required.Add(helperName);
+            }
+        }
+
+        return required;
+    }
+
+    private static string GetSequenceHelperMemberName(string signature)
+    {
+        int openParen = signature.IndexOf('(');
+        if (openParen < 0)
+        {
+            return string.Empty;
+        }
+
+        int start = openParen - 1;
+        int genericDepth = 0;
+        while (start >= 0)
+        {
+            char current = signature[start];
+            if (current == '>')
+            {
+                genericDepth++;
+                start--;
+                continue;
+            }
+
+            if (current == '<')
+            {
+                genericDepth--;
+                start--;
+                continue;
+            }
+
+            if (genericDepth == 0 && char.IsWhiteSpace(current))
+            {
+                break;
+            }
+
+            start--;
+        }
+
+        string token = signature[(start + 1)..openParen];
+        int genericIndex = token.IndexOf('<');
+        return genericIndex >= 0 ? token[..genericIndex] : token;
+    }
+
+    private static int CountOccurrences(string text, char value)
+    {
+        int count = 0;
+        foreach (char current in text)
+        {
+            if (current == value)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private void EmitStdinHelpers(string programText, bool verbose)
@@ -541,15 +755,6 @@ internal sealed partial class CSharpEmitter
         bool needArrayBool = verbose || Contains(programText, "stdin.arrayBool(");
         bool needArrayChar = verbose || Contains(programText, "stdin.arrayChar(");
         bool needArrayString = verbose || Contains(programText, "stdin.arrayString(");
-        bool needGenericRead = verbose || Contains(programText, "stdin.read<");
-        bool needGenericArray = verbose || Contains(programText, "stdin.array<");
-        bool needList = verbose || Contains(programText, "stdin.list<");
-        bool needLinkedList = verbose || Contains(programText, "stdin.linkedList<");
-        bool needTuple2 = verbose || Contains(programText, "stdin.tuple2<");
-        bool needTuple3 = verbose || Contains(programText, "stdin.tuple3<");
-        bool needTuples2 = verbose || Contains(programText, "stdin.tuples2<");
-        bool needTuples3 = verbose || Contains(programText, "stdin.tuples3<");
-        bool needNestedArray = verbose || Contains(programText, "stdin.nestedArray<");
         bool needGridInt = verbose || Contains(programText, "stdin.gridInt(");
         bool needGridLong = verbose || Contains(programText, "stdin.gridLong(");
         bool needCharGrid = verbose || Contains(programText, "stdin.charGrid(");
@@ -558,25 +763,22 @@ internal sealed partial class CSharpEmitter
         needArrayInt |= needGridInt;
         needArrayLong |= needGridLong;
 
-        needGenericArray |= needList || needLinkedList || needNestedArray;
-        needGenericRead |= needGenericArray || needTuple2 || needTuple3 || needTuples2 || needTuples3;
-        needInt |= needGenericRead;
-        needLong |= needGenericRead;
-        needDouble |= needGenericRead;
-        needDecimal |= needGenericRead;
-        needBool |= needGenericRead;
-        needChar |= needGenericRead;
-        needString |= needGenericRead;
-
-        bool needNextToken = verbose || needDouble || needDecimal || needBool || needChar || needString || needGenericRead;
+        bool needNextToken = verbose || needDouble || needDecimal || needBool || needChar || needString;
         bool needReadInt = verbose || needInt || needArrayInt || needGridInt;
         bool needReadLong = verbose || needLong || needArrayLong || needGridLong;
-        bool needParseBool = verbose || needBool || needGenericRead;
+        bool needParseBool = verbose || needBool;
+        bool needScannerCore = verbose || needNextToken || needReadInt || needReadLong;
+        bool needLineAlignment = needLine && needScannerCore;
 
         System.Text.StringBuilder builder = new();
         builder.AppendLine("public sealed class __PscpStdin");
         builder.AppendLine("{");
         builder.AppendLine("    private readonly StreamReader _reader = new(Console.OpenStandardInput(), Encoding.UTF8, false, 1 << 16);");
+        if (needLineAlignment)
+        {
+            builder.AppendLine("    private bool _afterTokenRead;");
+        }
+
         builder.AppendLine();
 
         if (needInt) builder.AppendLine("    public int @int() => ReadInt();");
@@ -597,7 +799,25 @@ internal sealed partial class CSharpEmitter
         }
 
         if (needString) builder.AppendLine("    public string str() => NextToken();");
-        if (needLine) builder.AppendLine("    public string line() => _reader.ReadLine() ?? string.Empty;");
+        if (needLine)
+        {
+            builder.AppendLine(
+                needLineAlignment
+                    ? """
+                        public string line()
+                        {
+                            ConsumePendingLineBoundary();
+                            return _reader.ReadLine() ?? string.Empty;
+                        }
+                        """
+                    : """
+                        public string line()
+                        {
+                            return _reader.ReadLine() ?? string.Empty;
+                        }
+                        """);
+        }
+
         if (needLines)
         {
             builder.AppendLine(
@@ -705,89 +925,6 @@ internal sealed partial class CSharpEmitter
                 """);
         }
 
-        if (needGenericRead)
-        {
-            builder.AppendLine(
-                """
-                    public T read<T>()
-                    {
-                        if (typeof(T) == typeof(int)) return (T)(object)@int();
-                        if (typeof(T) == typeof(long)) return (T)(object)@long();
-                        if (typeof(T) == typeof(double)) return (T)(object)@double();
-                        if (typeof(T) == typeof(decimal)) return (T)(object)@decimal();
-                        if (typeof(T) == typeof(bool)) return (T)(object)@bool();
-                        if (typeof(T) == typeof(char)) return (T)(object)@char();
-                        if (typeof(T) == typeof(string)) return (T)(object)str();
-                        throw new InvalidOperationException($"Unsupported stdin.read<{typeof(T).Name}>() call.");
-                    }
-                """);
-        }
-
-        if (needGenericArray)
-        {
-            builder.AppendLine(
-                """
-                    public T[] array<T>(int n)
-                    {
-                        if (typeof(T) == typeof(int)) return (T[])(object)arrayInt(n);
-                        if (typeof(T) == typeof(long)) return (T[])(object)arrayLong(n);
-                        if (typeof(T) == typeof(double)) return (T[])(object)arrayDouble(n);
-                        if (typeof(T) == typeof(decimal)) return (T[])(object)arrayDecimal(n);
-                        if (typeof(T) == typeof(bool)) return (T[])(object)arrayBool(n);
-                        if (typeof(T) == typeof(char)) return (T[])(object)arrayChar(n);
-                        if (typeof(T) == typeof(string)) return (T[])(object)arrayString(n);
-
-                        T[] result = new T[n];
-                        for (int i = 0; i < n; i++) result[i] = read<T>();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needList) builder.AppendLine("    public List<T> list<T>(int n) => new(array<T>(n));");
-        if (needLinkedList) builder.AppendLine("    public LinkedList<T> linkedList<T>(int n) => new(array<T>(n));");
-        if (needTuple2) builder.AppendLine("    public (T1, T2) tuple2<T1, T2>() => (read<T1>(), read<T2>());");
-        if (needTuple3) builder.AppendLine("    public (T1, T2, T3) tuple3<T1, T2, T3>() => (read<T1>(), read<T2>(), read<T3>());");
-
-        if (needTuples2)
-        {
-            builder.AppendLine(
-                """
-                    public (T1, T2)[] tuples2<T1, T2>(int n)
-                    {
-                        (T1, T2)[] result = new (T1, T2)[n];
-                        for (int i = 0; i < n; i++) result[i] = tuple2<T1, T2>();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needTuples3)
-        {
-            builder.AppendLine(
-                """
-                    public (T1, T2, T3)[] tuples3<T1, T2, T3>(int n)
-                    {
-                        (T1, T2, T3)[] result = new (T1, T2, T3)[n];
-                        for (int i = 0; i < n; i++) result[i] = tuple3<T1, T2, T3>();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needNestedArray)
-        {
-            builder.AppendLine(
-                """
-                    public T[][] nestedArray<T>(int n, int m)
-                    {
-                        T[][] result = new T[n][];
-                        for (int i = 0; i < n; i++) result[i] = array<T>(m);
-                        return result;
-                    }
-                """);
-        }
-
         if (needGridInt)
         {
             builder.AppendLine(
@@ -840,11 +977,11 @@ internal sealed partial class CSharpEmitter
                 """);
         }
 
-        if (needNextToken)
+        if (needScannerCore)
         {
             builder.AppendLine(
                 """
-                    private string NextToken()
+                    private int SkipTokenSeparators()
                     {
                         int next;
                         while ((next = _reader.Peek()) >= 0 && char.IsWhiteSpace((char)next))
@@ -852,10 +989,52 @@ internal sealed partial class CSharpEmitter
                             _reader.Read();
                         }
 
+                        return next;
+                    }
+                """);
+        }
+
+        if (needLineAlignment)
+        {
+            builder.AppendLine(
+                """
+                    private void ConsumePendingLineBoundary()
+                    {
+                        if (!_afterTokenRead)
+                        {
+                            return;
+                        }
+
+                        int next;
+                        while ((next = _reader.Peek()) is ' ' or '\t' or '\r')
+                        {
+                            _reader.Read();
+                        }
+
+                        if (_reader.Peek() == '\n')
+                        {
+                            _reader.Read();
+                        }
+
+                        _afterTokenRead = false;
+                    }
+                """);
+        }
+
+        if (needNextToken)
+        {
+            builder.AppendLine(
+                """
+                    private string NextToken()
+                    {
+                        int next = SkipTokenSeparators();
+
+                    #if DEBUG
                         if (next < 0)
                         {
                             throw new EndOfStreamException("Unexpected end of input.");
                         }
+                    #endif
 
                         StringBuilder token = new();
                         while ((next = _reader.Peek()) >= 0 && !char.IsWhiteSpace((char)next))
@@ -863,6 +1042,22 @@ internal sealed partial class CSharpEmitter
                             token.Append((char)_reader.Read());
                         }
 
+                    #if DEBUG
+                        if (token.Length == 0)
+                        {
+                            throw new FormatException("Expected a token.");
+                        }
+                    #endif
+
+                """);
+
+            if (needLineAlignment)
+            {
+                builder.AppendLine("        _afterTokenRead = token.Length != 0;");
+            }
+
+            builder.AppendLine(
+                """
                         return token.ToString();
                     }
                 """);
@@ -874,43 +1069,68 @@ internal sealed partial class CSharpEmitter
                 """
                     private int ReadInt()
                     {
-                        int next;
-                        while ((next = _reader.Peek()) >= 0 && char.IsWhiteSpace((char)next))
-                        {
-                            _reader.Read();
-                        }
+                        int next = SkipTokenSeparators();
 
+                    #if DEBUG
                         if (next < 0)
                         {
                             throw new EndOfStreamException("Unexpected end of input.");
                         }
+                    #endif
 
-                        int sign = 1;
-                        if (next == '-')
+                        bool negative = false;
+                        if (next is '+' or '-')
                         {
-                            sign = -1;
+                            negative = next == '-';
                             _reader.Read();
+                            next = _reader.Peek();
                         }
 
-                        int value = 0;
-                        bool hasDigit = false;
-                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
-                        {
-                            hasDigit = true;
-                            value = (value * 10) + (_reader.Read() - '0');
-                        }
-
-                        if (!hasDigit)
+                    #if DEBUG
+                        if (next < 0 || !char.IsDigit((char)next))
                         {
                             throw new FormatException("Expected an integer token.");
                         }
+                    #endif
 
-                        if ((next = _reader.Peek()) >= 0 && !char.IsWhiteSpace((char)next))
+                        long value = 0;
+                        bool hasDigits = false;
+                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
+                        {
+                            hasDigits = true;
+                            value = (value * 10L) + (_reader.Read() - '0');
+                        }
+
+                    #if DEBUG
+                        if (!hasDigits)
+                        {
+                            throw new FormatException("Expected an integer token.");
+                        }
+                    #endif
+
+                """);
+
+            if (needLineAlignment)
+            {
+                builder.AppendLine("        _afterTokenRead = hasDigits;");
+            }
+
+            builder.AppendLine(
+                """
+
+                    #if DEBUG
+                        if (next >= 0 && !char.IsWhiteSpace((char)next))
                         {
                             throw new FormatException("Invalid integer token.");
                         }
 
-                        return sign < 0 ? -value : value;
+                        if ((!negative && value > int.MaxValue) || (negative && value > 2147483648L))
+                        {
+                            throw new OverflowException("Integer token is out of range for int.");
+                        }
+                    #endif
+
+                        return negative ? unchecked((int)(-value)) : unchecked((int)value);
                     }
                 """);
         }
@@ -921,43 +1141,68 @@ internal sealed partial class CSharpEmitter
                 """
                     private long ReadLong()
                     {
-                        int next;
-                        while ((next = _reader.Peek()) >= 0 && char.IsWhiteSpace((char)next))
-                        {
-                            _reader.Read();
-                        }
+                        int next = SkipTokenSeparators();
 
+                    #if DEBUG
                         if (next < 0)
                         {
                             throw new EndOfStreamException("Unexpected end of input.");
                         }
+                    #endif
 
-                        long sign = 1L;
-                        if (next == '-')
+                        bool negative = false;
+                        if (next is '+' or '-')
                         {
-                            sign = -1L;
+                            negative = next == '-';
                             _reader.Read();
+                            next = _reader.Peek();
                         }
 
-                        long value = 0L;
-                        bool hasDigit = false;
-                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
-                        {
-                            hasDigit = true;
-                            value = (value * 10L) + (_reader.Read() - '0');
-                        }
-
-                        if (!hasDigit)
+                    #if DEBUG
+                        if (next < 0 || !char.IsDigit((char)next))
                         {
                             throw new FormatException("Expected a long integer token.");
                         }
+                    #endif
 
-                        if ((next = _reader.Peek()) >= 0 && !char.IsWhiteSpace((char)next))
+                        ulong value = 0UL;
+                        bool hasDigits = false;
+                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
+                        {
+                            hasDigits = true;
+                            value = (value * 10UL) + (uint)(_reader.Read() - '0');
+                        }
+
+                    #if DEBUG
+                        if (!hasDigits)
+                        {
+                            throw new FormatException("Expected a long integer token.");
+                        }
+                    #endif
+
+                """);
+
+            if (needLineAlignment)
+            {
+                builder.AppendLine("        _afterTokenRead = hasDigits;");
+            }
+
+            builder.AppendLine(
+                """
+
+                    #if DEBUG
+                        if (next >= 0 && !char.IsWhiteSpace((char)next))
                         {
                             throw new FormatException("Invalid long integer token.");
                         }
 
-                        return sign < 0 ? -value : value;
+                        if ((!negative && value > long.MaxValue) || (negative && value > 9223372036854775808UL))
+                        {
+                            throw new OverflowException("Integer token is out of range for long.");
+                        }
+                    #endif
+
+                        return negative ? unchecked(-(long)value) : unchecked((long)value);
                     }
                 """);
         }
@@ -1485,19 +1730,5 @@ internal sealed partial class CSharpEmitter
     }
 
     private static bool NeedsSequenceHelpers(string programText)
-        => programText.Contains("__PscpSeq.", StringComparison.Ordinal)
-            || programText.Contains(".map(", StringComparison.Ordinal)
-            || programText.Contains(".filter(", StringComparison.Ordinal)
-            || programText.Contains(".fold(", StringComparison.Ordinal)
-            || programText.Contains(".scan(", StringComparison.Ordinal)
-            || programText.Contains(".mapFold(", StringComparison.Ordinal)
-            || programText.Contains(".sort(", StringComparison.Ordinal)
-            || programText.Contains(".sortBy(", StringComparison.Ordinal)
-            || programText.Contains(".sortWith(", StringComparison.Ordinal)
-            || programText.Contains(".distinct(", StringComparison.Ordinal)
-            || programText.Contains(".reverse(", StringComparison.Ordinal)
-            || programText.Contains(".copy(", StringComparison.Ordinal)
-            || programText.Contains(".groupCount(", StringComparison.Ordinal)
-            || programText.Contains(".freq(", StringComparison.Ordinal)
-            || programText.Contains(".index(", StringComparison.Ordinal);
+        => GetRequiredSequenceHelperNames(programText).Count > 0;
 }

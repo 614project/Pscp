@@ -95,7 +95,7 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("}");
         _writer.WriteLine();
         EmitRuntimeHelpers();
-        return _writer.ToString();
+        return PruneUsingDirectives(_writer.ToString());
     }
 
     private static IEnumerable<string> CollectUsings(PscpProgram program)
@@ -132,6 +132,76 @@ internal sealed partial class CSharpEmitter
                 yield return text;
             }
         }
+    }
+
+    private static string PruneUsingDirectives(string code)
+    {
+        string normalized = code.Replace("\r", string.Empty);
+        string[] lines = normalized.Split('\n');
+        int bodyStart = 0;
+        while (bodyStart < lines.Length && (lines[bodyStart].StartsWith("using ", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(lines[bodyStart])))
+        {
+            bodyStart++;
+        }
+
+        string body = string.Join("\n", lines.Skip(bodyStart));
+        bool needsCollectionsGeneric =
+            body.Contains("List<", StringComparison.Ordinal)
+            || body.Contains("Dictionary<", StringComparison.Ordinal)
+            || body.Contains("HashSet<", StringComparison.Ordinal)
+            || body.Contains("Queue<", StringComparison.Ordinal)
+            || body.Contains("Stack<", StringComparison.Ordinal)
+            || body.Contains("LinkedList<", StringComparison.Ordinal)
+            || body.Contains("PriorityQueue<", StringComparison.Ordinal)
+            || body.Contains("SortedSet<", StringComparison.Ordinal)
+            || body.Contains("Comparer<", StringComparison.Ordinal)
+            || body.Contains("IEnumerable<", StringComparison.Ordinal)
+            || body.Contains("IEnumerator<", StringComparison.Ordinal)
+            || body.Contains("IComparer<", StringComparison.Ordinal)
+            || body.Contains("Comparison<", StringComparison.Ordinal);
+        bool needsGlobalization = body.Contains("CultureInfo", StringComparison.Ordinal);
+        bool needsIO =
+            body.Contains("StreamReader", StringComparison.Ordinal)
+            || body.Contains("StreamWriter", StringComparison.Ordinal)
+            || body.Contains("EndOfStreamException", StringComparison.Ordinal);
+        bool needsLinq =
+            body.Contains("SelectMany", StringComparison.Ordinal)
+            || body.Contains(".ToArray()", StringComparison.Ordinal)
+            || body.Contains(".ToList()", StringComparison.Ordinal)
+            || body.Contains(".Distinct()", StringComparison.Ordinal)
+            || body.Contains(".Reverse()", StringComparison.Ordinal);
+        bool needsText =
+            body.Contains("StringBuilder", StringComparison.Ordinal)
+            || body.Contains("Encoding", StringComparison.Ordinal)
+            || body.Contains("UTF8Encoding", StringComparison.Ordinal);
+
+        List<string> result = [];
+        foreach (string line in lines)
+        {
+            if (!line.StartsWith("using ", StringComparison.Ordinal))
+            {
+                result.Add(line);
+                continue;
+            }
+
+            bool keep = line switch
+            {
+                "using System;" => true,
+                "using System.Collections.Generic;" => needsCollectionsGeneric,
+                "using System.Globalization;" => needsGlobalization,
+                "using System.IO;" => needsIO,
+                "using System.Linq;" => needsLinq,
+                "using System.Text;" => needsText,
+                _ => true,
+            };
+
+            if (keep)
+            {
+                result.Add(line);
+            }
+        }
+
+        return string.Join("\n", result);
     }
 
     private void CollectHoistedGlobalDeclarations(PscpProgram program)
@@ -173,7 +243,7 @@ internal sealed partial class CSharpEmitter
     }
 
     private bool CanHoistGlobalDeclaration(DeclarationStatement declaration)
-        => declaration.ExplicitType is not null && TryGetFieldEntries(declaration, out _);
+        => TryGetFieldEntries(declaration, out _);
 
     private static bool IsReferencedOutsideMain(DeclarationStatement declaration, HashSet<string> referencedNames)
         => declaration.Targets.Any(target => TargetContainsReferencedName(target, referencedNames));
@@ -224,15 +294,21 @@ internal sealed partial class CSharpEmitter
             return;
         }
 
+        TypeSyntax? declaredType = GetDeclarationEmissionType(declaration);
         string initializerText = declaration.Initializer is null
             ? EmitImplicitInitializer(declaration.ExplicitType)
-            : EmitExpression(declaration.Initializer, declaration.ExplicitType);
+            : EmitExpression(declaration.Initializer, declaredType);
         _writer.WriteLine($"{name} = {initializerText};");
     }
 
     private void EmitHoistedInputDeclaration(DeclarationStatement declaration)
     {
         if (declaration.ExplicitType is null)
+        {
+            return;
+        }
+
+        if (TryEmitDirectInputDeclaration(declaration, hoisted: true))
         {
             return;
         }
@@ -381,6 +457,9 @@ internal sealed partial class CSharpEmitter
                 break;
             case WithExpression @with:
                 CollectReferencedNames(@with.Receiver, names);
+                break;
+            case SwitchExpression @switch:
+                CollectReferencedNames(@switch.Receiver, names);
                 break;
             case FromEndExpression fromEnd:
                 CollectReferencedNames(fromEnd.Operand, names);
@@ -726,7 +805,14 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}({parameters})");
         _writer.WriteLine("{");
         _writer.Indent();
-        EmitBlockContents(function.Body, GetIsVoid(function.ReturnType));
+        if (GetIsVoid(function.ReturnType))
+        {
+            EmitBlockContents(function.Body, isVoidLike: true);
+        }
+        else
+        {
+            EmitValueAwareBlockContents(function.Body);
+        }
         _writer.Unindent();
         _writer.WriteLine("}");
     }
@@ -771,7 +857,7 @@ internal sealed partial class CSharpEmitter
 
         if (implicitReturn is not null)
         {
-            _writer.WriteLine($"{EmitExpression(implicitReturn)};");
+            _writer.WriteLine($"{EmitStatementExpression(implicitReturn)};");
         }
     }
 
@@ -789,7 +875,7 @@ internal sealed partial class CSharpEmitter
         {
             if (isVoidLike)
             {
-                _writer.WriteLine($"{EmitExpression(implicitReturn)};");
+                _writer.WriteLine($"{EmitStatementExpression(implicitReturn)};");
             }
             else
             {
@@ -1095,14 +1181,36 @@ internal sealed partial class CSharpEmitter
     }
 
     private string EmitStatementExpression(Expression expression)
-        => expression switch
+        => TryGetStatementExpression(expression, out string? emitted)
+            ? emitted!
+            : $"_ = {EmitExpression(expression)}";
+
+    private bool TryGetStatementExpression(Expression expression, out string? emitted)
+    {
+        switch (expression)
         {
-            AssignmentExpression assignmentExpression => EmitStatementAssignmentExpression(assignmentExpression),
-            PrefixExpression prefix when !TryEmitKnownDataStructurePop(prefix.Operand, out _) => EmitScalarPrefixStatementExpression(prefix),
-            PrefixExpression prefix => EmitPrefixExpression(prefix),
-            PostfixExpression postfix => EmitPostfixStatementExpression(postfix),
-            _ => EmitExpression(expression),
-        };
+            case CallExpression:
+            case NewExpression:
+            case NewArrayExpression:
+                emitted = EmitExpression(expression);
+                return true;
+            case AssignmentExpression assignmentExpression:
+                emitted = EmitStatementAssignmentExpression(assignmentExpression);
+                return true;
+            case PrefixExpression prefix when !TryEmitKnownDataStructurePop(prefix.Operand, out _):
+                emitted = EmitScalarPrefixStatementExpression(prefix);
+                return true;
+            case PrefixExpression prefix:
+                emitted = EmitPrefixExpression(prefix);
+                return true;
+            case PostfixExpression postfix:
+                emitted = EmitPostfixStatementExpression(postfix);
+                return true;
+            default:
+                emitted = null;
+                return false;
+        }
+    }
 
     private string EmitScalarPrefixStatementExpression(PrefixExpression prefix)
         => prefix.Operator == PostfixOperator.Increment
@@ -1196,12 +1304,11 @@ internal sealed partial class CSharpEmitter
     {
         List<(string Name, TypeSyntax Type, Expression? Initializer)> result = [];
         entries = result;
-        if (declaration.ExplicitType is null)
+        TypeSyntax? normalizedType = GetDeclarationEmissionType(declaration);
+        if (normalizedType is null)
         {
             return false;
         }
-
-        TypeSyntax normalizedType = NormalizeSizedType(declaration.ExplicitType);
         if (declaration.Targets.Count == 1)
         {
             if (declaration.Targets[0] is NameTarget nameTarget)
@@ -1256,6 +1363,11 @@ internal sealed partial class CSharpEmitter
 
         return result.Count > 0;
     }
+
+    private TypeSyntax? GetDeclarationEmissionType(DeclarationStatement declaration)
+        => NormalizeSizedTypeOrNull(
+            declaration.ExplicitType
+            ?? (declaration.Initializer is null ? null : _semantic?.GetExpressionType(declaration.Initializer)));
 
     private string EmitImplicitInitializer(TypeSyntax? explicitType)
     {
@@ -1439,20 +1551,41 @@ internal sealed partial class CSharpEmitter
         string slotName = NextTemporary("slot");
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
 
-        _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
-        _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
         if (range.Step is null)
         {
+            if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
+            {
+                string directStart = EmitExpression(range.Start);
+                string directEnd = EmitExpression(range.End);
+                string directCount = range.Kind == RangeKind.RightExclusive
+                    ? $"{directStart} < {directEnd} ? {directEnd} - {directStart} : 0"
+                    : $"{directStart} <= {directEnd} ? ({directEnd} - {directStart}) + 1 : 0";
+                _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{directCount}];");
+                string directLoopHeader = indexName is null
+                    ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++)"
+                    : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++)";
+                string slotExpression = indexName ?? slotName;
+                _writer.WriteLine(directLoopHeader);
+                _writer.WriteLine("{");
+                _writer.Indent();
+                _writer.WriteLine($"{name}[{slotExpression}] = {valueExpression};");
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                return;
+            }
+
+            _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
+            _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
             string countExpression = range.Kind == RangeKind.RightExclusive
                 ? $"{startName} < {endName} ? {endName} - {startName} : 0"
                 : $"{startName} <= {endName} ? ({endName} - {startName}) + 1 : 0";
             _writer.WriteLine($"int {countName} = {countExpression};");
             _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{countName}];");
             _writer.WriteLine($"int {slotName} = 0;");
-            string directLoopHeader = indexName is null
+            string defaultLoopHeader = indexName is null
                 ? $"for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {itemName}++)"
                 : $"for (int {itemName} = {startName}, {indexName} = 0; {itemName} {comparison} {endName}; {itemName}++, {indexName}++)";
-            _writer.WriteLine(directLoopHeader);
+            _writer.WriteLine(defaultLoopHeader);
             _writer.WriteLine("{");
             _writer.Indent();
             _writer.WriteLine($"{name}[{slotName}++] = {valueExpression};");
@@ -1461,6 +1594,8 @@ internal sealed partial class CSharpEmitter
             return;
         }
 
+        _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
+        _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
         string stepName = NextTemporary("step");
         string absStepName = NextTemporary("absStep");
         string forwardCount = range.Kind == RangeKind.RightExclusive
@@ -1471,7 +1606,9 @@ internal sealed partial class CSharpEmitter
             : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
         string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
         _writer.WriteLine($"int {stepName} = {EmitExpression(range.Step)};");
+        _writer.WriteLine("#if DEBUG");
         _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+        _writer.WriteLine("#endif");
         _writer.WriteLine($"int {absStepName} = {stepName} > 0 ? {stepName} : -{stepName};");
         _writer.WriteLine($"int {countName} = {stepName} > 0 ? {forwardCount} : {backwardCount};");
         _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{countName}];");
@@ -1606,7 +1743,93 @@ internal sealed partial class CSharpEmitter
             }
         }
 
+        if (intrinsicName == "sort" && TryGetSourceOnlyCall(receiver, call.Arguments, out Expression? sortSource))
+        {
+            EmitSortedArrayDeclaration(name, typeText, sortSource!);
+            _writer.WriteLine($"Array.Sort({name});");
+            return true;
+        }
+
+        if (intrinsicName == "sortBy" && TryGetSourceAndUnaryLambdaCall(receiver, call.Arguments, out Expression? sortBySource, out LambdaExpression? sortBySelector))
+        {
+            TypeSyntax? keyType = sortBySelector!.Body switch
+            {
+                LambdaExpressionBody expressionBody => _semantic?.GetExpressionType(expressionBody.Expression),
+                LambdaBlockBody blockBody => blockBody.Block.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail
+                    ? _semantic?.GetExpressionType(tail.Expression)
+                    : null,
+                _ => null,
+            };
+
+            if (keyType is null)
+            {
+                return false;
+            }
+
+            EmitSortedArrayDeclaration(name, typeText, sortBySource!);
+            string leftName = NextTemporary("left");
+            string rightName = NextTemporary("right");
+            if (sortBySelector.Body is LambdaExpressionBody selectorBody)
+            {
+                string leftKeyName = NextTemporary("leftKey");
+                string rightKeyName = NextTemporary("rightKey");
+                string leftAliases = EmitBindingAliasStatements(null, null, sortBySelector.Parameters[0].Target, leftName);
+                string rightAliases = EmitBindingAliasStatements(null, null, sortBySelector.Parameters[0].Target, rightName);
+                string keyExpression = EmitExpression(selectorBody.Expression);
+
+                _writer.WriteLine($"Array.Sort({name}, ({leftName}, {rightName}) =>");
+                _writer.WriteLine("{");
+                _writer.Indent();
+                _writer.WriteLine($"{EmitType(keyType)} {leftKeyName};");
+                _writer.WriteLine("{");
+                _writer.Indent();
+                if (!string.IsNullOrWhiteSpace(leftAliases))
+                {
+                    _writer.WriteLine(leftAliases);
+                }
+
+                _writer.WriteLine($"{leftKeyName} = {keyExpression};");
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                _writer.WriteLine($"{EmitType(keyType)} {rightKeyName};");
+                _writer.WriteLine("{");
+                _writer.Indent();
+                if (!string.IsNullOrWhiteSpace(rightAliases))
+                {
+                    _writer.WriteLine(rightAliases);
+                }
+
+                _writer.WriteLine($"{rightKeyName} = {keyExpression};");
+                _writer.Unindent();
+                _writer.WriteLine("}");
+                _writer.WriteLine($"return System.Collections.Generic.Comparer<{EmitType(keyType)}>.Default.Compare({leftKeyName}, {rightKeyName});");
+                _writer.Unindent();
+                _writer.WriteLine("});");
+            }
+            else
+            {
+                string leftKey = EmitLambdaBodyExpression(sortBySelector.Body, null, null, sortBySelector.Parameters[0].Target, leftName);
+                string rightKey = EmitLambdaBodyExpression(sortBySelector.Body, null, null, sortBySelector.Parameters[0].Target, rightName);
+                _writer.WriteLine($"Array.Sort({name}, ({leftName}, {rightName}) => System.Collections.Generic.Comparer<{EmitType(keyType)}>.Default.Compare({leftKey}, {rightKey}));");
+            }
+
+            return true;
+        }
+
         return false;
+    }
+
+    private void EmitSortedArrayDeclaration(string name, string typeText, Expression source)
+    {
+        TypeSyntax? sourceType = _semantic?.GetExpressionType(source);
+        string sourceText = EmitExpression(source);
+        if (sourceType is ArrayTypeSyntax)
+        {
+            _writer.WriteLine($"{typeText} {name} = ({typeText}){sourceText}.Clone();");
+            return;
+        }
+
+        _writer.WriteLine($"{typeText} {name} = System.Linq.Enumerable.ToArray({sourceText});");
     }
 
     private bool TryEmitLoweredAggregationDeclaration(string name, string typeText, TypeSyntax declaredType, AggregationExpression aggregation)
@@ -1761,14 +1984,21 @@ internal sealed partial class CSharpEmitter
 
     private void EmitExplainSourceHeader(string source)
     {
-        _writer.WriteLine("/*");
-        _writer.WriteLine("PSCP source:");
+        _writer.WriteLine(
+@"/*
+PSCP introduce: https://github.com/614project/Pscp
+PSCP source:"
+        );
         foreach (string line in StripPscpComments(source).Split('\n'))
         {
             string normalized = line.TrimEnd('\r');
+            if (string.IsNullOrWhiteSpace(normalized)) continue;
             _writer.WriteLine(normalized.Length == 0 ? string.Empty : normalized);
         }
-        _writer.WriteLine("*/");
+        _writer.WriteLine(
+@"*/
+// (This file was generated by the PSCP transpiler.)"
+        );
     }
 
     private static string StripPscpComments(string source)
@@ -2088,6 +2318,9 @@ internal sealed partial class CSharpEmitter
             case WithExpression @with:
                 AnalyzeRuntimeUsage(@with.Receiver, ref needsStdin, ref needsStdout);
                 break;
+            case SwitchExpression @switch:
+                AnalyzeRuntimeUsage(@switch.Receiver, ref needsStdin, ref needsStdout);
+                break;
             case FromEndExpression fromEnd:
                 AnalyzeRuntimeUsage(fromEnd.Operand, ref needsStdin, ref needsStdout);
                 break;
@@ -2218,6 +2451,15 @@ internal sealed partial class CSharpEmitter
         string iterator = EmitLoopBindingPattern(iteratorTarget, "iter");
         string iteratorType = IsLongRange(range, null) ? "long" : "int";
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+        if (range.Step is null
+            && CanInlineDirectRangeExpression(range.Start)
+            && CanInlineDirectRangeExpression(range.End))
+        {
+            _writer.WriteLine($"for ({iteratorType} {iterator} = {EmitExpression(range.Start)}; {iterator} {comparison} {EmitExpression(range.End)}; {iterator}++)");
+            EmitEmbeddedStatement(body);
+            return;
+        }
+
         string startName = NextTemporary("start");
         string endName = NextTemporary("end");
         _writer.WriteLine("{");
@@ -2233,7 +2475,9 @@ internal sealed partial class CSharpEmitter
             string stepName = NextTemporary("step");
             _writer.WriteLine($"{iteratorType} {stepName} = {EmitExpression(range.Step)};");
             string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
+            _writer.WriteLine("#if DEBUG");
             _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+            _writer.WriteLine("#endif");
             _writer.WriteLine($"for ({iteratorType} {iterator} = {startName}; {stepName} > 0 ? {iterator} {comparison} {endName} : {iterator} {decrementComparison} {endName}; {iterator} += {stepName})");
         }
         EmitEmbeddedStatement(body);
@@ -2276,11 +2520,34 @@ internal sealed partial class CSharpEmitter
     {
         string itemName = ChooseBindingName(fastFor.ItemTarget, "item");
         string? indexName = fastFor.IndexTarget is null ? null : ChooseBindingName(fastFor.IndexTarget, "index");
-        string startName = NextTemporary("start");
-        string endName = NextTemporary("end");
         bool useLong = IsLongRange(range, null);
         string iteratorType = useLong ? "long" : "int";
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+
+        if (range.Step is null
+            && CanInlineDirectRangeExpression(range.Start)
+            && CanInlineDirectRangeExpression(range.End))
+        {
+            string directHeader = indexName is null
+                ? $"for ({iteratorType} {itemName} = {EmitExpression(range.Start)}; {itemName} {comparison} {EmitExpression(range.End)}; {itemName}++)"
+                : $"for ({iteratorType} {itemName} = {EmitExpression(range.Start)}, {indexName} = 0; {itemName} {comparison} {EmitExpression(range.End)}; {itemName}++, {indexName}++)";
+            _writer.WriteLine(directHeader);
+            _writer.WriteLine("{");
+            _writer.Indent();
+            string directAliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
+            if (!string.IsNullOrWhiteSpace(directAliases))
+            {
+                _writer.WriteLine(directAliases);
+            }
+
+            EmitStatement(fastFor.Body);
+            _writer.Unindent();
+            _writer.WriteLine("}");
+            return;
+        }
+
+        string startName = NextTemporary("start");
+        string endName = NextTemporary("end");
 
         _writer.WriteLine("{");
         _writer.Indent();
@@ -2300,7 +2567,9 @@ internal sealed partial class CSharpEmitter
             string stepName = NextTemporary("step");
             string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
             _writer.WriteLine($"{iteratorType} {stepName} = {EmitExpression(range.Step)};");
+            _writer.WriteLine("#if DEBUG");
             _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
+            _writer.WriteLine("#endif");
             _writer.WriteLine($"for ({iteratorType} {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {decrementComparison} {endName}; {itemName} += {stepName})");
         }
         _writer.WriteLine("{");
@@ -2393,6 +2662,3 @@ internal sealed partial class CSharpEmitter
 
     partial void EmitRuntimeHelpers();
 }
-
-
-

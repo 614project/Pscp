@@ -20,6 +20,7 @@ public sealed partial class Parser
         }
 
         TokenKind operatorKind = Next().Kind;
+        SkipExpressionNewLines();
         Expression value = ParseAssignment();
         AssignmentOperator op = operatorKind switch
         {
@@ -37,13 +38,17 @@ public sealed partial class Parser
     private Expression ParseConditional()
     {
         Expression condition = ParsePipe();
+        SkipExpressionNewLinesBefore(TokenKind.Question);
         if (!Match(TokenKind.Question))
         {
             return condition;
         }
 
+        SkipExpressionNewLines();
         Expression whenTrue = ParseExpression();
+        SkipExpressionNewLinesBefore(TokenKind.Colon);
         Expect(TokenKind.Colon, "Expected ':' in conditional expression.");
+        SkipExpressionNewLines();
         Expression whenFalse = ParseConditional();
         return new ConditionalExpression(condition, whenTrue, whenFalse);
     }
@@ -52,9 +57,16 @@ public sealed partial class Parser
     {
         Expression expression = ParseOr();
 
-        while (Current.Kind is TokenKind.PipeGreater or TokenKind.LessPipe)
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.PipeGreater, TokenKind.LessPipe);
+            if (Current.Kind is not TokenKind.PipeGreater and not TokenKind.LessPipe)
+            {
+                break;
+            }
+
             TokenKind kind = Next().Kind;
+            SkipExpressionNewLines();
             Expression right = ParseOr();
             expression = new BinaryExpression(
                 expression,
@@ -68,9 +80,17 @@ public sealed partial class Parser
     private Expression ParseOr()
     {
         Expression expression = ParseXor();
-        while (Current.Kind is TokenKind.PipePipe or TokenKind.Or)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.PipePipe, TokenKind.Or);
+            if (Current.Kind is not TokenKind.PipePipe and not TokenKind.Or)
+            {
+                break;
+            }
+
             Next();
+            SkipExpressionNewLines();
             expression = new BinaryExpression(expression, BinaryOperator.LogicalOr, ParseXor());
         }
 
@@ -80,9 +100,17 @@ public sealed partial class Parser
     private Expression ParseXor()
     {
         Expression expression = ParseAnd();
-        while (Current.Kind is TokenKind.Caret or TokenKind.Xor)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.Caret, TokenKind.Xor);
+            if (Current.Kind is not TokenKind.Caret and not TokenKind.Xor)
+            {
+                break;
+            }
+
             Next();
+            SkipExpressionNewLines();
             expression = new BinaryExpression(expression, BinaryOperator.LogicalXor, ParseAnd());
         }
 
@@ -92,9 +120,17 @@ public sealed partial class Parser
     private Expression ParseAnd()
     {
         Expression expression = ParseEquality();
-        while (Current.Kind is TokenKind.AmpAmp or TokenKind.And)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.AmpAmp, TokenKind.And);
+            if (Current.Kind is not TokenKind.AmpAmp and not TokenKind.And)
+            {
+                break;
+            }
+
             Next();
+            SkipExpressionNewLines();
             expression = new BinaryExpression(expression, BinaryOperator.LogicalAnd, ParseEquality());
         }
 
@@ -104,9 +140,17 @@ public sealed partial class Parser
     private Expression ParseEquality()
     {
         Expression expression = ParseComparison();
-        while (Current.Kind is TokenKind.EqualEqual or TokenKind.BangEqual)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.EqualEqual, TokenKind.BangEqual);
+            if (Current.Kind is not TokenKind.EqualEqual and not TokenKind.BangEqual)
+            {
+                break;
+            }
+
             TokenKind kind = Next().Kind;
+            SkipExpressionNewLines();
             expression = new BinaryExpression(
                 expression,
                 kind == TokenKind.EqualEqual ? BinaryOperator.Equal : BinaryOperator.NotEqual,
@@ -121,9 +165,11 @@ public sealed partial class Parser
         Expression expression = ParseRange();
         while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.LessThan, TokenKind.LessEqual, TokenKind.GreaterThan, TokenKind.GreaterEqual, TokenKind.Spaceship, TokenKind.Is);
             if (Current.Kind is TokenKind.LessThan or TokenKind.LessEqual or TokenKind.GreaterThan or TokenKind.GreaterEqual or TokenKind.Spaceship)
             {
                 TokenKind kind = Next().Kind;
+                SkipExpressionNewLines();
                 BinaryOperator op = kind switch
                 {
                     TokenKind.LessThan => BinaryOperator.LessThan,
@@ -139,7 +185,9 @@ public sealed partial class Parser
 
             if (Match(TokenKind.Is))
             {
+                SkipExpressionNewLines();
                 bool negated = Match(TokenKind.Not);
+                SkipExpressionNewLines();
                 expression = new IsPatternExpression(expression, ParseIsPattern(), negated);
                 continue;
             }
@@ -167,16 +215,20 @@ public sealed partial class Parser
     private Expression ParseRange()
     {
         Expression start = ParseShift();
+        SkipExpressionNewLinesBefore(TokenKind.DotDot, TokenKind.DotDotLess, TokenKind.DotDotEqual);
         if (Current.Kind is not TokenKind.DotDot and not TokenKind.DotDotLess and not TokenKind.DotDotEqual)
         {
             return start;
         }
 
         TokenKind rangeToken = Next().Kind;
+        SkipExpressionNewLines();
         Expression middle = ParseShift();
 
+        SkipExpressionNewLinesBefore(TokenKind.DotDot);
         if (rangeToken == TokenKind.DotDot && Match(TokenKind.DotDot))
         {
+            SkipExpressionNewLines();
             Expression end = ParseShift();
             return new RangeExpression(start, middle, end, RangeKind.Inclusive);
         }
@@ -196,6 +248,7 @@ public sealed partial class Parser
         Expression expression = ParseAdditive();
         while (TryReadShiftOperator(out BinaryOperator shiftOperator))
         {
+            SkipExpressionNewLines();
             expression = new BinaryExpression(expression, shiftOperator, ParseAdditive());
         }
 
@@ -205,9 +258,17 @@ public sealed partial class Parser
     private Expression ParseAdditive()
     {
         Expression expression = ParseMultiplicative();
-        while (Current.Kind is TokenKind.Plus or TokenKind.Minus)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.Plus, TokenKind.Minus);
+            if (Current.Kind is not TokenKind.Plus and not TokenKind.Minus)
+            {
+                break;
+            }
+
             TokenKind kind = Next().Kind;
+            SkipExpressionNewLines();
             expression = new BinaryExpression(
                 expression,
                 kind == TokenKind.Plus ? BinaryOperator.Add : BinaryOperator.Subtract,
@@ -220,9 +281,17 @@ public sealed partial class Parser
     private Expression ParseMultiplicative()
     {
         Expression expression = ParseUnary();
-        while (Current.Kind is TokenKind.Star or TokenKind.Slash or TokenKind.Percent)
+
+        while (true)
         {
+            SkipExpressionNewLinesBefore(TokenKind.Star, TokenKind.Slash, TokenKind.Percent);
+            if (Current.Kind is not TokenKind.Star and not TokenKind.Slash and not TokenKind.Percent)
+            {
+                break;
+            }
+
             TokenKind kind = Next().Kind;
+            SkipExpressionNewLines();
             BinaryOperator op = kind switch
             {
                 TokenKind.Star => BinaryOperator.Multiply,
@@ -304,6 +373,12 @@ public sealed partial class Parser
                 continue;
             }
 
+            if (Current.Kind == TokenKind.Identifier && Current.Text == "switch")
+            {
+                expression = ParseSwitchExpression(expression);
+                continue;
+            }
+
             if (Current.Kind == TokenKind.PlusPlus && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.PlusPlus))
             {
                 expression = new PostfixExpression(expression, PostfixOperator.Increment);
@@ -351,6 +426,30 @@ public sealed partial class Parser
         }
 
         return new WithExpression(receiver, TokensToText(start, _position));
+    }
+
+    private Expression ParseSwitchExpression(Expression receiver)
+    {
+        int start = _position;
+        Expect(TokenKind.Identifier, "Expected 'switch'.");
+        SkipSeparators();
+        Expect(TokenKind.OpenBrace, "Expected '{' after 'switch'.");
+        int braceDepth = 1;
+        while (braceDepth > 0 && Current.Kind != TokenKind.EndOfFile)
+        {
+            if (Current.Kind == TokenKind.OpenBrace)
+            {
+                braceDepth++;
+            }
+            else if (Current.Kind == TokenKind.CloseBrace)
+            {
+                braceDepth--;
+            }
+
+            Next();
+        }
+
+        return new SwitchExpression(receiver, TokensToText(start, _position));
     }
 
     private Expression ParsePrimary()
@@ -487,9 +586,11 @@ public sealed partial class Parser
     private Expression ParseParenthesizedOrTuple()
     {
         Expect(TokenKind.OpenParen, "Expected '('.");
+        SkipSeparators();
         if (Current.Kind == TokenKind.For)
         {
             Expression generator = ParseForGeneratorExpression();
+            SkipSeparators();
             Expect(TokenKind.CloseParen, "Expected ')' after generator expression.");
             return generator;
         }
@@ -498,12 +599,14 @@ public sealed partial class Parser
         if (Match(TokenKind.Arrow))
         {
             Expression generator = ParseArrowGeneratorExpression(first);
+            SkipSeparators();
             Expect(TokenKind.CloseParen, "Expected ')' after generator expression.");
             return generator;
         }
 
         if (!Match(TokenKind.Comma))
         {
+            SkipSeparators();
             Expect(TokenKind.CloseParen, "Expected ')' after parenthesized expression.");
             return first;
         }
@@ -511,7 +614,9 @@ public sealed partial class Parser
         List<Expression> elements = [first];
         do
         {
+            SkipSeparators();
             elements.Add(ParseExpression());
+            SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 

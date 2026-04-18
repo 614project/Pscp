@@ -163,7 +163,7 @@
       "patterns": [
         {
           "name": "keyword.control.pscp",
-          "match": "\\b(?:let|var|mut|rec|if|then|else|for|in|do|while|break|continue|return|and|or|xor|not|where|new|match|when|class|struct|record|namespace|using|ref|out|is|this|base|switch|operator)\\b"
+          "match": "\\b(?:let|var|mut|rec|if|then|else|for|in|do|while|break|continue|return|and|or|xor|not|where|new|class|struct|record|namespace|using|ref|out|is|this|base|switch|operator)\\b"
         },
         {
           "name": "constant.language.pscp",
@@ -183,7 +183,7 @@
       "patterns": [
         {
           "name": "support.function.intrinsic.pscp",
-          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|groupCount|freq|index|chmin|chmax)\\b"
+          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|abs|sqrt|clamp|gcd|lcm|floor|ceil|round|pow|popcount|bitLength|groupCount|freq|index|chmin|chmax)\\b"
         },
         {
           "name": "entity.name.function.pscp",

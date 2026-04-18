@@ -7,7 +7,7 @@ internal static class PscpIntrinsicCatalog
         "sum", "sumBy", "min", "max", "minBy", "maxBy",
         "count", "any", "all", "find", "findIndex", "findLastIndex",
         "sort", "sortBy", "sortWith", "distinct", "reverse", "copy",
-        "abs", "sqrt",
+        "abs", "sqrt", "clamp", "gcd", "lcm", "floor", "ceil", "round", "pow", "popcount", "bitLength",
         "groupCount", "freq", "index", "chmin", "chmax"
     };
 
@@ -54,7 +54,7 @@ internal static class PscpIntrinsicCatalog
             {
                 "int", "long", "double", "decimal", "bool", "char", "str", "line",
                 "lines", "words", "chars", "array", "list", "linkedList", "tuple2", "tuple3",
-                "tuples2", "tuples3", "gridInt", "gridLong", "charGrid", "wordGrid", "read", "nestedArray"
+                "tuples2", "tuples3", "gridInt", "gridLong", "charGrid", "wordGrid", "nestedArray"
             },
             ["stdout"] = new HashSet<string>(StringComparer.Ordinal)
             {
@@ -69,6 +69,10 @@ internal static class PscpIntrinsicCatalog
     public static bool IsMathMinMaxCompatible(TypeSyntax? type)
         => type is NamedTypeSyntax { TypeArguments.Count: 0 } named
             && named.Name is "int" or "long" or "double" or "decimal";
+
+    public static bool IsIntegralMathCompatible(TypeSyntax? type)
+        => type is NamedTypeSyntax { TypeArguments.Count: 0 } named
+            && named.Name is "int" or "long";
 
     public static bool IsLikelyExternalTypeLikeRoot(string name)
         => KnownExternalTypeLikeRoots.Contains(name)

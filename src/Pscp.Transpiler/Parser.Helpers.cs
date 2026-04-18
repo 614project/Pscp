@@ -101,6 +101,34 @@ public sealed partial class Parser
         }
     }
 
+    private void SkipExpressionNewLines()
+    {
+        while (Current.Kind == TokenKind.NewLine)
+        {
+            Next();
+        }
+    }
+
+    private void SkipExpressionNewLinesBefore(params TokenKind[] allowedKinds)
+    {
+        int offset = 0;
+        while (Peek(offset).Kind == TokenKind.NewLine)
+        {
+            offset++;
+        }
+
+        if (offset == 0)
+        {
+            return;
+        }
+
+        TokenKind nextKind = Peek(offset).Kind;
+        if (Array.IndexOf(allowedKinds, nextKind) >= 0)
+        {
+            SkipExpressionNewLines();
+        }
+    }
+
     private bool IsStatementTerminator(TokenKind kind)
         => kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.CloseBrace or TokenKind.EndOfFile;
 

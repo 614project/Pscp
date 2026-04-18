@@ -412,6 +412,8 @@ stdin.charGrid(n)
 stdin.wordGrid(n)
 ```
 
+These generic shaped readers are part of the source language surface, but a transpiler is expected to lower them to specialized typed scanner calls and loops rather than depending on a generic runtime input backend.
+
 ---
 
 ## 6.2 `stdout`
@@ -1096,4 +1098,3 @@ PSCP `v0.4` is the point where the language becomes much more explicit about its
 This summary document is intended to make that direction easy to see at a glance.
 
 For exact semantics, the full `v0.4` language, API, transpiler, and language-server specifications remain authoritative.
-

@@ -81,15 +81,18 @@ public sealed partial class Parser
     {
         Expect(TokenKind.OpenBracket, "Expected '[' to start collection expression.");
         List<CollectionElement> elements = [];
+        SkipSeparators();
 
         if (!Match(TokenKind.CloseBracket))
         {
             do
             {
+                SkipSeparators();
                 if (Current.Kind == TokenKind.DotDot)
                 {
                     Next();
                     elements.Add(new SpreadElement(ParseExpression()));
+                    SkipSeparators();
                     continue;
                 }
 
@@ -133,9 +136,12 @@ public sealed partial class Parser
                 {
                     elements.Add(new ExpressionElement(expression));
                 }
+
+                SkipSeparators();
             }
             while (Match(TokenKind.Comma));
 
+            SkipSeparators();
             Expect(TokenKind.CloseBracket, "Expected ']' after collection expression.");
         }
 
@@ -385,6 +391,7 @@ public sealed partial class Parser
             or IndexExpression
             or TupleProjectionExpression
             or WithExpression
+            or SwitchExpression
             or CallExpression;
 
     private static bool CanStartSpaceArgument(TokenKind kind)

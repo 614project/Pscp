@@ -203,6 +203,10 @@ stdin.charGrid(n)
 stdin.wordGrid(n)
 ```
 
+These generic shaped-reader forms are source-level intrinsic sugar.
+A backend may lower them directly to specialized typed scanner calls and loops;
+it is not required to preserve a generic runtime reader backend for them.
+
 ### 6.4.1 `stdin.array<T>(n)`
 
 Reads `n` values of type `T` from token input and returns `T[]`.
@@ -1444,4 +1448,3 @@ Implementation strategy is otherwise unconstrained.
 This document defines API draft version `v0.4`.
 
 Backward compatibility is not guaranteed across draft revisions.
-
