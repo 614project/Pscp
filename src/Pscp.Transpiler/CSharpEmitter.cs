@@ -12,6 +12,7 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<string> _declaredTypeNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _stdoutDirectScalarKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectNullableScalarKinds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _stdoutDirectArrayKinds = new(StringComparer.Ordinal);
     private bool _emitStdin;
     private bool _emitStdout;
@@ -1629,11 +1630,16 @@ internal sealed partial class CSharpEmitter
         string? intrinsicName = call.Callee switch
         {
             IdentifierExpression identifierExpression => identifierExpression.Name,
-            MemberAccessExpression memberAccess when PscpIntrinsicCatalog.IntrinsicCallNames.Contains(memberAccess.MemberName) => memberAccess.MemberName,
+            MemberAccessExpression memberAccess when PscpIntrinsicCatalog.IntrinsicCallNames.Contains(PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName)) => PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName),
             _ => null,
         };
         Expression? receiver = call.Callee is MemberAccessExpression member ? member.Receiver : null;
         if (intrinsicName is null)
+        {
+            return false;
+        }
+
+        if (_semantic is not null && !_semantic.IsIntrinsicCall(call))
         {
             return false;
         }
@@ -1645,8 +1651,17 @@ internal sealed partial class CSharpEmitter
             if (sumSource is GeneratorExpression sumGenerator)
             {
                 string? indexName = sumGenerator.IndexTarget is null ? null : ChooseBindingName(sumGenerator.IndexTarget, "index");
-                string valueExpression = EmitLambdaBodyExpression(sumGenerator.Body, sumGenerator.IndexTarget, indexName, sumGenerator.ItemTarget, itemName);
-                _writer.WriteLine(EmitLoopOverSource(sumGenerator.Source, itemName, $"{name} += {valueExpression};", indexName));
+                string loopBody = TryEmitLambdaBodyValueStatement(
+                    sumGenerator.Body,
+                    sumGenerator.IndexTarget,
+                    indexName,
+                    sumGenerator.ItemTarget,
+                    itemName,
+                    valueExpression => $"{name} += {valueExpression};",
+                    out string loweredLoopBody)
+                    ? loweredLoopBody
+                    : $"{name} += {EmitLambdaBodyExpression(sumGenerator.Body, sumGenerator.IndexTarget, indexName, sumGenerator.ItemTarget, itemName)};";
+                _writer.WriteLine(EmitLoopOverSource(sumGenerator.Source, itemName, loopBody, indexName));
             }
             else
             {
@@ -1680,9 +1695,12 @@ internal sealed partial class CSharpEmitter
             TypeSyntax? keyType = minBySelector!.Body switch
             {
                 LambdaExpressionBody expressionBody => _semantic?.GetExpressionType(expressionBody.Expression),
-                LambdaBlockBody blockBody => blockBody.Block.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail
-                    ? _semantic?.GetExpressionType(tail.Expression)
-                    : null,
+                LambdaBlockBody blockBody => blockBody.Block.Statements.LastOrDefault() switch
+                {
+                    ExpressionStatement { HasSemicolon: false } tail => _semantic?.GetExpressionType(tail.Expression),
+                    ReturnStatement { Expression: not null } tail => _semantic?.GetExpressionType(tail.Expression),
+                    _ => null,
+                },
                 _ => null,
             };
 
@@ -1844,11 +1862,19 @@ internal sealed partial class CSharpEmitter
         {
             case "sum":
                 _writer.WriteLine($"{typeText} {name} = default;");
-                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}{name} += {EmitExpression(aggregation.Body)};", indexName));
+                _writer.WriteLine(EmitLoopOverSource(
+                    aggregation.Source,
+                    itemName,
+                    EmitAggregationBodyValueStatement(aggregation.Body, prefix, wherePrefix, valueExpression => $"{name} += {valueExpression};"),
+                    indexName));
                 return true;
             case "count":
                 _writer.WriteLine($"{typeText} {name} = 0;");
-                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}if ({EmitExpression(aggregation.Body)}) {{ {name}++; }}", indexName));
+                _writer.WriteLine(EmitLoopOverSource(
+                    aggregation.Source,
+                    itemName,
+                    EmitAggregationBodyValueStatement(aggregation.Body, prefix, wherePrefix, valueExpression => $"if ({valueExpression}) {{ {name}++; }}"),
+                    indexName));
                 return true;
             case "min":
             case "max":
@@ -1857,13 +1883,33 @@ internal sealed partial class CSharpEmitter
                 string valueName = NextTemporary("value");
                 _writer.WriteLine($"bool {hasValueName} = false;");
                 _writer.WriteLine($"{typeText} {name} = default!;");
-                _writer.WriteLine(EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {EmitPreferredComparison(valueName, name, declaredType, preferLower: aggregation.AggregatorName == "min")}) {{ {name} = {valueName}; {hasValueName} = true; }}", indexName));
+                _writer.WriteLine(EmitLoopOverSource(
+                    aggregation.Source,
+                    itemName,
+                    EmitAggregationBodyValueStatement(
+                        aggregation.Body,
+                        prefix,
+                        wherePrefix,
+                        valueExpression => $"var {valueName} = {valueExpression}; if (!{hasValueName} || {EmitPreferredComparison(valueName, name, declaredType, preferLower: aggregation.AggregatorName == "min")}) {{ {name} = {valueName}; {hasValueName} = true; }}"),
+                    indexName));
                 _writer.WriteLine($"if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");");
                 return true;
             }
         }
 
         return false;
+    }
+
+    private string EmitAggregationBodyValueStatement(
+        Expression body,
+        string prefix,
+        string wherePrefix,
+        Func<string, string> emitValueStatement)
+    {
+        string bodyStatement = body is BlockExpression block && TryEmitBlockValueStatement(block.Block, emitValueStatement, out string loweredBlock)
+            ? loweredBlock
+            : emitValueStatement(EmitExpression(body));
+        return string.Concat(prefix, wherePrefix, bodyStatement);
     }
 
     private bool TryEmitLoweredOutput(OutputStatement output)
@@ -1961,6 +2007,18 @@ internal sealed partial class CSharpEmitter
 
     private void RegisterStdoutType(TypeSyntax? type)
     {
+        if (type is NullableTypeSyntax nullable
+            && UnwrapNullableType(nullable.InnerType) is NamedTypeSyntax { TypeArguments.Count: 0 } nullableNamed
+            && IsDirectStdoutScalar(nullableNamed.Name))
+        {
+            _stdoutDirectScalarKinds.Add(nullableNamed.Name);
+            if (nullableNamed.Name != "string")
+            {
+                _stdoutDirectNullableScalarKinds.Add(nullableNamed.Name);
+            }
+            return;
+        }
+
         TypeSyntax? normalized = UnwrapNullableType(type);
         if (normalized is NamedTypeSyntax { TypeArguments.Count: 0 } named && IsDirectStdoutScalar(named.Name))
         {

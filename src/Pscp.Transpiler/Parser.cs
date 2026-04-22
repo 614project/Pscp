@@ -763,7 +763,7 @@ public sealed partial class Parser
 
         accessModifier = Next().Text;
         _diagnostics.Add(new Diagnostic(
-            $"Access section label syntax `{accessModifier}:` is removed in v0.5; prefer ordinary modifiers such as `{accessModifier}` on each member.",
+            $"Access section label syntax `{accessModifier}:` is removed in v0.6; prefer ordinary modifiers such as `{accessModifier}` on each member.",
             Current.Span,
             DiagnosticSeverity.Warning));
         Expect(TokenKind.Colon, "Expected ':' after access section label.");

@@ -420,7 +420,7 @@ static class PscpCli
         => """
            // PSCP starter program
            int n =
-           int[] values = stdin.array<int>(n)
+           int[] values = stdin.readArray<int>(n)
            var total = 0
            for value in values do total += value
            += total

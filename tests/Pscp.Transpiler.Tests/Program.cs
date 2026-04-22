@@ -313,6 +313,37 @@ internal static class TestRunner
                 "",
                 "7\n16\n"),
             new(
+                "GeneratorBlockReturnSumInference",
+                """
+                int n, k =
+                int[n] h =
+
+                var low = 0
+                var high = 1000000000
+                var result = 0
+
+                while low <= high {
+                    let mid = low + (high - low) / 2
+
+                    let cnt = sum (0..<n -> a {
+                        let l = a > 0 and abs(h[a] - h[a - 1]) > mid
+                        let r = a < n - 1 and abs(h[a] - h[a + 1]) > mid
+                        return int(l or r)
+                    })
+
+                    if cnt <= k {
+                        result = mid
+                        high = mid - 1
+                    } else {
+                        low = mid + 1
+                    }
+                }
+
+                += result
+                """,
+                "3 1 1 2 3",
+                "1\n"),
+            new(
                 "ForGeneratorAndSlice",
                 """
                 string text = "abcdef"
@@ -392,7 +423,7 @@ internal static class TestRunner
             {
                 ExpectedWarnings =
                 [
-                    "removed in v0.5"
+                    "removed in v0.6"
                 ]
             },
             new(
@@ -489,6 +520,60 @@ internal static class TestRunner
                 "",
                 "3\nTrue\nTrue\n4\n2\n4\n"),
             new(
+                "V06IntrinsicShadowing",
+                """
+                rec int gcd(int a, int b) {
+                    if b == 0 then a
+                    else gcd(b, a % b)
+                }
+
+                int x = 6
+                += gcd(10, x)
+                """,
+                "",
+                "2\n"),
+            new(
+                "V06CanonicalStdinApi",
+                """
+                int n = stdin.readInt()
+                int[] values = stdin.readArray<int>(n)
+                string line = stdin.readLine()
+                += values.sum()
+                += line
+                """,
+                "3 1 2 3\nhello\n",
+                "6\nhello\n"),
+            new(
+                "V06KnownDataStructureRewrites",
+                """
+                Dictionary<int, int> dict;
+                SortedSet<int> sorted;
+                HashSet<int> seen;
+
+                += dict += (1, 10)
+                += dict += (1, 20)
+                += dict[1]
+                += sorted += 5
+                += sorted -= 5
+                += seen += 7
+                += seen += 7
+                """,
+                "",
+                "True\nFalse\n10\nTrue\nTrue\nTrue\nFalse\n"),
+            new(
+                "V06CollectionDictionaryHelpers",
+                """
+                int[] arr = [3, 1, 3, 2]
+                let counts = arr.groupCount()
+                let aliases = arr.freq()
+                let positions = arr.sort().distinct().index()
+                += counts[3]
+                += aliases[1]
+                += positions[2]
+                """,
+                "",
+                "2\n1\n1\n"),
+            new(
                 "ThisMemberAndTypedInput",
                 """
                 class Counter {
@@ -502,7 +587,7 @@ internal static class TestRunner
                 }
 
                 Counter c = new()
-                int extra = stdin.int()
+                int extra = stdin.readInt()
                 c.add(extra)
                 c.add(2)
                 += c.total()
@@ -553,7 +638,7 @@ internal static class TestRunner
                 "",
                 "3\n"),
             new(
-                "MathIntrinsicFamilyV05",
+                "MathIntrinsicFamilyV06",
                 """
                 += clamp(10, 0, 7)
                 += gcd(12, 18)
@@ -660,9 +745,10 @@ internal static class TestRunner
         VerifyShorthandInputAvoidsGenericHelpers(failures);
         VerifySortByLowering(failures);
         VerifyCompactPrunesStdoutRender(failures);
+        VerifyDictionaryIndexTypeAvoidsStdoutFallback(failures);
         VerifyEmptyMinMaxPolicy(failures);
         VerifyMathIntrinsicLowering(failures);
-        VerifyV05MathLowering(failures);
+        VerifyV06MathLowering(failures);
         VerifySwitchExpressionLowering(failures);
         VerifyRunAndFlushShape(failures);
         VerifyExplainHeaderEmission(failures);
@@ -773,7 +859,10 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 int n = 5
-                let total = sum (0..<n -> i do i * i)
+                let total = sum (0..<n -> i {
+                    let value = i * i
+                    return value
+                })
                 += total
                 """),
             new TranspilationOptions("Pscp.Generated", "DirectGeneratorAggregateLoweringProgram"));
@@ -788,7 +877,9 @@ internal static class TestRunner
         if (!userCode.Contains("for (int", StringComparison.Ordinal)
             || userCode.Contains("__PscpSeq.rangeInt", StringComparison.Ordinal)
             || userCode.Contains("Enumerable.Select", StringComparison.Ordinal)
-            || userCode.Contains("Enumerable.Sum", StringComparison.Ordinal))
+            || userCode.Contains("Enumerable.Sum", StringComparison.Ordinal)
+            || userCode.Contains("__PscpThunk.run", StringComparison.Ordinal)
+            || userCode.Contains("object total = default", StringComparison.Ordinal))
         {
             failures.Add($"DirectGeneratorAggregateLowering: expected fused loop lowering not found\nGenerated:\n{result.CSharpCode}");
         }
@@ -1177,10 +1268,10 @@ internal static class TestRunner
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("stdin.arrayInt(n)", StringComparison.Ordinal)
+        if (!userCode.Contains("stdin.readArrayInt(n)", StringComparison.Ordinal)
             || userCode.Contains("stdin.array<int>(n)", StringComparison.Ordinal))
         {
-            failures.Add($"ExplicitStdinArraySpecialization: expected direct stdin.arrayInt lowering\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"ExplicitStdinArraySpecialization: expected direct stdin.readArrayInt lowering\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1389,6 +1480,31 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyDictionaryIndexTypeAvoidsStdoutFallback(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int[] xs = [1, 2, 2]
+                let counts = xs.groupCount()
+                += counts[2]
+                """),
+            new TranspilationOptions("Pscp.Generated", "DictionaryIndexTypeAvoidsStdoutFallbackProgram", HelperEmissionMode.Compact));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"DictionaryIndexTypeAvoidsStdoutFallback: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal))
+        {
+            failures.Add($"DictionaryIndexTypeAvoidsStdoutFallback: expected dictionary indexer output to stay on direct scalar stdout path\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
     private static void VerifySortByLowering(List<string> failures)
     {
         TranspilationResult result = PscpTranspiler.Transpile(
@@ -1464,7 +1580,7 @@ internal static class TestRunner
         }
     }
 
-    private static void VerifyV05MathLowering(List<string> failures)
+    private static void VerifyV06MathLowering(List<string> failures)
     {
         TranspilationResult result = PscpTranspiler.Transpile(
             NormalizeSource(
@@ -1476,11 +1592,11 @@ internal static class TestRunner
                 let len = bitLength(16)
                 += (a, g, l, bits, len)
                 """),
-            new TranspilationOptions("Pscp.Generated", "V05MathLoweringProgram"));
+            new TranspilationOptions("Pscp.Generated", "V06MathLoweringProgram"));
 
         if (result.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
         {
-            failures.Add($"V05MathLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            failures.Add($"V06MathLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
@@ -1491,7 +1607,7 @@ internal static class TestRunner
             || !userCode.Contains("__PscpSeq.popcount", StringComparison.Ordinal)
             || !userCode.Contains("__PscpSeq.bitLength", StringComparison.Ordinal))
         {
-            failures.Add($"V05MathLowering: expected v0.5 math lowering not found\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"V06MathLowering: expected v0.6 math lowering not found\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1627,9 +1743,9 @@ internal static class TestRunner
         }
 
         IReadOnlyList<string> memberLabels = await session.RequestCompletionLabelsAsync(line: 1, character: 6);
-        if (!memberLabels.Contains("int", StringComparer.Ordinal)
-            || !memberLabels.Contains("array", StringComparer.Ordinal)
-            || !memberLabels.Contains("charGrid", StringComparer.Ordinal))
+        if (!memberLabels.Contains("readInt", StringComparer.Ordinal)
+            || !memberLabels.Contains("readArray", StringComparer.Ordinal)
+            || !memberLabels.Contains("readCharGrid", StringComparer.Ordinal))
         {
             failures.Add($"LanguageServerDiagnosticsAndIntrinsicCompletion: expected stdin members not found\nActual: {string.Join(", ", memberLabels)}");
         }
@@ -1819,7 +1935,7 @@ internal static class TestRunner
             });
 
             LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
-            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.5.1\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
+            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.0\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
             _ = await session.ReadMessageAsync();
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");

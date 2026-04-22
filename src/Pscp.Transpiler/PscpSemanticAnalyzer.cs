@@ -5,17 +5,25 @@ namespace Pscp.Transpiler;
 internal sealed class SemanticAnalysisResult
 {
     private readonly IReadOnlyDictionary<Expression, TypeSyntax?> _expressionTypes;
+    private readonly IReadOnlySet<CallExpression> _intrinsicCalls;
 
-    public SemanticAnalysisResult(IReadOnlyList<Diagnostic> diagnostics, IReadOnlyDictionary<Expression, TypeSyntax?> expressionTypes)
+    public SemanticAnalysisResult(
+        IReadOnlyList<Diagnostic> diagnostics,
+        IReadOnlyDictionary<Expression, TypeSyntax?> expressionTypes,
+        IReadOnlySet<CallExpression> intrinsicCalls)
     {
         Diagnostics = diagnostics;
         _expressionTypes = expressionTypes;
+        _intrinsicCalls = intrinsicCalls;
     }
 
     public IReadOnlyList<Diagnostic> Diagnostics { get; }
 
     public TypeSyntax? GetExpressionType(Expression expression)
         => _expressionTypes.TryGetValue(expression, out TypeSyntax? type) ? type : null;
+
+    public bool IsIntrinsicCall(CallExpression call)
+        => _intrinsicCalls.Contains(call);
 }
 
 internal static class PscpSemanticAnalyzer
@@ -25,7 +33,7 @@ internal static class PscpSemanticAnalyzer
         Analyzer analyzer = new(tokens);
         analyzer.Predeclare(program);
         analyzer.Analyze(program);
-        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes);
+        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls);
     }
 
     private enum SymbolKind
@@ -127,6 +135,7 @@ internal static class PscpSemanticAnalyzer
             _tracker = new(tokens);
             Diagnostics = [];
             ExpressionTypes = new Dictionary<Expression, TypeSyntax?>(ReferenceEqualityComparer.Instance);
+            IntrinsicCalls = new HashSet<CallExpression>(ReferenceEqualityComparer.Instance);
 
             foreach (string builtin in PscpIntrinsicCatalog.BuiltinTypes)
             {
@@ -144,6 +153,7 @@ internal static class PscpSemanticAnalyzer
 
         public List<Diagnostic> Diagnostics { get; }
         public Dictionary<Expression, TypeSyntax?> ExpressionTypes { get; }
+        public HashSet<CallExpression> IntrinsicCalls { get; }
 
         public void Predeclare(PscpProgram program)
         {
@@ -541,6 +551,8 @@ internal static class PscpSemanticAnalyzer
                 && named.Name is "List" or "System.Collections.Generic.List"
                     or "LinkedList" or "System.Collections.Generic.LinkedList"
                     or "HashSet" or "System.Collections.Generic.HashSet"
+                    or "SortedSet" or "System.Collections.Generic.SortedSet"
+                    or "Dictionary" or "System.Collections.Generic.Dictionary"
                     or "Queue" or "System.Collections.Generic.Queue"
                     or "Stack" or "System.Collections.Generic.Stack"
                     or "PriorityQueue" or "System.Collections.Generic.PriorityQueue";
@@ -636,6 +648,8 @@ internal static class PscpSemanticAnalyzer
             if (targetType is NamedTypeSyntax named)
             {
                 if (named.Name is "HashSet" or "System.Collections.Generic.HashSet"
+                    or "SortedSet" or "System.Collections.Generic.SortedSet"
+                    or "Dictionary" or "System.Collections.Generic.Dictionary"
                     && assignment.Operator is AssignmentOperator.AddAssign or AssignmentOperator.SubtractAssign)
                 {
                     return TypeName("bool");
@@ -751,6 +765,7 @@ internal static class PscpSemanticAnalyzer
 
             if (TryAnalyzeIntrinsicCall(call, scope, out TypeSyntax? intrinsicType))
             {
+                IntrinsicCalls.Add(call);
                 return intrinsicType;
             }
 
@@ -811,14 +826,26 @@ internal static class PscpSemanticAnalyzer
         private bool TryAnalyzeIntrinsicCall(CallExpression call, Scope scope, out TypeSyntax? intrinsicType)
         {
             intrinsicType = null;
-            string? intrinsicName = call.Callee switch
+            string? intrinsicName = null;
+            if (call.Callee is IdentifierExpression identifier
+                && PscpIntrinsicCatalog.IntrinsicCallNames.Contains(identifier.Name))
             {
-                IdentifierExpression identifier when PscpIntrinsicCatalog.IntrinsicCallNames.Contains(identifier.Name) => identifier.Name,
-                MemberAccessExpression memberAccess => PscpIntrinsicCatalog.IntrinsicCallNames.Contains(PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName))
-                    ? PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName)
-                    : null,
-                _ => null,
-            };
+                if (!scope.TryResolveValue(identifier.Name, out Symbol? symbol)
+                    || symbol is null
+                    || symbol.Kind == SymbolKind.Intrinsic)
+                {
+                    intrinsicName = identifier.Name;
+                }
+            }
+            else if (call.Callee is MemberAccessExpression memberAccess)
+            {
+                string memberName = PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName);
+                if (PscpIntrinsicCatalog.IntrinsicCallNames.Contains(memberName)
+                    && IsIntrinsicMemberCall(memberAccess, memberName, scope))
+                {
+                    intrinsicName = memberName;
+                }
+            }
 
             if (intrinsicName is null)
             {
@@ -833,6 +860,28 @@ internal static class PscpSemanticAnalyzer
 
             intrinsicType = IntrinsicType(intrinsicName, call.Arguments, receiver is null ? null : GetType(receiver));
             return true;
+        }
+
+        private bool IsIntrinsicMemberCall(MemberAccessExpression memberAccess, string memberName, Scope scope)
+        {
+            if (memberAccess.Receiver is IdentifierExpression receiverIdentifier
+                && scope.TryResolveValue(receiverIdentifier.Name, out Symbol? receiverSymbol)
+                && receiverSymbol is { Kind: SymbolKind.Intrinsic })
+            {
+                return true;
+            }
+
+            TypeSyntax? receiverType = GetType(memberAccess.Receiver) ?? AnalyzeExpression(memberAccess.Receiver, scope);
+            if (memberName is "sum" or "sumBy" or "min" or "max" or "minBy" or "maxBy"
+                or "count" or "any" or "all" or "find" or "findIndex" or "findLastIndex"
+                or "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy"
+                or "groupCount" or "freq" or "index"
+                or "map" or "filter" or "fold" or "scan" or "mapFold")
+            {
+                return EnumerableElement(receiverType) is not null;
+            }
+
+            return false;
         }
 
         private bool TryAnalyzeIntrinsicLambdaArguments(string intrinsicName, Expression? receiver, IReadOnlyList<ArgumentSyntax> arguments, Scope scope)
@@ -891,36 +940,36 @@ internal static class PscpSemanticAnalyzer
             string root = PscpIntrinsicCatalog.StripGenericSuffix(memberName);
             return root switch
             {
-                "int" => TypeName("int"),
-                "long" => TypeName("long"),
-                "double" => TypeName("double"),
-                "decimal" => TypeName("decimal"),
-                "bool" => TypeName("bool"),
-                "char" => TypeName("char"),
-                "str" or "line" => TypeName("string"),
-                "lines" => new ArrayTypeSyntax(TypeName("string"), 1),
-                "words" => new ArrayTypeSyntax(TypeName("string"), 1),
-                "chars" => new ArrayTypeSyntax(TypeName("char"), 1),
-                "array" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? arrayArgs) && arrayArgs is not null && arrayArgs.Count == 1
+                "int" or "readInt" => TypeName("int"),
+                "long" or "readLong" => TypeName("long"),
+                "double" or "readDouble" => TypeName("double"),
+                "decimal" or "readDecimal" => TypeName("decimal"),
+                "bool" or "readBool" => TypeName("bool"),
+                "char" or "readChar" => TypeName("char"),
+                "str" or "readString" or "line" or "readLine" or "readRestOfLine" => TypeName("string"),
+                "lines" or "readLines" => new ArrayTypeSyntax(TypeName("string"), 1),
+                "words" or "readWords" => new ArrayTypeSyntax(TypeName("string"), 1),
+                "chars" or "readChars" => new ArrayTypeSyntax(TypeName("char"), 1),
+                "array" or "readArray" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? arrayArgs) && arrayArgs is not null && arrayArgs.Count == 1
                     => new ArrayTypeSyntax(arrayArgs[0], 1),
-                "list" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? listArgs) && listArgs is not null && listArgs.Count == 1
+                "list" or "readList" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? listArgs) && listArgs is not null && listArgs.Count == 1
                     => new NamedTypeSyntax("List", Immutable.List(listArgs[0])),
-                "linkedList" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? linkedListArgs) && linkedListArgs is not null && linkedListArgs.Count == 1
+                "linkedList" or "readLinkedList" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? linkedListArgs) && linkedListArgs is not null && linkedListArgs.Count == 1
                     => new NamedTypeSyntax("LinkedList", Immutable.List(linkedListArgs[0])),
-                "tuple2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple2Args) && tuple2Args is not null && tuple2Args.Count == 2
+                "tuple2" or "readTuple2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple2Args) && tuple2Args is not null && tuple2Args.Count == 2
                     => new TupleTypeSyntax(tuple2Args),
-                "tuple3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple3Args) && tuple3Args is not null && tuple3Args.Count == 3
+                "tuple3" or "readTuple3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple3Args) && tuple3Args is not null && tuple3Args.Count == 3
                     => new TupleTypeSyntax(tuple3Args),
-                "tuples2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples2Args) && tuples2Args is not null && tuples2Args.Count == 2
+                "tuples2" or "readTuples2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples2Args) && tuples2Args is not null && tuples2Args.Count == 2
                     => new ArrayTypeSyntax(new TupleTypeSyntax(tuples2Args), 1),
-                "tuples3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples3Args) && tuples3Args is not null && tuples3Args.Count == 3
+                "tuples3" or "readTuples3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples3Args) && tuples3Args is not null && tuples3Args.Count == 3
                     => new ArrayTypeSyntax(new TupleTypeSyntax(tuples3Args), 1),
-                "nestedArray" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? nestedArrayArgs) && nestedArrayArgs is not null && nestedArrayArgs.Count == 1
+                "nestedArray" or "readNestedArray" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? nestedArrayArgs) && nestedArrayArgs is not null && nestedArrayArgs.Count == 1
                     => new ArrayTypeSyntax(nestedArrayArgs[0], 2),
-                "gridInt" => new ArrayTypeSyntax(TypeName("int"), 2),
-                "gridLong" => new ArrayTypeSyntax(TypeName("long"), 2),
-                "charGrid" => new ArrayTypeSyntax(TypeName("char"), 2),
-                "wordGrid" => new ArrayTypeSyntax(TypeName("string"), 2),
+                "gridInt" or "readGridInt" => new ArrayTypeSyntax(TypeName("int"), 2),
+                "gridLong" or "readGridLong" => new ArrayTypeSyntax(TypeName("long"), 2),
+                "charGrid" or "readCharGrid" => new ArrayTypeSyntax(TypeName("char"), 2),
+                "wordGrid" or "readWordGrid" => new ArrayTypeSyntax(TypeName("string"), 2),
                 _ => null,
             };
         }
@@ -1211,13 +1260,13 @@ internal static class PscpSemanticAnalyzer
                 return receiverName switch
                 {
                     "stdout" => TypeName("void"),
-                    "stdin" when memberName == "int" => TypeName("int"),
-                    "stdin" when memberName == "long" => TypeName("long"),
-                    "stdin" when memberName == "double" => TypeName("double"),
-                    "stdin" when memberName == "decimal" => TypeName("decimal"),
-                    "stdin" when memberName == "bool" => TypeName("bool"),
-                    "stdin" when memberName == "char" => TypeName("char"),
-                    "stdin" when memberName is "str" or "line" => TypeName("string"),
+                    "stdin" when memberName is "int" or "readInt" => TypeName("int"),
+                    "stdin" when memberName is "long" or "readLong" => TypeName("long"),
+                    "stdin" when memberName is "double" or "readDouble" => TypeName("double"),
+                    "stdin" when memberName is "decimal" or "readDecimal" => TypeName("decimal"),
+                    "stdin" when memberName is "bool" or "readBool" => TypeName("bool"),
+                    "stdin" when memberName is "char" or "readChar" => TypeName("char"),
+                    "stdin" when memberName is "str" or "readString" or "line" or "readLine" or "readRestOfLine" => TypeName("string"),
                     _ => null,
                 };
             }
@@ -1292,6 +1341,8 @@ internal static class PscpSemanticAnalyzer
                 {
                     ArrayTypeSyntax { Depth: 1 } array => array.ElementType,
                     ArrayTypeSyntax array => new ArrayTypeSyntax(array.ElementType, array.Depth - 1),
+                    NamedTypeSyntax named when named.TypeArguments.Count == 2
+                        && named.Name is "Dictionary" or "System.Collections.Generic.Dictionary" => named.TypeArguments[1],
                     NamedTypeSyntax named when named.TypeArguments.Count == 1 => named.TypeArguments[0],
                     _ => null,
                 };
@@ -1450,7 +1501,12 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzeBlockLike(BlockStatement block, Scope scope)
         {
             AnalyzeBlock(block, scope);
-            return block.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail ? GetType(tail.Expression) : null;
+            return block.Statements.LastOrDefault() switch
+            {
+                ExpressionStatement { HasSemicolon: false } tail => GetType(tail.Expression),
+                ReturnStatement { Expression: not null } tail => GetType(tail.Expression),
+                _ => null,
+            };
         }
 
         private void ValidateRecursion(string functionName, bool isRecursive, BlockStatement body, TextSpan functionSpan)
@@ -1734,8 +1790,10 @@ internal static class PscpSemanticAnalyzer
                 "min" or "max" or "sum" => EnumerableElement(first),
                 "count" or "findIndex" or "findLastIndex" => TypeName("int"),
                 "any" or "all" or "chmin" or "chmax" => TypeName("bool"),
-                "find" or "minBy" or "maxBy" => EnumerableElement(first),
+                "find" when EnumerableElement(first) is TypeSyntax findElement => new NullableTypeSyntax(findElement),
+                "minBy" or "maxBy" => EnumerableElement(first),
                 "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" when EnumerableElement(first) is TypeSyntax elem => new ArrayTypeSyntax(elem, 1),
+                "groupCount" or "freq" or "index" when EnumerableElement(first) is TypeSyntax key => new NamedTypeSyntax("Dictionary", Immutable.List(key, TypeName("int"))),
                 "abs" => ArgType(args, 0),
                 "sqrt" or "pow" => TypeName("double"),
                 "clamp" => Merge(Merge(ArgType(args, 0), ArgType(args, 1)), ArgType(args, 2)),

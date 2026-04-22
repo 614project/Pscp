@@ -171,7 +171,11 @@ internal sealed partial class CSharpEmitter
 
                 public static IEnumerable<int> rangeInt(int start, int end, int step, bool inclusive)
                 {
+                #if DEBUG
                     if (step == 0) throw new InvalidOperationException("Range step cannot be zero.");
+                #else
+                    if (step == 0) yield break;
+                #endif
                     if (step > 0)
                     {
                         for (int i = start; inclusive ? i <= end : i < end; i += step)
@@ -193,7 +197,11 @@ internal sealed partial class CSharpEmitter
 
                 public static IEnumerable<long> rangeLong(long start, long end, long step, bool inclusive)
                 {
+                #if DEBUG
                     if (step == 0) throw new InvalidOperationException("Range step cannot be zero.");
+                #else
+                    if (step == 0) yield break;
+                #endif
                     if (step > 0)
                     {
                         for (long i = start; inclusive ? i <= end : i < end; i += step)
@@ -737,28 +745,28 @@ internal sealed partial class CSharpEmitter
         static bool Contains(string text, string value)
             => text.Contains(value, StringComparison.Ordinal);
 
-        bool needInt = verbose || Contains(programText, "stdin.@int(") || Contains(programText, "stdin.arrayInt(") || Contains(programText, "stdin.gridInt(");
-        bool needLong = verbose || Contains(programText, "stdin.@long(") || Contains(programText, "stdin.arrayLong(") || Contains(programText, "stdin.gridLong(");
-        bool needDouble = verbose || Contains(programText, "stdin.@double(") || Contains(programText, "stdin.arrayDouble(");
-        bool needDecimal = verbose || Contains(programText, "stdin.@decimal(") || Contains(programText, "stdin.arrayDecimal(");
-        bool needBool = verbose || Contains(programText, "stdin.@bool(") || Contains(programText, "stdin.arrayBool(");
-        bool needChar = verbose || Contains(programText, "stdin.@char(") || Contains(programText, "stdin.arrayChar(");
-        bool needString = verbose || Contains(programText, "stdin.str(") || Contains(programText, "stdin.arrayString(");
-        bool needLine = verbose || Contains(programText, "stdin.line(") || Contains(programText, "stdin.lines(") || Contains(programText, "stdin.words(") || Contains(programText, "stdin.chars(") || Contains(programText, "stdin.charGrid(") || Contains(programText, "stdin.wordGrid(");
-        bool needLines = verbose || Contains(programText, "stdin.lines(");
-        bool needWords = verbose || Contains(programText, "stdin.words(") || Contains(programText, "stdin.wordGrid(");
-        bool needChars = verbose || Contains(programText, "stdin.chars(") || Contains(programText, "stdin.charGrid(");
-        bool needArrayInt = verbose || Contains(programText, "stdin.arrayInt(");
-        bool needArrayLong = verbose || Contains(programText, "stdin.arrayLong(");
-        bool needArrayDouble = verbose || Contains(programText, "stdin.arrayDouble(");
-        bool needArrayDecimal = verbose || Contains(programText, "stdin.arrayDecimal(");
-        bool needArrayBool = verbose || Contains(programText, "stdin.arrayBool(");
-        bool needArrayChar = verbose || Contains(programText, "stdin.arrayChar(");
-        bool needArrayString = verbose || Contains(programText, "stdin.arrayString(");
-        bool needGridInt = verbose || Contains(programText, "stdin.gridInt(");
-        bool needGridLong = verbose || Contains(programText, "stdin.gridLong(");
-        bool needCharGrid = verbose || Contains(programText, "stdin.charGrid(");
-        bool needWordGrid = verbose || Contains(programText, "stdin.wordGrid(");
+        bool needInt = verbose || Contains(programText, "stdin.readInt(") || Contains(programText, "stdin.readArrayInt(") || Contains(programText, "stdin.readGridInt(");
+        bool needLong = verbose || Contains(programText, "stdin.readLong(") || Contains(programText, "stdin.readArrayLong(") || Contains(programText, "stdin.readGridLong(");
+        bool needDouble = verbose || Contains(programText, "stdin.readDouble(") || Contains(programText, "stdin.readArrayDouble(");
+        bool needDecimal = verbose || Contains(programText, "stdin.readDecimal(") || Contains(programText, "stdin.readArrayDecimal(");
+        bool needBool = verbose || Contains(programText, "stdin.readBool(") || Contains(programText, "stdin.readArrayBool(");
+        bool needChar = verbose || Contains(programText, "stdin.readChar(") || Contains(programText, "stdin.readArrayChar(");
+        bool needString = verbose || Contains(programText, "stdin.readString(") || Contains(programText, "stdin.readArrayString(");
+        bool needLine = verbose || Contains(programText, "stdin.readLine(") || Contains(programText, "stdin.readLines(") || Contains(programText, "stdin.readWords(") || Contains(programText, "stdin.readChars(") || Contains(programText, "stdin.readCharGrid(") || Contains(programText, "stdin.readWordGrid(") || Contains(programText, "stdin.readRestOfLine(");
+        bool needLines = verbose || Contains(programText, "stdin.readLines(");
+        bool needWords = verbose || Contains(programText, "stdin.readWords(") || Contains(programText, "stdin.readWordGrid(");
+        bool needChars = verbose || Contains(programText, "stdin.readChars(") || Contains(programText, "stdin.readCharGrid(");
+        bool needArrayInt = verbose || Contains(programText, "stdin.readArrayInt(");
+        bool needArrayLong = verbose || Contains(programText, "stdin.readArrayLong(");
+        bool needArrayDouble = verbose || Contains(programText, "stdin.readArrayDouble(");
+        bool needArrayDecimal = verbose || Contains(programText, "stdin.readArrayDecimal(");
+        bool needArrayBool = verbose || Contains(programText, "stdin.readArrayBool(");
+        bool needArrayChar = verbose || Contains(programText, "stdin.readArrayChar(");
+        bool needArrayString = verbose || Contains(programText, "stdin.readArrayString(");
+        bool needGridInt = verbose || Contains(programText, "stdin.readGridInt(");
+        bool needGridLong = verbose || Contains(programText, "stdin.readGridLong(");
+        bool needCharGrid = verbose || Contains(programText, "stdin.readCharGrid(");
+        bool needWordGrid = verbose || Contains(programText, "stdin.readWordGrid(");
 
         needArrayInt |= needGridInt;
         needArrayLong |= needGridLong;
@@ -781,16 +789,16 @@ internal sealed partial class CSharpEmitter
 
         builder.AppendLine();
 
-        if (needInt) builder.AppendLine("    public int @int() => ReadInt();");
-        if (needLong) builder.AppendLine("    public long @long() => ReadLong();");
-        if (needDouble) builder.AppendLine("    public double @double() => double.Parse(NextToken(), CultureInfo.InvariantCulture);");
-        if (needDecimal) builder.AppendLine("    public decimal @decimal() => decimal.Parse(NextToken(), CultureInfo.InvariantCulture);");
-        if (needBool) builder.AppendLine("    public bool @bool() => ParseBool(NextToken());");
+        if (needInt) builder.AppendLine("    public int readInt() => ReadInt();");
+        if (needLong) builder.AppendLine("    public long readLong() => ReadLong();");
+        if (needDouble) builder.AppendLine("    public double readDouble() => double.Parse(NextToken(), CultureInfo.InvariantCulture);");
+        if (needDecimal) builder.AppendLine("    public decimal readDecimal() => decimal.Parse(NextToken(), CultureInfo.InvariantCulture);");
+        if (needBool) builder.AppendLine("    public bool readBool() => ParseBool(NextToken());");
         if (needChar)
         {
             builder.AppendLine(
                 """
-                    public char @char()
+                    public char readChar()
                     {
                         string token = NextToken();
                         return token.Length == 0 ? '\0' : token[0];
@@ -798,23 +806,27 @@ internal sealed partial class CSharpEmitter
                 """);
         }
 
-        if (needString) builder.AppendLine("    public string str() => NextToken();");
+        if (needString) builder.AppendLine("    public string readString() => NextToken();");
         if (needLine)
         {
             builder.AppendLine(
                 needLineAlignment
                     ? """
-                        public string line()
+                        public string readLine()
                         {
                             ConsumePendingLineBoundary();
                             return _reader.ReadLine() ?? string.Empty;
                         }
+
+                        public string readRestOfLine() => _reader.ReadLine() ?? string.Empty;
                         """
                     : """
-                        public string line()
+                        public string readLine()
                         {
                             return _reader.ReadLine() ?? string.Empty;
                         }
+
+                        public string readRestOfLine() => _reader.ReadLine() ?? string.Empty;
                         """);
         }
 
@@ -822,26 +834,26 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public string[] lines(int n)
+                    public string[] readLines(int n)
                     {
                         string[] result = new string[n];
-                        for (int i = 0; i < n; i++) result[i] = line();
+                        for (int i = 0; i < n; i++) result[i] = readLine();
                         return result;
                     }
                 """);
         }
 
-        if (needWords) builder.AppendLine("    public string[] words() => line().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);");
-        if (needChars) builder.AppendLine("    public char[] chars() => line().ToCharArray();");
+        if (needWords) builder.AppendLine("    public string[] readWords() => readLine().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);");
+        if (needChars) builder.AppendLine("    public char[] readChars() => readLine().ToCharArray();");
 
         if (needArrayInt)
         {
             builder.AppendLine(
                 """
-                    public int[] arrayInt(int n)
+                    public int[] readArrayInt(int n)
                     {
                         int[] result = new int[n];
-                        for (int i = 0; i < n; i++) result[i] = @int();
+                        for (int i = 0; i < n; i++) result[i] = readInt();
                         return result;
                     }
                 """);
@@ -851,10 +863,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public long[] arrayLong(int n)
+                    public long[] readArrayLong(int n)
                     {
                         long[] result = new long[n];
-                        for (int i = 0; i < n; i++) result[i] = @long();
+                        for (int i = 0; i < n; i++) result[i] = readLong();
                         return result;
                     }
                 """);
@@ -864,10 +876,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public double[] arrayDouble(int n)
+                    public double[] readArrayDouble(int n)
                     {
                         double[] result = new double[n];
-                        for (int i = 0; i < n; i++) result[i] = @double();
+                        for (int i = 0; i < n; i++) result[i] = readDouble();
                         return result;
                     }
                 """);
@@ -877,10 +889,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public decimal[] arrayDecimal(int n)
+                    public decimal[] readArrayDecimal(int n)
                     {
                         decimal[] result = new decimal[n];
-                        for (int i = 0; i < n; i++) result[i] = @decimal();
+                        for (int i = 0; i < n; i++) result[i] = readDecimal();
                         return result;
                     }
                 """);
@@ -890,10 +902,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public bool[] arrayBool(int n)
+                    public bool[] readArrayBool(int n)
                     {
                         bool[] result = new bool[n];
-                        for (int i = 0; i < n; i++) result[i] = @bool();
+                        for (int i = 0; i < n; i++) result[i] = readBool();
                         return result;
                     }
                 """);
@@ -903,10 +915,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public char[] arrayChar(int n)
+                    public char[] readArrayChar(int n)
                     {
                         char[] result = new char[n];
-                        for (int i = 0; i < n; i++) result[i] = @char();
+                        for (int i = 0; i < n; i++) result[i] = readChar();
                         return result;
                     }
                 """);
@@ -916,10 +928,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public string[] arrayString(int n)
+                    public string[] readArrayString(int n)
                     {
                         string[] result = new string[n];
-                        for (int i = 0; i < n; i++) result[i] = str();
+                        for (int i = 0; i < n; i++) result[i] = readString();
                         return result;
                     }
                 """);
@@ -929,10 +941,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public int[][] gridInt(int n, int m)
+                    public int[][] readGridInt(int n, int m)
                     {
                         int[][] result = new int[n][];
-                        for (int i = 0; i < n; i++) result[i] = arrayInt(m);
+                        for (int i = 0; i < n; i++) result[i] = readArrayInt(m);
                         return result;
                     }
                 """);
@@ -942,10 +954,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public long[][] gridLong(int n, int m)
+                    public long[][] readGridLong(int n, int m)
                     {
                         long[][] result = new long[n][];
-                        for (int i = 0; i < n; i++) result[i] = arrayLong(m);
+                        for (int i = 0; i < n; i++) result[i] = readArrayLong(m);
                         return result;
                     }
                 """);
@@ -955,10 +967,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public char[][] charGrid(int n)
+                    public char[][] readCharGrid(int n)
                     {
                         char[][] result = new char[n][];
-                        for (int i = 0; i < n; i++) result[i] = line().ToCharArray();
+                        for (int i = 0; i < n; i++) result[i] = readLine().ToCharArray();
                         return result;
                     }
                 """);
@@ -968,10 +980,10 @@ internal sealed partial class CSharpEmitter
         {
             builder.AppendLine(
                 """
-                    public string[][] wordGrid(int n)
+                    public string[][] readWordGrid(int n)
                     {
                         string[][] result = new string[n][];
-                        for (int i = 0; i < n; i++) result[i] = words();
+                        for (int i = 0; i < n; i++) result[i] = readWords();
                         return result;
                     }
                 """);
@@ -1540,6 +1552,86 @@ internal sealed partial class CSharpEmitter
                         """,
                     _ => string.Empty,
                 });
+        }
+
+        foreach (string kind in _stdoutDirectNullableScalarKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            builder.AppendLine(kind switch
+            {
+                "int" => """
+                    public void write(int? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(int? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                "long" => """
+                    public void write(long? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(long? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                "double" => """
+                    public void write(double? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(double? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                "decimal" => """
+                    public void write(decimal? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(decimal? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                "bool" => """
+                    public void write(bool? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(bool? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                "char" => """
+                    public void write(char? value)
+                    {
+                        if (value.HasValue) write(value.GetValueOrDefault());
+                    }
+
+                    public void writeln(char? value)
+                    {
+                        write(value);
+                        _writer.WriteLine();
+                    }
+                    """,
+                _ => string.Empty,
+            });
         }
 
         if (_stdoutDirectScalarKinds.Count == 0)

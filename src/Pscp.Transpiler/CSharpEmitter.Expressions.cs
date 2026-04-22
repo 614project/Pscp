@@ -252,20 +252,32 @@ internal sealed partial class CSharpEmitter
     private bool TryEmitSpecializedStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
     {
         emitted = null;
+        if (TryEmitCanonicalScalarStdinCall(memberName, arguments, out emitted))
+        {
+            return true;
+        }
+
+        if (TryEmitCanonicalShapedStdinCall(memberName, arguments, out emitted))
+        {
+            return true;
+        }
+
         if (TryParseSingleGenericMember(memberName, "read", out string? readTypeText)
             && arguments.Count == 0)
         {
             return TryEmitInputReadByText(readTypeText!, out emitted);
         }
 
-        if (TryParseSingleGenericMember(memberName, "array", out string? arrayTypeText)
+        if ((TryParseSingleGenericMember(memberName, "array", out string? arrayTypeText)
+                || TryParseSingleGenericMember(memberName, "readArray", out arrayTypeText))
             && arguments.Count == 1
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } arrayLength)
         {
             return TryEmitExplicitArrayRead(arrayTypeText!, arrayLength.Expression, out emitted);
         }
 
-        if (TryParseSingleGenericMember(memberName, "list", out string? listTypeText)
+        if ((TryParseSingleGenericMember(memberName, "list", out string? listTypeText)
+                || TryParseSingleGenericMember(memberName, "readList", out listTypeText))
             && arguments.Count == 1
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } listLength
             && TryEmitExplicitArrayRead(listTypeText!, listLength.Expression, out string? listArrayRead))
@@ -274,7 +286,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseSingleGenericMember(memberName, "linkedList", out string? linkedListTypeText)
+        if ((TryParseSingleGenericMember(memberName, "linkedList", out string? linkedListTypeText)
+                || TryParseSingleGenericMember(memberName, "readLinkedList", out linkedListTypeText))
             && arguments.Count == 1
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } linkedListLength
             && TryEmitExplicitArrayRead(linkedListTypeText!, linkedListLength.Expression, out string? linkedListArrayRead))
@@ -283,7 +296,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseMultipleGenericMembers(memberName, "tuple2", out IReadOnlyList<string>? tuple2Types)
+        if ((TryParseMultipleGenericMembers(memberName, "tuple2", out IReadOnlyList<string>? tuple2Types)
+                || TryParseMultipleGenericMembers(memberName, "readTuple2", out tuple2Types))
             && tuple2Types is not null
             && tuple2Types.Count == 2
             && arguments.Count == 0
@@ -293,7 +307,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseMultipleGenericMembers(memberName, "tuple3", out IReadOnlyList<string>? tuple3Types)
+        if ((TryParseMultipleGenericMembers(memberName, "tuple3", out IReadOnlyList<string>? tuple3Types)
+                || TryParseMultipleGenericMembers(memberName, "readTuple3", out tuple3Types))
             && tuple3Types is not null
             && tuple3Types.Count == 3
             && arguments.Count == 0
@@ -303,7 +318,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseMultipleGenericMembers(memberName, "tuples2", out IReadOnlyList<string>? tuples2Types)
+        if ((TryParseMultipleGenericMembers(memberName, "tuples2", out IReadOnlyList<string>? tuples2Types)
+                || TryParseMultipleGenericMembers(memberName, "readTuples2", out tuples2Types))
             && tuples2Types is not null
             && tuples2Types.Count == 2
             && arguments.Count == 1
@@ -314,7 +330,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseMultipleGenericMembers(memberName, "tuples3", out IReadOnlyList<string>? tuples3Types)
+        if ((TryParseMultipleGenericMembers(memberName, "tuples3", out IReadOnlyList<string>? tuples3Types)
+                || TryParseMultipleGenericMembers(memberName, "readTuples3", out tuples3Types))
             && tuples3Types is not null
             && tuples3Types.Count == 3
             && arguments.Count == 1
@@ -325,7 +342,8 @@ internal sealed partial class CSharpEmitter
             return true;
         }
 
-        if (TryParseSingleGenericMember(memberName, "nestedArray", out string? nestedTypeText)
+        if ((TryParseSingleGenericMember(memberName, "nestedArray", out string? nestedTypeText)
+                || TryParseSingleGenericMember(memberName, "readNestedArray", out nestedTypeText))
             && arguments.Count == 2
             && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } rowCount
             && arguments[1] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } columnCount)
@@ -334,6 +352,55 @@ internal sealed partial class CSharpEmitter
         }
 
         return false;
+    }
+
+    private bool TryEmitCanonicalScalarStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
+    {
+        emitted = null;
+        if (arguments.Count != 0)
+        {
+            return false;
+        }
+
+        emitted = memberName switch
+        {
+            "int" or "readInt" => "stdin.readInt()",
+            "long" or "readLong" => "stdin.readLong()",
+            "double" or "readDouble" => "stdin.readDouble()",
+            "decimal" or "readDecimal" => "stdin.readDecimal()",
+            "bool" or "readBool" => "stdin.readBool()",
+            "char" or "readChar" => "stdin.readChar()",
+            "str" or "readString" => "stdin.readString()",
+            "line" or "readLine" => "stdin.readLine()",
+            "readRestOfLine" => "stdin.readRestOfLine()",
+            "words" or "readWords" => "stdin.readWords()",
+            "chars" or "readChars" => "stdin.readChars()",
+            _ => null,
+        };
+
+        return emitted is not null;
+    }
+
+    private bool TryEmitCanonicalShapedStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
+    {
+        emitted = null;
+        if (!TryGetPositionalExpressionArguments(arguments, out IReadOnlyList<ExpressionArgumentSyntax>? positional)
+            || positional is null)
+        {
+            return false;
+        }
+
+        emitted = (memberName, positional.Count) switch
+        {
+            ("lines" or "readLines", 1) => $"stdin.readLines({EmitExpression(positional[0].Expression)})",
+            ("charGrid" or "readCharGrid", 1) => $"stdin.readCharGrid({EmitExpression(positional[0].Expression)})",
+            ("wordGrid" or "readWordGrid", 1) => $"stdin.readWordGrid({EmitExpression(positional[0].Expression)})",
+            ("gridInt" or "readGridInt", 2) => $"stdin.readGridInt({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
+            ("gridLong" or "readGridLong", 2) => $"stdin.readGridLong({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
+            _ => null,
+        };
+
+        return emitted is not null;
     }
 
     private static bool TryParseSingleGenericMember(string memberName, string expectedRoot, out string? argumentText)
@@ -353,13 +420,13 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => "stdin.@int()",
-            "long" => "stdin.@long()",
-            "double" => "stdin.@double()",
-            "decimal" => "stdin.@decimal()",
-            "bool" => "stdin.@bool()",
-            "char" => "stdin.@char()",
-            "string" => "stdin.str()",
+            "int" => "stdin.readInt()",
+            "long" => "stdin.readLong()",
+            "double" => "stdin.readDouble()",
+            "decimal" => "stdin.readDecimal()",
+            "bool" => "stdin.readBool()",
+            "char" => "stdin.readChar()",
+            "string" => "stdin.readString()",
             _ => null,
         };
 
@@ -381,13 +448,13 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => $"stdin.arrayInt({EmitExpression(lengthExpression)})",
-            "long" => $"stdin.arrayLong({EmitExpression(lengthExpression)})",
-            "double" => $"stdin.arrayDouble({EmitExpression(lengthExpression)})",
-            "decimal" => $"stdin.arrayDecimal({EmitExpression(lengthExpression)})",
-            "bool" => $"stdin.arrayBool({EmitExpression(lengthExpression)})",
-            "char" => $"stdin.arrayChar({EmitExpression(lengthExpression)})",
-            "string" => $"stdin.arrayString({EmitExpression(lengthExpression)})",
+            "int" => $"stdin.readArrayInt({EmitExpression(lengthExpression)})",
+            "long" => $"stdin.readArrayLong({EmitExpression(lengthExpression)})",
+            "double" => $"stdin.readArrayDouble({EmitExpression(lengthExpression)})",
+            "decimal" => $"stdin.readArrayDecimal({EmitExpression(lengthExpression)})",
+            "bool" => $"stdin.readArrayBool({EmitExpression(lengthExpression)})",
+            "char" => $"stdin.readArrayChar({EmitExpression(lengthExpression)})",
+            "string" => $"stdin.readArrayString({EmitExpression(lengthExpression)})",
             _ => null,
         };
 
@@ -443,8 +510,8 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => $"stdin.gridInt({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
-            "long" => $"stdin.gridLong({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "int" => $"stdin.readGridInt({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "long" => $"stdin.readGridLong({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
             _ => null,
         };
 
@@ -635,9 +702,44 @@ internal sealed partial class CSharpEmitter
         if (receiver is IdentifierExpression { Name: "stdin" })
         {
             string root = name.Split('<')[0];
-            if (root is "int" or "long" or "double" or "decimal" or "bool" or "char")
+            if (root is "int")
             {
-                return "@" + name;
+                return "readInt";
+            }
+
+            if (root is "long")
+            {
+                return "readLong";
+            }
+
+            if (root is "double")
+            {
+                return "readDouble";
+            }
+
+            if (root is "decimal")
+            {
+                return "readDecimal";
+            }
+
+            if (root is "bool")
+            {
+                return "readBool";
+            }
+
+            if (root is "char")
+            {
+                return "readChar";
+            }
+
+            if (root is "str")
+            {
+                return "readString";
+            }
+
+            if (root is "line")
+            {
+                return "readLine";
             }
         }
 
@@ -1103,13 +1205,13 @@ internal sealed partial class CSharpEmitter
     {
         return named.Name switch
         {
-            "int" => "stdin.@int()",
-            "long" => "stdin.@long()",
-            "double" => "stdin.@double()",
-            "decimal" => "stdin.@decimal()",
-            "bool" => "stdin.@bool()",
-            "char" => "stdin.@char()",
-            "string" => "stdin.str()",
+            "int" => "stdin.readInt()",
+            "long" => "stdin.readLong()",
+            "double" => "stdin.readDouble()",
+            "decimal" => "stdin.readDecimal()",
+            "bool" => "stdin.readBool()",
+            "char" => "stdin.readChar()",
+            "string" => "stdin.readString()",
             _ => "default!"
         };
     }
@@ -1130,13 +1232,13 @@ internal sealed partial class CSharpEmitter
         {
             return sized.ElementType switch
             {
-                NamedTypeSyntax { Name: "int" } => $"stdin.arrayInt({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "long" } => $"stdin.arrayLong({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "double" } => $"stdin.arrayDouble({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "decimal" } => $"stdin.arrayDecimal({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "bool" } => $"stdin.arrayBool({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "char" } => $"stdin.arrayChar({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "string" } => $"stdin.arrayString({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "int" } => $"stdin.readArrayInt({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "long" } => $"stdin.readArrayLong({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "double" } => $"stdin.readArrayDouble({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "decimal" } => $"stdin.readArrayDecimal({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "bool" } => $"stdin.readArrayBool({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "char" } => $"stdin.readArrayChar({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "string" } => $"stdin.readArrayString({EmitExpression(sized.Dimensions[0])})",
                 _ => "default!",
             };
         }
@@ -1145,8 +1247,8 @@ internal sealed partial class CSharpEmitter
         {
             return sized.ElementType switch
             {
-                NamedTypeSyntax { Name: "int" } => $"stdin.gridInt({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
-                NamedTypeSyntax { Name: "long" } => $"stdin.gridLong({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
+                NamedTypeSyntax { Name: "int" } => $"stdin.readGridInt({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
+                NamedTypeSyntax { Name: "long" } => $"stdin.readGridLong({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
                 _ => "default!",
             };
         }
@@ -1380,6 +1482,14 @@ internal sealed partial class CSharpEmitter
                 => $"{target}.Add({value})",
             "HashSet" or "System.Collections.Generic.HashSet" when assignment.Operator == AssignmentOperator.SubtractAssign
                 => $"{target}.Remove({value})",
+            "SortedSet" or "System.Collections.Generic.SortedSet" when assignment.Operator == AssignmentOperator.AddAssign
+                => $"{target}.Add({value})",
+            "SortedSet" or "System.Collections.Generic.SortedSet" when assignment.Operator == AssignmentOperator.SubtractAssign
+                => $"{target}.Remove({value})",
+            "Dictionary" or "System.Collections.Generic.Dictionary" when assignment.Operator == AssignmentOperator.AddAssign
+                => EmitDictionaryAdd(target, assignment.Value),
+            "Dictionary" or "System.Collections.Generic.Dictionary" when assignment.Operator == AssignmentOperator.SubtractAssign
+                => $"{target}.Remove({value})",
             "Queue" or "System.Collections.Generic.Queue" when assignment.Operator == AssignmentOperator.AddAssign
                 => $"{target}.Enqueue({value})",
             "Stack" or "System.Collections.Generic.Stack" when assignment.Operator == AssignmentOperator.AddAssign
@@ -1389,6 +1499,17 @@ internal sealed partial class CSharpEmitter
             _ => null,
         };
         return emitted is not null;
+    }
+
+    private string EmitDictionaryAdd(string target, Expression valueExpression)
+    {
+        if (valueExpression is TupleExpression tuple && tuple.Elements.Count == 2)
+        {
+            return $"{target}.TryAdd({EmitExpression(tuple.Elements[0])}, {EmitExpression(tuple.Elements[1])})";
+        }
+
+        string value = EmitExpression(valueExpression);
+        return $"{target}.TryAdd(({value}).Item1, ({value}).Item2)";
     }
 
     private string EmitPriorityQueueEnqueue(string target, Expression valueExpression)
@@ -1899,16 +2020,117 @@ internal sealed partial class CSharpEmitter
         };
     }
 
+    private bool TryEmitLambdaBodyValueStatement(
+        LambdaBody body,
+        BindingTarget? indexTarget,
+        string? indexName,
+        BindingTarget itemTarget,
+        string itemName,
+        Func<string, string> emitValueStatement,
+        out string emitted)
+    {
+        string aliases = EmitBindingAliasStatements(indexTarget, indexName, itemTarget, itemName);
+        if (body is LambdaExpressionBody expressionBody)
+        {
+            emitted = JoinInlineStatements(aliases, emitValueStatement(EmitExpression(expressionBody.Expression)));
+            return true;
+        }
+
+        if (body is LambdaBlockBody blockBody
+            && TryEmitBlockValueStatement(blockBody.Block, emitValueStatement, out string blockStatement))
+        {
+            emitted = JoinInlineStatements(aliases, blockStatement);
+            return true;
+        }
+
+        emitted = string.Empty;
+        return false;
+    }
+
+    private bool TryEmitBlockValueStatement(
+        BlockStatement block,
+        Func<string, string> emitValueStatement,
+        out string emitted)
+    {
+        emitted = string.Empty;
+        if (!TryGetTerminalValueExpression(block, out Expression? valueExpression, out int regularCount))
+        {
+            return false;
+        }
+
+        List<string> parts = [];
+        for (int i = 0; i < regularCount; i++)
+        {
+            if (ContainsControlFlowReturn(block.Statements[i]))
+            {
+                return false;
+            }
+
+            parts.Add(EmitInlineStatement(block.Statements[i]));
+        }
+
+        parts.Add(emitValueStatement(EmitExpression(valueExpression!)));
+        emitted = JoinInlineStatements(parts);
+        return true;
+    }
+
+    private static bool TryGetTerminalValueExpression(BlockStatement block, out Expression? expression, out int regularCount)
+    {
+        expression = GetImplicitReturnExpression(block);
+        if (expression is not null)
+        {
+            regularCount = block.Statements.Count - 1;
+            return true;
+        }
+
+        if (block.Statements.LastOrDefault() is ReturnStatement { Expression: not null } returnStatement)
+        {
+            expression = returnStatement.Expression;
+            regularCount = block.Statements.Count - 1;
+            return true;
+        }
+
+        regularCount = block.Statements.Count;
+        return false;
+    }
+
+    private static bool ContainsControlFlowReturn(Statement statement)
+        => statement switch
+        {
+            ReturnStatement => true,
+            BlockStatement block => block.Statements.Any(ContainsControlFlowReturn),
+            IfStatement ifStatement => ContainsControlFlowReturn(ifStatement.ThenBranch)
+                || (ifStatement.ElseBranch is not null && ContainsControlFlowReturn(ifStatement.ElseBranch)),
+            WhileStatement whileStatement => ContainsControlFlowReturn(whileStatement.Body),
+            ForInStatement forIn => ContainsControlFlowReturn(forIn.Body),
+            CStyleForStatement cStyleFor => ContainsControlFlowReturn(cStyleFor.Body),
+            FastForStatement fastFor => ContainsControlFlowReturn(fastFor.Body),
+            LocalFunctionStatement => false,
+            _ => false,
+        };
+
+    private static string JoinInlineStatements(params string[] statements)
+        => JoinInlineStatements((IEnumerable<string>)statements);
+
+    private static string JoinInlineStatements(IEnumerable<string> statements)
+        => string.Join(" ", statements.Where(statement => !string.IsNullOrWhiteSpace(statement)));
+
     private bool TryEmitDirectIntrinsicCall(CallExpression call, out string? emitted)
     {
         emitted = null;
+        if (call.Callee is IdentifierExpression conversionIdentifier
+            && TryEmitConversionIntrinsic(call, conversionIdentifier.Name, out emitted))
+        {
+            return true;
+        }
+
+        if (_semantic is not null && !_semantic.IsIntrinsicCall(call))
+        {
+            return false;
+        }
+
         if (call.Callee is IdentifierExpression identifier)
         {
-            if (TryEmitConversionIntrinsic(call, identifier.Name, out emitted))
-            {
-                return true;
-            }
-
             if (TryEmitDirectIntrinsicCallCore(call, identifier.Name, receiver: null, call.Arguments, out emitted))
             {
                 return true;

@@ -52,6 +52,11 @@ internal static class PscpIntrinsicCatalog
         {
             ["stdin"] = new HashSet<string>(StringComparer.Ordinal)
             {
+                "readInt", "readLong", "readDouble", "readDecimal", "readBool", "readChar", "readString",
+                "readLine", "readLines", "readWords", "readChars", "readRestOfLine",
+                "readArray", "readList", "readLinkedList", "readTuple2", "readTuple3",
+                "readTuples2", "readTuples3", "readGridInt", "readGridLong", "readCharGrid", "readWordGrid",
+                "readNestedArray",
                 "int", "long", "double", "decimal", "bool", "char", "str", "line",
                 "lines", "words", "chars", "array", "list", "linkedList", "tuple2", "tuple3",
                 "tuples2", "tuples3", "gridInt", "gridLong", "charGrid", "wordGrid", "nestedArray"
