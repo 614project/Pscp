@@ -129,6 +129,11 @@ query -> q {
 
 ---
 
+## 빠른 시작
+
+.NET 10 이상의 [SDK](https://dotnet.microsoft.com/)를 설치한 후, installer/Build-Installer.ps1 을 실행하면 artifacts/installer/setup 폴더에 setup.exe라는 파일명으로 pscp의 SDK 설치 파일이 생성되는데, 이를 설치하시면 됩니다.  
+이후 원하는 폴더에서 ``main.pscp`` 파일을 생성하고, pscp 코드를 작성한 후 터미널에 ``pscp run``를 입력하면 실행 결과를 바로 볼수 있습니다.
+
 ## 구성
 
 이 저장소에는 다음 구현이 들어 있습니다.
@@ -168,15 +173,7 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- init .\sample
 
 ## 사용자 코드 실행 방법
 
-설치된 SDK를 사용한다면 보통 아래 세 명령이면 충분합니다.
-
-```powershell
-pscp init
-pscp run
-pscp build
-```
-
-동작 방식:
+주요 명령어 설명:
 
 - `pscp init`: 현재 폴더에 `main.pscp`, 하위 `.pscp` 폴더에 C# 프로젝트를 만듭니다.
 - `pscp run [file.pscp]`: `.pscp\Program.cs`로 트랜스파일한 뒤 `dotnet run`까지 이어서 실행합니다.
