@@ -325,6 +325,14 @@ internal sealed partial class PscpAnalyzer
             return;
         }
 
+        if (IsCollectionLikeReceiver(receiverName, instanceContext)
+            && PscpIntrinsics.CollectionMembers.TryGetValue(state.Tokens[tokenIndex].Text, out PscpCompletionEntry? collectionMember))
+        {
+            state.AddIntrinsicMember(tokenIndex, collectionMember);
+            state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs[$"collection.{state.Tokens[tokenIndex].Text}"]);
+            return;
+        }
+
         if (TryGetIntrinsicMember(receiverName, state.Tokens[tokenIndex].Text, out PscpCompletionEntry? completion, out string? hoverKey))
         {
             state.AddIntrinsicMember(tokenIndex, completion!);
@@ -412,6 +420,19 @@ internal sealed partial class PscpAnalyzer
         }
 
         return token.Text;
+    }
+
+    private static bool IsCollectionLikeReceiver(string receiverName, bool instanceContext)
+    {
+        if (!instanceContext)
+        {
+            return false;
+        }
+
+        string normalized = PscpExternalMetadata.NormalizeTypeReceiver(receiverName);
+        return receiverName.EndsWith("[]", StringComparison.Ordinal)
+            || normalized is "Array" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet"
+            || normalized.StartsWith("IEnumerable", StringComparison.Ordinal);
     }
 
     private static bool TryGetIntrinsicMember(

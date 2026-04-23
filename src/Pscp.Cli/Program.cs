@@ -315,6 +315,15 @@ static class PscpCli
             return new ToolInvocation("dotnet", $"\"{candidate}\"", Path.GetDirectoryName(candidate)!);
         }
 
+        if (repositoryRoot is not null)
+        {
+            string serverProject = Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "Pscp.LanguageServer.csproj");
+            if (File.Exists(serverProject))
+            {
+                return new ToolInvocation("dotnet", $"run --project \"{serverProject}\" --", repositoryRoot);
+            }
+        }
+
         throw new InvalidOperationException("PSCP language server was not found. Build or install the language server first.");
     }
 

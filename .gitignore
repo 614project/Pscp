@@ -490,5 +490,6 @@ $RECYCLE.BIN/
 .installer-smoke/
 .installer-smoke2/
 .sdk-smoke/
+.tmp_repro/
 artifacts/
 src/Pscp.Installer/payload.zip

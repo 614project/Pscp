@@ -63,6 +63,31 @@ internal static class PscpIntrinsics
             ["desc"] = new("desc", 10, "descending comparer", "Comparator sugar that resolves to the default descending comparer for the receiver type."),
         };
 
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> CollectionMembers =
+        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
+        {
+            ["map"] = Member("map", "map(${1:x => x})", "Maps each element and materializes the result in the receiver's default family.", "map($1)"),
+            ["filter"] = Member("filter", "filter(${1:x => true})", "Keeps elements that satisfy the predicate.", "filter($1)"),
+            ["fold"] = Member("fold", "fold(${1:seed}, ${2:(acc, x) => acc})", "Folds the receiver into one value.", "fold($1, $2)"),
+            ["scan"] = Member("scan", "scan(${1:seed}, ${2:(acc, x) => acc})", "Returns the prefix states produced by a fold-like operation.", "scan($1, $2)"),
+            ["mapFold"] = Member("mapFold", "mapFold(${1:seed}, ${2:(acc, x) => (x, acc)})", "Maps values while carrying state; callback returns `(mapped, nextState)`.", "mapFold($1, $2)"),
+            ["any"] = Member("any", "any(${1:x => true})", "Returns whether any element satisfies the predicate.", "any($1)"),
+            ["all"] = Member("all", "all(${1:x => true})", "Returns whether all elements satisfy the predicate.", "all($1)"),
+            ["count"] = Member("count", "count(${1:x => true})", "Counts elements, optionally by predicate.", "count($1)"),
+            ["find"] = Member("find", "find(${1:x => true})", "Returns the first matching element, or the default value.", "find($1)"),
+            ["findIndex"] = Member("findIndex", "findIndex(${1:x => true})", "Returns the first matching index, or `-1`.", "findIndex($1)"),
+            ["findLastIndex"] = Member("findLastIndex", "findLastIndex(${1:x => true})", "Returns the last matching index, or `-1`.", "findLastIndex($1)"),
+            ["sort"] = Member("sort", "sort()", "Returns a sorted materialized copy.", "sort()"),
+            ["sortBy"] = Member("sortBy", "sortBy(${1:x => x})", "Returns a materialized copy sorted by the projected key.", "sortBy($1)"),
+            ["sortWith"] = Member("sortWith", "sortWith(${1:comparer})", "Returns a materialized copy sorted with a comparer or comparison.", "sortWith($1)"),
+            ["distinct"] = Member("distinct", "distinct()", "Returns distinct elements preserving source order where possible.", "distinct()"),
+            ["reverse"] = Member("reverse", "reverse()", "Returns elements in reverse order.", "reverse()"),
+            ["copy"] = Member("copy", "copy()", "Returns a materialized copy.", "copy()"),
+            ["groupCount"] = Member("groupCount", "groupCount()", "Counts occurrences of each distinct value.", "groupCount()"),
+            ["freq"] = Member("freq", "freq()", "Alias of `groupCount()`.", "freq()"),
+            ["index"] = Member("index", "index()", "Maps each distinct value to its first index.", "index()"),
+        };
+
     public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> IntrinsicFunctions =
         new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
         {
@@ -78,6 +103,11 @@ internal static class PscpIntrinsics
             ["find"] = Function("find", "find(${1:values}, ${2:predicate})", "Returns the first matching element, or the default value.", "find($1, $2)"),
             ["findIndex"] = Function("findIndex", "findIndex(${1:values}, ${2:predicate})", "Returns the index of the first matching element, or `-1`.", "findIndex($1, $2)"),
             ["findLastIndex"] = Function("findLastIndex", "findLastIndex(${1:values}, ${2:predicate})", "Returns the index of the last matching element, or `-1`.", "findLastIndex($1, $2)"),
+            ["map"] = Function("map", "map(${1:values}, ${2:selector})", "Pipe-friendly helper target; canonical source form is `values.map(selector)`.", "map($1, $2)"),
+            ["filter"] = Function("filter", "filter(${1:values}, ${2:predicate})", "Pipe-friendly helper target; canonical source form is `values.filter(predicate)`.", "filter($1, $2)"),
+            ["fold"] = Function("fold", "fold(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.fold(seed, folder)`.", "fold($1, $2, $3)"),
+            ["scan"] = Function("scan", "scan(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.scan(seed, folder)`.", "scan($1, $2, $3)"),
+            ["mapFold"] = Function("mapFold", "mapFold(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.mapFold(seed, folder)`.", "mapFold($1, $2, $3)"),
             ["sort"] = Function("sort", "sort(${1:values})", "Returns the values sorted by their default ordering.", "sort($1)"),
             ["sortBy"] = Function("sortBy", "sortBy(${1:values}, ${2:keySelector})", "Returns the values sorted by the projected key.", "sortBy($1, $2)"),
             ["sortWith"] = Function("sortWith", "sortWith(${1:values}, ${2:comparer})", "Returns the values sorted with a custom comparer.", "sortWith($1, $2)"),
@@ -170,6 +200,19 @@ internal static class PscpIntrinsics
             ["index"] = new("index(values)", new[] { "values" }, "Maps each distinct value to its first index."),
             ["chmin"] = new("chmin(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is smaller."),
             ["chmax"] = new("chmax(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is larger."),
+            ["map"] = new("xs.map(f)", new[] { "f" }, "Maps each element and materializes the result."),
+            ["filter"] = new("xs.filter(pred)", new[] { "pred" }, "Keeps elements matching the predicate."),
+            ["fold"] = new("xs.fold(seed, f)", new[] { "seed", "f" }, "Folds the receiver into one value."),
+            ["scan"] = new("xs.scan(seed, f)", new[] { "seed", "f" }, "Returns prefix fold states."),
+            ["mapFold"] = new("xs.mapFold(seed, f)", new[] { "seed", "f" }, "Maps values while carrying state."),
+            ["sort"] = new("xs.sort()", Array.Empty<string>(), "Returns a sorted materialized copy."),
+            ["sortBy"] = new("xs.sortBy(keySelector)", new[] { "keySelector" }, "Sorts by the projected key."),
+            ["sortWith"] = new("xs.sortWith(comparer)", new[] { "comparer" }, "Sorts with a comparer or comparison."),
+            ["distinct"] = new("xs.distinct()", Array.Empty<string>(), "Returns distinct values."),
+            ["reverse"] = new("xs.reverse()", Array.Empty<string>(), "Returns values in reverse order."),
+            ["groupCount"] = new("xs.groupCount()", Array.Empty<string>(), "Counts occurrences."),
+            ["freq"] = new("xs.freq()", Array.Empty<string>(), "Alias of `groupCount`."),
+            ["index"] = new("xs.index()", Array.Empty<string>(), "Maps each distinct value to its first index."),
         };
 
     public static readonly IReadOnlyDictionary<string, string> HoverDocs = CreateHoverDocs();
@@ -223,6 +266,11 @@ internal static class PscpIntrinsics
 
         docs["comparer.asc"] = "```pscp\nT.asc\n```\n\nComparator sugar that resolves to the default ascending comparer for the receiver type.";
         docs["comparer.desc"] = "```pscp\nT.desc\n```\n\nComparator sugar that resolves to the default descending comparer for the receiver type.";
+        foreach ((string name, PscpCompletionEntry entry) in CollectionMembers)
+        {
+            docs[$"collection.{name}"] = $"```pscp\nxs.{entry.Detail}\n```\n\n{entry.Documentation}";
+        }
+
         return docs;
     }
 
@@ -237,4 +285,7 @@ internal static class PscpIntrinsics
 
     private static PscpCompletionEntry Function(string label, string detail, string documentation, string insertText)
         => new(label, 3, detail, documentation, insertText, 2, label);
+
+    private static PscpCompletionEntry Member(string label, string detail, string documentation, string insertText)
+        => new(label, 2, detail, documentation, insertText, 2, label);
 }

@@ -28,14 +28,28 @@ internal sealed partial class PscpAnalyzer
         Scope globalScope = state.CreateScope(null, 0, snapshot.Text.Length);
         InitializeIntrinsics(state, globalScope);
         AnalyzeStatements(state, globalScope, 0, tokens.Count - 1, null, topLevel: true, loopDepth: 0);
-        AddTranspilerWarnings(state, snapshot.Text);
+        if (!lexer.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
+            && !parser.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+        {
+            AddTranspilerWarnings(state, snapshot.Text);
+        }
+
         AddDefaultTokenClassifications(state);
         return state.Build();
     }
 
     private static void AddTranspilerWarnings(AnalyzerState state, string text)
     {
-        TranspilationResult result = PscpTranspiler.Transpile(text);
+        TranspilationResult result;
+        try
+        {
+            result = PscpTranspiler.Transpile(text);
+        }
+        catch
+        {
+            return;
+        }
+
         foreach (Diagnostic diagnostic in result.Diagnostics)
         {
             if (diagnostic.Severity == DiagnosticSeverity.Error)

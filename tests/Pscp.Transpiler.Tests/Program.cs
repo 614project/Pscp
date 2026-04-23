@@ -756,6 +756,7 @@ internal static class TestRunner
         VerifyRemovedGenericReadSurface(failures);
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
+        await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
 
         if (failures.Count > 0)
         {
@@ -1781,6 +1782,40 @@ internal static class TestRunner
         }
     }
 
+    private static async Task VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(List<string> failures)
+    {
+        const string source = """
+            let value = 1
+            += value
+            int[] arr = [1, 2, 3]
+            arr.
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        _ = await session.ReadDiagnosticsAsync();
+
+        IReadOnlyList<string> memberLabels = await session.RequestCompletionLabelsAsync(line: 3, character: 4);
+        if (!memberLabels.Contains("map", StringComparer.Ordinal)
+            || !memberLabels.Contains("sortBy", StringComparer.Ordinal)
+            || !memberLabels.Contains("Length", StringComparer.Ordinal))
+        {
+            failures.Add($"LanguageServerCollectionCompletionRenameAndFreshDiagnostics: expected collection and .NET members not found\nActual: {string.Join(", ", memberLabels)}");
+        }
+
+        int renameEditCount = await session.RequestRenameEditCountAsync(line: 0, character: 4, newName: "answer");
+        if (renameEditCount != 2)
+        {
+            failures.Add($"LanguageServerCollectionCompletionRenameAndFreshDiagnostics: expected 2 rename edits, got {renameEditCount}");
+        }
+
+        await session.SendDidChangeAsync("let ok = [\n1,\n2\n]\n", version: 2);
+        IReadOnlyList<string> freshDiagnostics = await session.ReadDiagnosticsAsync();
+        if (freshDiagnostics.Count != 0)
+        {
+            failures.Add($"LanguageServerCollectionCompletionRenameAndFreshDiagnostics: expected diagnostics to clear after a valid edit\nActual: {string.Join(" | ", freshDiagnostics)}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -1907,7 +1942,15 @@ internal static class TestRunner
             string uri = new Uri(Path.Combine(workspaceRoot, ".generated-tests", "lsp-probe.pscp")).AbsoluteUri;
             string rootUri = new Uri(workspaceRoot + Path.DirectorySeparatorChar).AbsoluteUri;
             string escapedSource = JsonEncodedText.Encode(source).ToString();
-            ProcessStartInfo startInfo = new("dotnet", $"run --project \"{Path.Combine(workspaceRoot, "src", "Pscp.Cli", "Pscp.Cli.csproj")}\" -- lsp")
+            string serverProject = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "Pscp.LanguageServer.csproj");
+            ProcessResult build = await RunDotnetAsync($"build \"{serverProject}\" -nologo -v q", workspaceRoot, string.Empty);
+            if (build.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to build PSCP language server.\n{build.StdOut}\n{build.StdErr}");
+            }
+
+            string serverDll = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll");
+            ProcessStartInfo startInfo = new("dotnet", $"\"{serverDll}\"")
             {
                 WorkingDirectory = workspaceRoot,
                 RedirectStandardInput = true,
@@ -1935,7 +1978,7 @@ internal static class TestRunner
             });
 
             LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
-            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.0\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
+            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.1\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
             _ = await session.ReadMessageAsync();
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");
@@ -1972,6 +2015,34 @@ internal static class TestRunner
 
             response.Dispose();
             return labels;
+        }
+
+        public async Task<int> RequestRenameEditCountAsync(int line, int character, string newName)
+        {
+            int id = _nextRequestId++;
+            string request = "{\"jsonrpc\":\"2.0\",\"id\":" + id
+                + ",\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"" + _uri
+                + "\"},\"position\":{\"line\":" + line + ",\"character\":" + character
+                + "},\"newName\":\"" + JsonEncodedText.Encode(newName) + "\"}}";
+            await SendAsync(request);
+            JsonDocument response = await ReadMessageAsync();
+            int count = 0;
+            if (response.RootElement.TryGetProperty("result", out JsonElement result)
+                && result.ValueKind == JsonValueKind.Object
+                && result.TryGetProperty("changes", out JsonElement changes)
+                && changes.TryGetProperty(_uri, out JsonElement edits))
+            {
+                count = edits.GetArrayLength();
+            }
+
+            response.Dispose();
+            return count;
+        }
+
+        public async Task SendDidChangeAsync(string source, int version)
+        {
+            string escapedSource = JsonEncodedText.Encode(source).ToString();
+            await SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"{_uri}\",\"version\":{version}}},\"contentChanges\":[{{\"text\":\"{escapedSource}\"}}]}}}}");
         }
 
         public async ValueTask DisposeAsync()

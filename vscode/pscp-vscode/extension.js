@@ -4,6 +4,10 @@ const fs = require('fs');
 const path = require('path');
 const extensionPackage = require('./package.json');
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
+const INITIALIZE_TIMEOUT_MS = 15000;
+const DID_CHANGE_DEBOUNCE_MS = 120;
+
 const SEMANTIC_TOKEN_TYPES = [
   'namespace',
   'type',
@@ -48,124 +52,155 @@ let client;
 async function activate(context) {
   const output = vscode.window.createOutputChannel('PSCP');
   const diagnostics = vscode.languages.createDiagnosticCollection('pscp');
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   const selector = [{ language: 'pscp' }];
-  client = new PscpClient(context, output, diagnostics);
+  status.command = 'pscp.showServerLog';
+  status.text = 'PSCP: starting';
+  status.show();
+  client = new PscpClient(context, output, diagnostics, status);
 
-  context.subscriptions.push(output, diagnostics);
+  context.subscriptions.push(output, diagnostics, status);
+  context.subscriptions.push(vscode.commands.registerCommand('pscp.showServerLog', () => {
+    output.show(true);
+  }));
+
   context.subscriptions.push(vscode.commands.registerCommand('pscp.restartLanguageServer', async () => {
     await client.restart();
     vscode.window.showInformationMessage('PSCP language server restarted.');
   }));
 
+  context.subscriptions.push(vscode.commands.registerCommand('pscp.transpileCurrentFile', async () => {
+    await runPscpToolCommand(context, output, 'transpile');
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('pscp.runCurrentFile', async () => {
+    await runPscpToolCommand(context, output, 'run');
+  }));
+
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (event) => {
+    if (event.affectsConfiguration('pscp.server')
+      || event.affectsConfiguration('pscp.sdkPath')
+      || event.affectsConfiguration('pscp.languageServerPath')) {
+      output.appendLine('PSCP configuration changed; restarting language server.');
+      await client.restart();
+    }
+  }));
+
   context.subscriptions.push(vscode.workspace.onDidOpenTextDocument((document) => {
     if (isPscpDocument(document)) {
-      client.didOpen(document);
+      client.didOpen(document).catch((error) => logClientError(output, 'didOpen', error));
     }
   }));
 
   context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
     if (isPscpDocument(event.document)) {
-      client.didChange(event.document);
+      client.didChange(event.document).catch((error) => logClientError(output, 'didChange', error));
     }
   }));
 
   context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((document) => {
     if (isPscpDocument(document)) {
-      client.didClose(document);
+      client.didClose(document).catch((error) => logClientError(output, 'didClose', error));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerCompletionItemProvider(selector, {
-    provideCompletionItems(document, position) {
+    provideCompletionItems(document, position, token) {
       return client.request('textDocument/completion', {
         textDocument: toTextDocument(document),
         position: toPosition(position)
-      }).then(fromCompletionList);
+      }, token).then(fromCompletionList, fallbackProviderResult(output, 'completion', []));
     }
   }, '.'));
 
   context.subscriptions.push(vscode.languages.registerHoverProvider(selector, {
-    provideHover(document, position) {
+    provideHover(document, position, token) {
       return client.request('textDocument/hover', {
         textDocument: toTextDocument(document),
         position: toPosition(position)
-      }).then(fromHover);
+      }, token).then(fromHover, fallbackProviderResult(output, 'hover', null));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerDefinitionProvider(selector, {
-    provideDefinition(document, position) {
+    provideDefinition(document, position, token) {
       return client.request('textDocument/definition', {
         textDocument: toTextDocument(document),
         position: toPosition(position)
-      }).then(fromDefinition);
+      }, token).then(fromDefinition, fallbackProviderResult(output, 'definition', null));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerReferenceProvider(selector, {
-    provideReferences(document, position, contextInfo) {
+    provideReferences(document, position, contextInfo, token) {
       return client.request('textDocument/references', {
         textDocument: toTextDocument(document),
         position: toPosition(position),
         context: { includeDeclaration: contextInfo.includeDeclaration }
-      }).then(fromLocations);
+      }, token).then(fromLocations, fallbackProviderResult(output, 'references', []));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerDocumentSymbolProvider(selector, {
-    provideDocumentSymbols(document) {
+    provideDocumentSymbols(document, token) {
       return client.request('textDocument/documentSymbol', {
         textDocument: toTextDocument(document)
-      }).then(fromDocumentSymbols);
+      }, token).then(fromDocumentSymbols, fallbackProviderResult(output, 'document symbols', []));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerSignatureHelpProvider(selector, {
-    provideSignatureHelp(document, position) {
+    provideSignatureHelp(document, position, token) {
       return client.request('textDocument/signatureHelp', {
         textDocument: toTextDocument(document),
         position: toPosition(position)
-      }).then(fromSignatureHelp);
+      }, token).then(fromSignatureHelp, fallbackProviderResult(output, 'signature help', null));
     }
   }, '(', ','));
 
   context.subscriptions.push(vscode.languages.registerRenameProvider(selector, {
-    provideRenameEdits(document, position, newName) {
+    prepareRename(document, position, token) {
+      return client.request('textDocument/prepareRename', {
+        textDocument: toTextDocument(document),
+        position: toPosition(position)
+      }, token).then(fromPrepareRename, fallbackProviderResult(output, 'prepare rename', null));
+    },
+    provideRenameEdits(document, position, newName, token) {
       return client.request('textDocument/rename', {
         textDocument: toTextDocument(document),
         position: toPosition(position),
         newName
-      }).then(fromWorkspaceEdit);
+      }, token, { timeoutMs: 12000 }).then(fromWorkspaceEdit, fallbackProviderResult(output, 'rename', null));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerInlayHintsProvider(selector, {
-    provideInlayHints(document, range) {
+    provideInlayHints(document, range, token) {
       return client.request('textDocument/inlayHint', {
         textDocument: toTextDocument(document),
         range: toRange(range)
-      }).then(fromInlayHints);
+      }, token).then(fromInlayHints, fallbackProviderResult(output, 'inlay hints', []));
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerCodeActionsProvider(selector, {
-    provideCodeActions(document, range, contextInfo) {
+    provideCodeActions(document, range, contextInfo, token) {
       return client.request('textDocument/codeAction', {
         textDocument: toTextDocument(document),
         range: toRange(range),
         context: {
           diagnostics: contextInfo.diagnostics.map(toDiagnosticPayload)
         }
-      }).then(fromCodeActions);
+      }, token).then(fromCodeActions, fallbackProviderResult(output, 'code actions', []));
     }
   }));
 
   const legend = new vscode.SemanticTokensLegend(SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS);
   context.subscriptions.push(vscode.languages.registerDocumentSemanticTokensProvider(selector, {
-    provideDocumentSemanticTokens(document) {
+    provideDocumentSemanticTokens(document, token) {
       return client.request('textDocument/semanticTokens/full', {
         textDocument: toTextDocument(document)
-      }).then(fromSemanticTokens);
+      }, token).then(fromSemanticTokens, fallbackProviderResult(output, 'semantic tokens', new vscode.SemanticTokens(new Uint32Array())));
     }
   }, legend));
 
@@ -182,14 +217,35 @@ function deactivate() {
   return client ? client.dispose() : undefined;
 }
 
+function fallbackProviderResult(output, featureName, fallback) {
+  return (error) => {
+    const message = error && error.message ? error.message : String(error);
+    output.appendLine(`PSCP ${featureName} request failed: ${message}`);
+    return fallback;
+  };
+}
+
+function logClientError(output, featureName, error) {
+  const message = error && error.message ? error.message : String(error);
+  output.appendLine(`PSCP ${featureName} failed: ${message}`);
+}
+
+function getRequestTimeoutMs() {
+  const config = vscode.workspace.getConfiguration('pscp');
+  const value = Number(config.get('server.requestTimeoutMs'));
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
 class PscpClient {
-  constructor(context, output, diagnostics) {
+  constructor(context, output, diagnostics, status) {
     this.context = context;
     this.output = output;
     this.diagnostics = diagnostics;
+    this.status = status;
     this.process = null;
     this.buffer = Buffer.alloc(0);
     this.pending = new Map();
+    this.changeTimers = new Map();
     this.nextRequestId = 1;
     this.ready = null;
   }
@@ -209,6 +265,7 @@ class PscpClient {
   }
 
   async _start() {
+    this._setStatus('starting');
     const launch = await resolveLanguageServerLaunch(this.context, this.output);
     this.output.appendLine(`Starting PSCP language server via ${launch.label}`);
 
@@ -223,7 +280,7 @@ class PscpClient {
     this.process.on('exit', (code, signal) => this._handleExit(code, signal));
     this.process.on('error', (error) => this._handleExit(-1, error.message));
 
-    const initializeResult = await this.request('initialize', {
+    const initializeResult = await this._request('initialize', {
       processId: process.pid,
       clientInfo: {
         name: 'vscode-pscp',
@@ -233,6 +290,9 @@ class PscpClient {
         ? vscode.workspace.workspaceFolders[0].uri.toString()
         : null,
       capabilities: {}
+    }, {
+      ensureStarted: false,
+      timeoutMs: INITIALIZE_TIMEOUT_MS
     });
 
     this.notify('initialized', {});
@@ -242,6 +302,7 @@ class PscpClient {
       }
     }
 
+    this._setStatus('ready');
     return initializeResult;
   }
 
@@ -257,6 +318,11 @@ class PscpClient {
       this.pending.delete(id);
     }
 
+    for (const timer of this.changeTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.changeTimers.clear();
+
     if (this.process) {
       this.process.kill();
       this.process = null;
@@ -264,14 +330,91 @@ class PscpClient {
 
     this.buffer = Buffer.alloc(0);
     this.ready = null;
+    this._setStatus('stopped');
   }
 
-  async request(method, params) {
-    await this.start();
+  async request(method, params, token, options = {}) {
+    return this._request(method, params, {
+      ...options,
+      token
+    });
+  }
+
+  async _request(method, params, options = {}) {
+    if (options.ensureStarted !== false) {
+      await this.start();
+    }
+
+    if (!this.process || !this.process.stdin.writable) {
+      throw new Error('PSCP language server is not running.');
+    }
+
     const id = this.nextRequestId++;
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let settled = false;
+      let cancellationSubscription;
+      const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+        ? options.timeoutMs
+        : getRequestTimeoutMs();
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        this.pending.delete(id);
+        if (cancellationSubscription && typeof cancellationSubscription.dispose === 'function') {
+          cancellationSubscription.dispose();
+        }
+
+        this.notify('$/cancelRequest', { id });
+        reject(new Error(`${method} timed out after ${timeoutMs} ms.`));
+      }, timeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        if (cancellationSubscription && typeof cancellationSubscription.dispose === 'function') {
+          cancellationSubscription.dispose();
+        }
+      };
+
+      const complete = (callback, value) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        cleanup();
+        callback(value);
+      };
+
+      this.pending.set(id, {
+        resolve: (value) => complete(resolve, value),
+        reject: (error) => complete(reject, error)
+      });
+
+      if (options.token) {
+        if (options.token.isCancellationRequested) {
+          this.pending.delete(id);
+          cleanup();
+          reject(new Error(`${method} was cancelled.`));
+          return;
+        }
+
+        cancellationSubscription = options.token.onCancellationRequested(() => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          this.pending.delete(id);
+          cleanup();
+          this.notify('$/cancelRequest', { id });
+          reject(new Error(`${method} was cancelled.`));
+        });
+      }
+
       this._send({
         jsonrpc: '2.0',
         id,
@@ -288,17 +431,27 @@ class PscpClient {
 
   async didChange(document) {
     await this.start();
-    this.notify('textDocument/didChange', {
-      textDocument: {
-        uri: document.uri.toString(),
-        version: document.version
-      },
-      contentChanges: [
-        {
-          text: document.getText()
-        }
-      ]
-    });
+    const key = document.uri.toString();
+    const existing = this.changeTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    const timer = setTimeout(() => {
+      this.changeTimers.delete(key);
+      this.notify('textDocument/didChange', {
+        textDocument: {
+          uri: document.uri.toString(),
+          version: document.version
+        },
+        contentChanges: [
+          {
+            text: document.getText()
+          }
+        ]
+      });
+    }, DID_CHANGE_DEBOUNCE_MS);
+    this.changeTimers.set(key, timer);
   }
 
   async didClose(document) {
@@ -339,6 +492,10 @@ class PscpClient {
       return;
     }
 
+    if (isTraceEnabled()) {
+      this.output.appendLine(`--> ${message.method || `response ${message.id}`}`);
+    }
+
     const body = Buffer.from(JSON.stringify(message), 'utf8');
     const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii');
     this.process.stdin.write(Buffer.concat([header, body]));
@@ -369,12 +526,23 @@ class PscpClient {
       const body = this.buffer.slice(messageStart, messageStart + length).toString('utf8');
       this.buffer = this.buffer.slice(messageStart + length);
 
-      const message = JSON.parse(body);
+      let message;
+      try {
+        message = JSON.parse(body);
+      } catch (error) {
+        this.output.appendLine(`Failed to parse PSCP language server message: ${error.message}`);
+        continue;
+      }
+
       this._handleMessage(message);
     }
   }
 
   _handleMessage(message) {
+    if (isTraceEnabled()) {
+      this.output.appendLine(`<-- ${message.method || `response ${message.id}`}`);
+    }
+
     if (Object.prototype.hasOwnProperty.call(message, 'id')) {
       const pending = this.pending.get(message.id);
       if (!pending) {
@@ -393,6 +561,9 @@ class PscpClient {
 
     if (message.method === 'textDocument/publishDiagnostics') {
       this._handleDiagnostics(message.params);
+    } else if (message.method === 'window/logMessage' || message.method === 'window/showMessage') {
+      const text = message.params && message.params.message ? message.params.message : JSON.stringify(message.params || {});
+      this.output.appendLine(`Server: ${text}`);
     }
   }
 
@@ -414,6 +585,24 @@ class PscpClient {
 
     this.process = null;
     this.ready = null;
+    this._setStatus('stopped');
+  }
+
+  _setStatus(state) {
+    if (!this.status) {
+      return;
+    }
+
+    if (state === 'ready') {
+      this.status.text = 'PSCP: ready';
+      this.status.tooltip = 'PSCP language server is running.';
+    } else if (state === 'starting') {
+      this.status.text = 'PSCP: starting';
+      this.status.tooltip = 'Starting PSCP language server.';
+    } else {
+      this.status.text = 'PSCP: stopped';
+      this.status.tooltip = 'PSCP language server is not running. Click to open logs.';
+    }
   }
 }
 
@@ -430,6 +619,11 @@ function createDotnetEnvironment(repoRoot) {
   };
 }
 
+function isTraceEnabled() {
+  const config = vscode.workspace.getConfiguration('pscp');
+  return !!config.get('server.trace');
+}
+
 async function resolveLanguageServerLaunch(context, output) {
   const repoRoot = path.resolve(context.extensionPath, '..', '..');
   const env = createDotnetEnvironment(repoRoot);
@@ -438,12 +632,26 @@ async function resolveLanguageServerLaunch(context, output) {
   const repoFallbackAvailable = fs.existsSync(serverProject);
 
   const config = vscode.workspace.getConfiguration('pscp');
+  const configuredServerPath = normalizeConfiguredPath(config.get('server.path'));
+  if (configuredServerPath) {
+    const launch = createConfiguredServerLaunch(configuredServerPath, getConfiguredStringArray(config.get('server.args')));
+    if (launch) {
+      return launch;
+    }
+  }
+
   const explicitLanguageServer = normalizeConfiguredPath(config.get('languageServerPath'));
   if (explicitLanguageServer) {
     const launch = createDirectServerLaunch(explicitLanguageServer);
     if (launch) {
       return launch;
     }
+  }
+
+  const bundledLaunch = createBundledServerLaunch(context);
+  if (bundledLaunch) {
+    output.appendLine(`Using bundled PSCP language server: ${bundledLaunch.label}`);
+    return bundledLaunch;
   }
 
   const explicitSdk = normalizeConfiguredPath(config.get('sdkPath'));
@@ -482,7 +690,35 @@ async function resolveLanguageServerLaunch(context, output) {
   };
 }
 
-function createDirectServerLaunch(candidate) {
+function createConfiguredServerLaunch(candidate, args = []) {
+  if (!candidate || !fs.existsSync(candidate)) {
+    return null;
+  }
+
+  const stat = fs.statSync(candidate);
+  if (stat.isDirectory()) {
+    const directExe = path.join(candidate, 'Pscp.LanguageServer.exe');
+    const directDll = path.join(candidate, 'Pscp.LanguageServer.dll');
+    const sdkExe = path.join(candidate, 'pscp.exe');
+    return createDirectServerLaunch(directExe, args)
+      || createDirectServerLaunch(directDll, args)
+      || createSdkLaunch(sdkExe);
+  }
+
+  if (path.basename(candidate).toLowerCase() === 'pscp.exe') {
+    return createSdkLaunch(candidate);
+  }
+
+  return createDirectServerLaunch(candidate, args);
+}
+
+function createBundledServerLaunch(context) {
+  const serverDirectory = path.join(context.extensionPath, 'server');
+  return createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer.exe'))
+    || createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer.dll'));
+}
+
+function createDirectServerLaunch(candidate, extraArgs = []) {
   if (!candidate || !fs.existsSync(candidate)) {
     return null;
   }
@@ -491,7 +727,7 @@ function createDirectServerLaunch(candidate) {
     return {
       label: candidate,
       command: 'dotnet',
-      args: [candidate],
+      args: [candidate, ...extraArgs],
       cwd: path.dirname(candidate),
       env: process.env
     };
@@ -500,10 +736,9 @@ function createDirectServerLaunch(candidate) {
   return {
     label: candidate,
     command: candidate,
-    args: [],
+    args: extraArgs,
     cwd: path.dirname(candidate),
-    env: process.env,
-    sdkExecutable: candidate
+    env: process.env
   };
 }
 
@@ -556,6 +791,10 @@ function normalizeConfiguredPath(value) {
   return typeof value === 'string' && value.trim().length > 0
     ? path.resolve(value.trim())
     : '';
+}
+
+function getConfiguredStringArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string') : [];
 }
 
 function runProcess(command, args, options, output) {
@@ -649,6 +888,90 @@ function compareVersions(left, right) {
   }
 
   return 0;
+}
+
+async function runPscpToolCommand(context, output, subcommand) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isPscpDocument(editor.document)) {
+    vscode.window.showWarningMessage('Open a .pscp file first.');
+    return;
+  }
+
+  if (editor.document.isUntitled) {
+    vscode.window.showWarningMessage('Save the .pscp file before running PSCP commands.');
+    return;
+  }
+
+  if (editor.document.isDirty) {
+    await editor.document.save();
+  }
+
+  const executable = resolvePscpExecutable(context);
+  if (!executable) {
+    vscode.window.showErrorMessage('Could not locate pscp.exe. Install the PSCP SDK or set pscp.transpiler.path / pscp.sdkPath.');
+    return;
+  }
+
+  const config = vscode.workspace.getConfiguration('pscp');
+  const extraArgs = getConfiguredStringArray(config.get('transpiler.args'));
+  const terminal = vscode.window.createTerminal(`PSCP ${subcommand}`);
+  const command = [
+    quoteShell(executable),
+    subcommand,
+    quoteShell(editor.document.uri.fsPath),
+    ...extraArgs.map(quoteShell)
+  ].join(' ');
+  output.appendLine(`Running: ${command}`);
+  terminal.sendText(command);
+  terminal.show();
+}
+
+function resolvePscpExecutable(context) {
+  const config = vscode.workspace.getConfiguration('pscp');
+  const configuredTranspiler = normalizeConfiguredPath(config.get('transpiler.path'));
+  if (configuredTranspiler && fs.existsSync(configuredTranspiler)) {
+    return fs.statSync(configuredTranspiler).isDirectory()
+      ? path.join(configuredTranspiler, 'pscp.exe')
+      : configuredTranspiler;
+  }
+
+  const configuredServer = normalizeConfiguredPath(config.get('server.path'));
+  if (configuredServer && fs.existsSync(configuredServer)) {
+    const candidate = fs.statSync(configuredServer).isDirectory()
+      ? path.join(configuredServer, 'pscp.exe')
+      : configuredServer;
+    if (path.basename(candidate).toLowerCase() === 'pscp.exe' && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  const configuredSdk = normalizeConfiguredPath(config.get('sdkPath'));
+  if (configuredSdk && fs.existsSync(configuredSdk)) {
+    const candidate = fs.statSync(configuredSdk).isDirectory()
+      ? path.join(configuredSdk, 'pscp.exe')
+      : configuredSdk;
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const candidate of getInstalledSdkCandidates()) {
+    const launch = createSdkLaunch(candidate);
+    if (launch) {
+      return launch.sdkExecutable;
+    }
+  }
+
+  const pathLaunch = createPathSdkLaunch();
+  if (pathLaunch) {
+    return pathLaunch.sdkExecutable;
+  }
+
+  return null;
+}
+
+function quoteShell(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
 }
 
 function toTextDocument(document) {
@@ -794,6 +1117,17 @@ function fromWorkspaceEdit(result) {
   }
 
   return edit;
+}
+
+function fromPrepareRename(result) {
+  if (!result || !result.range) {
+    return null;
+  }
+
+  return {
+    range: fromRange(result.range),
+    placeholder: result.placeholder || undefined
+  };
 }
 
 function fromInlayHints(result) {

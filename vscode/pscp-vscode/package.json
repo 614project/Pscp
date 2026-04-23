@@ -2,7 +2,7 @@
   "name": "pscp-vscode",
   "displayName": "PSCP",
   "description": "VS Code support for the PSCP programming language.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -16,11 +16,16 @@
     "language-server"
   ],
   "extensionKind": [
+    "ui",
     "workspace"
   ],
   "activationEvents": [
     "onLanguage:pscp",
-    "onCommand:pscp.restartLanguageServer"
+    "workspaceContains:**/*.pscp",
+    "onCommand:pscp.restartLanguageServer",
+    "onCommand:pscp.showServerLog",
+    "onCommand:pscp.transpileCurrentFile",
+    "onCommand:pscp.runCurrentFile"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -28,6 +33,18 @@
       {
         "command": "pscp.restartLanguageServer",
         "title": "PSCP: Restart Language Server"
+      },
+      {
+        "command": "pscp.showServerLog",
+        "title": "PSCP: Show Language Server Log"
+      },
+      {
+        "command": "pscp.transpileCurrentFile",
+        "title": "PSCP: Transpile Current File"
+      },
+      {
+        "command": "pscp.runCurrentFile",
+        "title": "PSCP: Run Current File"
       }
     ],
     "languages": [
@@ -56,12 +73,49 @@
         "pscp.sdkPath": {
           "type": "string",
           "default": "",
-          "description": "Path to an installed `pscp.exe` or to the PSCP installation directory."
+          "description": "Path to an installed `pscp.exe` or to the PSCP installation directory. Kept for compatibility; prefer `pscp.server.path` for the language server."
         },
         "pscp.languageServerPath": {
           "type": "string",
           "default": "",
-          "description": "Optional direct path to `Pscp.LanguageServer.exe` or `Pscp.LanguageServer.dll`."
+          "description": "Optional direct path to `Pscp.LanguageServer.exe` or `Pscp.LanguageServer.dll`. Kept for compatibility; prefer `pscp.server.path`."
+        },
+        "pscp.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Optional direct path to `Pscp.LanguageServer.exe`, `Pscp.LanguageServer.dll`, an installed `pscp.exe`, or the PSCP installation directory."
+        },
+        "pscp.server.args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra arguments passed to a direct language server executable."
+        },
+        "pscp.server.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write LSP request and notification names to the PSCP output channel."
+        },
+        "pscp.server.requestTimeoutMs": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 1000,
+          "description": "Timeout for foreground language feature requests."
+        },
+        "pscp.transpiler.path": {
+          "type": "string",
+          "default": "",
+          "description": "Optional direct path to `pscp.exe` for transpile/run commands."
+        },
+        "pscp.transpiler.args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra arguments appended to PSCP transpile/run commands."
         }
       }
     }

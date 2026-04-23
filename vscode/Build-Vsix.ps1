@@ -1,6 +1,9 @@
 param(
     [string]$ExtensionDirectory = (Join-Path $PSScriptRoot 'pscp-vscode'),
-    [string]$OutputDirectory = 'artifacts\vscode'
+    [string]$OutputDirectory = 'artifacts\vscode',
+    [string]$Configuration = 'Release',
+    [string]$RuntimeIdentifier = 'win-x64',
+    [switch]$SkipBundledServer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +31,43 @@ function Normalize-TextFileNoBom {
 
     $content = [System.IO.File]::ReadAllText($Path)
     Write-Utf8NoBom -Path $Path -Content $content
+}
+
+function Publish-BundledLanguageServer {
+    param(
+        [string]$RepoRoot,
+        [string]$OutputDirectory
+    )
+
+    $project = Join-Path $RepoRoot 'src\Pscp.LanguageServer\Pscp.LanguageServer.csproj'
+    if (-not (Test-Path $project)) {
+        throw "Could not find language server project at $project"
+    }
+
+    Remove-Item -LiteralPath $OutputDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
+
+    $baseArgs = @(
+        'publish',
+        $project,
+        '-c', $Configuration,
+        '-r', $RuntimeIdentifier,
+        '-o', $OutputDirectory,
+        '/p:InvariantGlobalization=true'
+    )
+
+    try {
+        Write-Host 'Publishing bundled PSCP language server with Native AOT...'
+        dotnet @baseArgs '/p:PublishAot=true' | Out-Host
+        return 'NativeAot'
+    }
+    catch {
+        Write-Warning "Native AOT publish failed for bundled language server. Falling back to framework-dependent publish. $($_.Exception.Message)"
+        Remove-Item -LiteralPath $OutputDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
+        dotnet publish $project -c $Configuration -o $OutputDirectory --self-contained false | Out-Host
+        return 'FrameworkDependent'
+    }
 }
 
 $extensionDirectory = (Resolve-Path $ExtensionDirectory).Path
@@ -82,6 +122,16 @@ try {
         Normalize-TextFileNoBom -Path $destination
     }
 
+    if (-not $SkipBundledServer) {
+        $serverPublish = Join-Path $stagingRoot 'server-publish'
+        $serverMode = Publish-BundledLanguageServer -RepoRoot $repoRoot -OutputDirectory $serverPublish
+        $serverDestination = Join-Path $extensionStaging 'server'
+        New-Item -ItemType Directory -Force $serverDestination | Out-Null
+        Copy-Item -Path (Join-Path $serverPublish '*') -Destination $serverDestination -Recurse -Force
+        Remove-Item -LiteralPath $serverPublish -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "Bundled language server mode: $serverMode"
+    }
+
     $contentTypes = @"
 <?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -89,6 +139,9 @@ try {
   <Default Extension="js" ContentType="application/javascript" />
   <Default Extension="md" ContentType="text/markdown" />
   <Default Extension="xml" ContentType="application/xml" />
+  <Default Extension="exe" ContentType="application/octet-stream" />
+  <Default Extension="dll" ContentType="application/octet-stream" />
+  <Default Extension="pdb" ContentType="application/octet-stream" />
   <Default Extension="vsixmanifest" ContentType="text/xml" />
 </Types>
 "@
@@ -114,7 +167,7 @@ try {
     <Categories>$categories</Categories>
     <Properties>
       <Property Id="Microsoft.VisualStudio.Code.Engine" Value="$engine" />
-      <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="workspace" />
+      <Property Id="Microsoft.VisualStudio.Code.ExtensionKind" Value="ui,workspace" />
     </Properties>
   </Metadata>
   <Installation>
@@ -166,6 +219,17 @@ try {
         foreach ($entryName in $requiredEntries) {
             if (-not ($archive.Entries | Where-Object FullName -eq $entryName)) {
                 throw "VSIX is missing required entry '$entryName'."
+            }
+        }
+
+        if (-not $SkipBundledServer) {
+            $hasBundledServer = $archive.Entries | Where-Object {
+                $_.FullName -eq 'extension/server/Pscp.LanguageServer.exe' -or
+                $_.FullName -eq 'extension/server/Pscp.LanguageServer.dll'
+            } | Select-Object -First 1
+
+            if (-not $hasBundledServer) {
+                throw 'VSIX was expected to include a bundled language server, but none was found.'
             }
         }
     }

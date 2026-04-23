@@ -183,7 +183,7 @@
       "patterns": [
         {
           "name": "support.function.intrinsic.pscp",
-          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|abs|sqrt|clamp|gcd|lcm|floor|ceil|round|pow|popcount|bitLength|groupCount|freq|index|chmin|chmax)\\b"
+          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|map|filter|fold|scan|mapFold|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|abs|sqrt|clamp|gcd|lcm|floor|ceil|round|pow|popcount|bitLength|groupCount|freq|index|chmin|chmax)\\b"
         },
         {
           "name": "entity.name.function.pscp",

@@ -1,6 +1,6 @@
 # PSCP VS Code Extension
 
-이 확장은 `.pscp` 파일을 VS Code에서 편하게 다루기 위한 PSCP `v0.4`용 확장입니다.
+이 확장은 `.pscp` 파일을 VS Code에서 편하게 다루기 위한 PSCP `v0.6`용 확장입니다.
 
 포함 기능:
 
@@ -15,14 +15,18 @@
 - signature help
 - rename
 - inlay hints
+- status bar / server log
+- 현재 파일 transpile/run 명령
 
 언어 서버 연결 순서:
 
-1. `pscp.languageServerPath`
-2. `pscp.sdkPath`
-3. 설치된 PSCP SDK (`%LOCALAPPDATA%\Programs\Pscp\pscp.exe` 등)
-4. PATH의 `pscp.exe`
-5. 저장소 개발 빌드 폴백
+1. `pscp.server.path`
+2. 호환 설정 `pscp.languageServerPath`
+3. VSIX에 포함된 bundled language server
+4. `pscp.sdkPath`
+5. 설치된 PSCP SDK (`%LOCALAPPDATA%\Programs\Pscp\pscp.exe` 등)
+6. PATH의 `pscp.exe`
+7. 저장소 개발 빌드 폴백
 
 ## VSIX 빌드
 
@@ -35,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.0.vsix
+artifacts\vscode\local.pscp-vscode-0.6.1.vsix
 ```
 
 ## 설치
@@ -46,5 +50,5 @@ artifacts\vscode\local.pscp-vscode-0.6.0.vsix
 2. 터미널에서:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.0.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.1.vsix
 ```

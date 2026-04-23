@@ -174,6 +174,9 @@ public static class PscpLanguageServerHost
                     case "textDocument/rename":
                         await SendResultAsync(id, HandleRename(@params), cancellationToken);
                         return false;
+                    case "textDocument/prepareRename":
+                        await SendResultAsync(id, HandlePrepareRename(@params), cancellationToken);
+                        return false;
                     case "textDocument/codeAction":
                         await SendResultAsync(id, HandleCodeAction(@params), cancellationToken);
                         return false;
@@ -220,6 +223,7 @@ public static class PscpLanguageServerHost
                     ["referencesProvider"] = true,
                     ["documentSymbolProvider"] = true,
                     ["renameProvider"] = true,
+                    ["prepareRenameProvider"] = true,
                     ["codeActionProvider"] = true,
                     ["inlayHintProvider"] = true,
                     ["completionProvider"] = new JsonObject
@@ -479,7 +483,8 @@ public static class PscpLanguageServerHost
                 return null;
             }
 
-            if (!analysis!.Signatures.TryGetValue(signatureKey!, out PscpSignatureEntry? signature))
+            if (!analysis!.Signatures.TryGetValue(signatureKey!, out PscpSignatureEntry? signature)
+                && !analysis.Signatures.TryGetValue(GetLastSignatureSegment(signatureKey!), out signature))
             {
                 return null;
             }
@@ -541,7 +546,7 @@ public static class PscpLanguageServerHost
             }
 
             string newName = @params.GetProperty("newName").GetString() ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(newName))
+            if (!IsValidRenameIdentifier(newName))
             {
                 return null;
             }
@@ -562,6 +567,22 @@ public static class PscpLanguageServerHost
                 {
                     [analysis.Snapshot.Uri.ToString()] = edits,
                 },
+            };
+        }
+
+        private JsonNode? HandlePrepareRename(JsonElement @params)
+        {
+            if (!TryResolveSymbol(@params, out PscpAnalysisResult? analysis, out PscpServerSymbol? symbol)
+                || symbol!.IsIntrinsic
+                || symbol.Name == "_")
+            {
+                return null;
+            }
+
+            return new JsonObject
+            {
+                ["range"] = ToRange(analysis!.Snapshot.LineIndex, symbol.SelectionSpan),
+                ["placeholder"] = symbol.Name,
             };
         }
 
@@ -868,23 +889,27 @@ public static class PscpLanguageServerHost
                 _ => Array.Empty<PscpCompletionEntry>(),
             };
 
-            if (intrinsicMembers.Any())
+            if (receiverName is "stdin" or "stdout")
             {
                 return intrinsicMembers;
             }
 
-            IEnumerable<PscpCompletionEntry> externalMembers = PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext);
-            if (externalMembers.Any())
+            List<PscpCompletionEntry> members = [];
+            members.AddRange(intrinsicMembers);
+
+            if (IsCollectionLikeReceiver(receiverName, instanceContext, analysis.Tokens[receiverIndex].Kind))
             {
-                return externalMembers;
+                members.AddRange(PscpIntrinsics.CollectionMembers.Values);
             }
+
+            members.AddRange(PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext));
 
             if (ShouldOfferComparatorMembers(receiverName, instanceContext, receiverSymbol))
             {
-                return PscpIntrinsics.ComparatorMembers.Values;
+                members.AddRange(PscpIntrinsics.ComparatorMembers.Values);
             }
 
-            return Array.Empty<PscpCompletionEntry>();
+            return members;
         }
 
         private static List<PscpCompletionEntry> Deduplicate(IEnumerable<PscpCompletionEntry> items)
@@ -926,6 +951,53 @@ public static class PscpLanguageServerHost
             return PscpIntrinsics.BuiltinTypes.Contains(normalized)
                 || receiverName.StartsWith('(')
                 || receiverName.EndsWith("[]", StringComparison.Ordinal);
+        }
+
+        private static bool IsCollectionLikeReceiver(string receiverName, bool instanceContext, TokenKind receiverTokenKind)
+        {
+            if (!instanceContext && receiverTokenKind is not TokenKind.CloseParen and not TokenKind.CloseBracket)
+            {
+                return false;
+            }
+
+            if (receiverTokenKind is TokenKind.CloseParen or TokenKind.CloseBracket)
+            {
+                return true;
+            }
+
+            string normalized = PscpExternalMetadata.NormalizeTypeReceiver(receiverName);
+            return receiverName.EndsWith("[]", StringComparison.Ordinal)
+                || normalized is "Array" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet"
+                || normalized.StartsWith("IEnumerable", StringComparison.Ordinal);
+        }
+
+        private static bool IsValidRenameIdentifier(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value == "_" || PscpIntrinsics.Keywords.Contains(value))
+            {
+                return false;
+            }
+
+            if (!char.IsLetter(value[0]) && value[0] != '_')
+            {
+                return false;
+            }
+
+            for (int i = 1; i < value.Length; i++)
+            {
+                if (!char.IsLetterOrDigit(value[i]) && value[i] != '_')
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static string GetLastSignatureSegment(string signatureKey)
+        {
+            int dot = signatureKey.LastIndexOf('.');
+            return dot >= 0 && dot + 1 < signatureKey.Length ? signatureKey[(dot + 1)..] : signatureKey;
         }
 
         private static string BuildReceiverChain(IReadOnlyList<Token> tokens, int receiverIndex)
