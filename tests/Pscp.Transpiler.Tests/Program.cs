@@ -757,6 +757,7 @@ internal static class TestRunner
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
         await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
+        await VerifyLanguageServerLoopBlockAndIndexerDiagnosticsAsync(failures);
 
         if (failures.Count > 0)
         {
@@ -1816,6 +1817,35 @@ internal static class TestRunner
         }
     }
 
+    private static async Task VerifyLanguageServerLoopBlockAndIndexerDiagnosticsAsync(List<string> failures)
+    {
+        const string source = """
+            int[2][2] grid;
+            int[] xs = [0, 1]
+
+            for y in 1..-1..0 {
+                if grid[y][xs[0]] == 0 {
+                    grid[y][xs[0]] = 1
+                    break
+                }
+            }
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        IReadOnlyList<string> diagnostics = await session.ReadDiagnosticsAsync();
+        if (diagnostics.Count != 0)
+        {
+            failures.Add($"LanguageServerLoopBlockAndIndexerDiagnostics: expected no diagnostics for loop-local break and indexed element assignment\nActual: {string.Join(" | ", diagnostics)}");
+        }
+
+        await session.SendDidChangeAsync("let x = 1\nx = 2\n", version: 2);
+        IReadOnlyList<string> immutableDiagnostics = await session.ReadDiagnosticsAsync();
+        if (!immutableDiagnostics.Any(message => message.Contains("Cannot assign to immutable binding `x`.", StringComparison.Ordinal)))
+        {
+            failures.Add($"LanguageServerLoopBlockAndIndexerDiagnostics: expected immutable simple assignment diagnostic\nActual: {string.Join(" | ", immutableDiagnostics)}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -1978,7 +2008,7 @@ internal static class TestRunner
             });
 
             LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
-            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.1\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
+            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.2\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
             _ = await session.ReadMessageAsync();
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");

@@ -640,38 +640,91 @@ internal sealed partial class PscpAnalyzer
     private void AnalyzeAssignment(AnalyzerState state, Scope scope, int start, int assignmentIndex, int statementEnd, FunctionContext? functionContext, int loopDepth)
     {
         state.MarkToken(assignmentIndex, "operator");
-        AnalyzeAssignmentTarget(state, scope, start, assignmentIndex);
+        AnalyzeAssignmentTarget(state, scope, start, assignmentIndex, functionContext, loopDepth);
         AnalyzeExpression(state, scope, assignmentIndex + 1, statementEnd, functionContext, loopDepth);
     }
 
-    private void AnalyzeAssignmentTarget(AnalyzerState state, Scope scope, int start, int endExclusive)
+    private void AnalyzeAssignmentTarget(AnalyzerState state, Scope scope, int start, int endExclusive, FunctionContext? functionContext, int loopDepth)
     {
-        for (int i = start; i < endExclusive; i++)
+        start = SkipSeparators(state.Tokens, start, endExclusive);
+        while (endExclusive > start && IsTerminatorToken(state.Tokens, endExclusive - 1, endExclusive))
         {
-            if (!IsIdentifier(state.Tokens, i))
+            endExclusive--;
+        }
+
+        if (TryAnalyzeSimpleAssignmentTargets(state, scope, start, endExclusive))
+        {
+            return;
+        }
+
+        AnalyzeExpression(state, scope, start, endExclusive, functionContext, loopDepth);
+    }
+
+    private bool TryAnalyzeSimpleAssignmentTargets(AnalyzerState state, Scope scope, int start, int endExclusive)
+    {
+        if (start >= endExclusive)
+        {
+            return true;
+        }
+
+        if (IsIdentifier(state.Tokens, start) && start + 1 == endExclusive)
+        {
+            AnalyzeAssignableBinding(state, scope, start);
+            return true;
+        }
+
+        if (state.Tokens[start].Kind != TokenKind.OpenParen)
+        {
+            return false;
+        }
+
+        int close = FindMatching(state.Tokens, start, TokenKind.OpenParen, TokenKind.CloseParen, endExclusive);
+        if (close != endExclusive - 1)
+        {
+            return false;
+        }
+
+        int elementStart = start + 1;
+        bool sawElement = false;
+        while (elementStart < close)
+        {
+            elementStart = SkipSeparators(state.Tokens, elementStart, close);
+            if (elementStart >= close)
             {
-                continue;
+                break;
             }
 
-            if (IsMemberName(state.Tokens, i))
+            int comma = FindTopLevelToken(state.Tokens, elementStart, close, TokenKind.Comma);
+            int elementEnd = comma >= 0 ? comma : close;
+            if (!TryAnalyzeSimpleAssignmentTargets(state, scope, elementStart, elementEnd))
             {
-                continue;
+                return false;
             }
 
-            if (state.Tokens[i].Text == "_")
-            {
-                state.MarkToken(i, "variable");
-                continue;
-            }
+            sawElement = true;
+            elementStart = comma >= 0 ? comma + 1 : close;
+        }
 
-            if (state.TryResolve(scope, state.Tokens[i].Text, state.Tokens[i].Position, out PscpServerSymbol? symbol))
-            {
-                state.AddReference(symbol!, i, isDeclaration: false, isWrite: true);
-                if (!symbol!.IsMutable && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic)
-                {
-                    state.AddDiagnostic("PSCP2007", $"Cannot assign to immutable binding `{symbol.Name}`.", state.Tokens[i].Span, ServerDiagnosticSeverity.Error, symbol.Id);
-                }
-            }
+        return sawElement;
+    }
+
+    private void AnalyzeAssignableBinding(AnalyzerState state, Scope scope, int tokenIndex)
+    {
+        if (state.Tokens[tokenIndex].Text == "_")
+        {
+            state.MarkToken(tokenIndex, "variable");
+            return;
+        }
+
+        if (!state.TryResolve(scope, state.Tokens[tokenIndex].Text, state.Tokens[tokenIndex].Position, out PscpServerSymbol? symbol))
+        {
+            return;
+        }
+
+        state.AddReference(symbol!, tokenIndex, isDeclaration: false, isWrite: true);
+        if (!symbol!.IsMutable && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic)
+        {
+            state.AddDiagnostic("PSCP2007", $"Cannot assign to immutable binding `{symbol.Name}`.", state.Tokens[tokenIndex].Span, ServerDiagnosticSeverity.Error, symbol.Id);
         }
     }
 

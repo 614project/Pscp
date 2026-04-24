@@ -201,6 +201,11 @@ internal sealed partial class PscpAnalyzer
 
         for (int i = start; i < endExclusive; i++)
         {
+            if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && tokens[i].Kind == kind)
+            {
+                return i;
+            }
+
             switch (tokens[i].Kind)
             {
                 case TokenKind.OpenParen:
@@ -223,10 +228,6 @@ internal sealed partial class PscpAnalyzer
                     continue;
             }
 
-            if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0 && tokens[i].Kind == kind)
-            {
-                return i;
-            }
         }
 
         return -1;
