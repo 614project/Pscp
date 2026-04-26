@@ -176,6 +176,7 @@ internal sealed class PscpAnalysisResult
     public required IReadOnlyDictionary<int, string> TokenToSymbolId { get; init; }
     public required IReadOnlyDictionary<int, PscpHoverEntry> HoverByTokenIndex { get; init; }
     public required IReadOnlyDictionary<int, PscpCompletionEntry> IntrinsicMembers { get; init; }
+    public required IReadOnlyDictionary<string, IReadOnlyDictionary<string, PscpServerSymbol>> TypeMembers { get; init; }
     public required IReadOnlyDictionary<string, PscpSignatureEntry> Signatures { get; init; }
     public required IReadOnlyList<PscpCodeActionEntry> CodeActions { get; init; }
     public required IReadOnlyList<PscpInlayHintEntry> InlayHints { get; init; }

@@ -36,6 +36,13 @@ internal sealed partial class PscpAnalyzer
             return;
         }
 
+        int arrowIndex = FindTopLevelToken(state.Tokens, start, endExclusive, TokenKind.Arrow);
+        if (arrowIndex >= 0)
+        {
+            AnalyzeFastFor(state, scope, start, endExclusive, arrowIndex, functionContext, loopDepth);
+            return;
+        }
+
         int index = start;
         while (index < endExclusive)
         {
@@ -48,7 +55,27 @@ internal sealed partial class PscpAnalyzer
                         continue;
                     }
 
+                    int closeParen = FindMatching(state.Tokens, index, TokenKind.OpenParen, TokenKind.CloseParen, endExclusive);
+                    if (closeParen >= 0)
+                    {
+                        AnalyzeExpression(state, scope, index + 1, closeParen, functionContext, loopDepth);
+                        index = closeParen + 1;
+                        continue;
+                    }
+
                     break;
+                case TokenKind.OpenBracket:
+                {
+                    int closeBracket = FindMatching(state.Tokens, index, TokenKind.OpenBracket, TokenKind.CloseBracket, endExclusive);
+                    if (closeBracket >= 0)
+                    {
+                        AnalyzeExpression(state, scope, index + 1, closeBracket, functionContext, loopDepth);
+                        index = closeBracket + 1;
+                        continue;
+                    }
+
+                    break;
+                }
                 case TokenKind.OpenBrace:
                 {
                     int closeBrace = FindMatching(state.Tokens, index, TokenKind.OpenBrace, TokenKind.CloseBrace, endExclusive);
@@ -97,7 +124,7 @@ internal sealed partial class PscpAnalyzer
         }
 
         Scope lambdaScope = state.CreateScope(scope, state.Tokens[index].Position, scope.EndOffset);
-        AddLambdaParameter(state, lambdaScope, index, scope.EndOffset);
+        AddLambdaParameter(state, lambdaScope, index, scope.EndOffset, InferSingleLambdaParameterTypeFromCallContext(state, scope, index));
         state.MarkToken(arrow, "operator");
 
         int bodyStart = SkipSeparators(state.Tokens, arrow + 1, endExclusive);
@@ -145,9 +172,12 @@ internal sealed partial class PscpAnalyzer
         }
 
         Scope lambdaScope = state.CreateScope(scope, state.Tokens[openParen].Position, scope.EndOffset);
+        string? unaryParameterType = parameterTokens.Count == 1
+            ? InferSingleLambdaParameterTypeFromCallContext(state, scope, parameterTokens[0])
+            : null;
         foreach (int parameterToken in parameterTokens)
         {
-            AddLambdaParameter(state, lambdaScope, parameterToken, scope.EndOffset);
+            AddLambdaParameter(state, lambdaScope, parameterToken, scope.EndOffset, unaryParameterType);
         }
 
         state.MarkToken(arrow, "operator");
@@ -182,7 +212,7 @@ internal sealed partial class PscpAnalyzer
         return bodyEnd;
     }
 
-    private void AddLambdaParameter(AnalyzerState state, Scope scope, int tokenIndex, int scopeEnd)
+    private void AddLambdaParameter(AnalyzerState state, Scope scope, int tokenIndex, int scopeEnd, string? typeDisplay = null)
     {
         state.MarkToken(tokenIndex, "parameter", "declaration");
         if (state.Tokens[tokenIndex].Text == "_")
@@ -197,11 +227,13 @@ internal sealed partial class PscpAnalyzer
             state.Tokens[tokenIndex].Span,
             state.Tokens[tokenIndex].Span,
             new ScopeSpan(state.Tokens[tokenIndex].Position, scopeEnd),
-            typeDisplay: null,
+            typeDisplay,
             isMutable: false,
             isIntrinsic: false,
             containerSymbolId: null,
-            documentation: $"lambda parameter `{state.Tokens[tokenIndex].Text}`");
+            documentation: string.IsNullOrWhiteSpace(typeDisplay)
+                ? $"lambda parameter `{state.Tokens[tokenIndex].Text}`"
+                : $"lambda parameter `{state.Tokens[tokenIndex].Text}: {typeDisplay}`");
         state.AddReference(symbol, tokenIndex, isDeclaration: true, isWrite: false);
     }
 
@@ -285,6 +317,9 @@ internal sealed partial class PscpAnalyzer
             case PscpServerSymbolKind.Function:
                 state.MarkToken(tokenIndex, "function");
                 break;
+            case PscpServerSymbolKind.Type:
+                state.MarkToken(tokenIndex, "type");
+                break;
             case PscpServerSymbolKind.Parameter:
                 state.MarkToken(tokenIndex, "parameter");
                 break;
@@ -308,19 +343,42 @@ internal sealed partial class PscpAnalyzer
 
         int? receiverTokenIndex = PreviousNonTrivia(state.Tokens, dot - 1);
         bool instanceContext = false;
-        string? receiverName = receiverTokenIndex is int receiver
-            ? ResolveReceiverName(state, scope, receiver, out instanceContext, out _)
-            : null;
+        string? receiverName = null;
+        if (receiverTokenIndex is int receiver)
+        {
+            receiverName = ResolveReceiverName(state, scope, receiver, out instanceContext, out _);
+            if (receiverName is null && state.Tokens[receiver].Kind is TokenKind.CloseBracket or TokenKind.CloseParen)
+            {
+                int receiverStart = FindSimpleReceiverStart(state.Tokens, dot);
+                string? inferredReceiverType = receiverStart < dot
+                    ? InferExpressionType(state, scope, receiverStart, dot)
+                    : null;
+                if (!string.IsNullOrWhiteSpace(inferredReceiverType))
+                {
+                    receiverName = inferredReceiverType;
+                    instanceContext = true;
+                }
+            }
+        }
+
         bool isCallable = LooksLikeCallableIdentifier(state.Tokens, tokenIndex);
-        state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
 
         if (receiverName is null)
         {
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property");
+            return;
+        }
+
+        if (instanceContext && state.TryResolveTypeMember(receiverName, state.Tokens[tokenIndex].Text, out PscpServerSymbol? memberSymbol) && memberSymbol is not null)
+        {
+            state.AddReference(memberSymbol, tokenIndex, isDeclaration: false, isWrite: false);
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property");
             return;
         }
 
         if (PscpIntrinsics.ComparatorMembers.ContainsKey(state.Tokens[tokenIndex].Text) && PscpIntrinsics.IsTypeLikeReceiverName(receiverName))
         {
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
             state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs[$"comparer.{state.Tokens[tokenIndex].Text}"]);
             return;
         }
@@ -328,6 +386,7 @@ internal sealed partial class PscpAnalyzer
         if (IsCollectionLikeReceiver(receiverName, instanceContext)
             && PscpIntrinsics.CollectionMembers.TryGetValue(state.Tokens[tokenIndex].Text, out PscpCompletionEntry? collectionMember))
         {
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
             state.AddIntrinsicMember(tokenIndex, collectionMember);
             state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs[$"collection.{state.Tokens[tokenIndex].Text}"]);
             return;
@@ -335,6 +394,7 @@ internal sealed partial class PscpAnalyzer
 
         if (TryGetIntrinsicMember(receiverName, state.Tokens[tokenIndex].Text, out PscpCompletionEntry? completion, out string? hoverKey))
         {
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
             state.AddIntrinsicMember(tokenIndex, completion!);
             if (hoverKey is not null && PscpIntrinsics.HoverDocs.TryGetValue(hoverKey, out string? hover))
             {
@@ -351,6 +411,10 @@ internal sealed partial class PscpAnalyzer
             {
                 state.SetHover(tokenIndex, externalMember.Documentation!);
             }
+        }
+        else
+        {
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property");
         }
     }
 
@@ -408,6 +472,11 @@ internal sealed partial class PscpAnalyzer
         if (state.TryResolve(scope, token.Text, token.Position, out receiverSymbol) && receiverSymbol is not null)
         {
             if (receiverSymbol.Kind == PscpServerSymbolKind.Intrinsic)
+            {
+                return receiverSymbol.Name;
+            }
+
+            if (receiverSymbol.Kind == PscpServerSymbolKind.Type)
             {
                 return receiverSymbol.Name;
             }
@@ -496,9 +565,24 @@ internal sealed partial class PscpAnalyzer
             return specialType;
         }
 
+        if (TryInferArrowExpressionType(state, scope, start, endExclusive, out string? arrowType))
+        {
+            return arrowType;
+        }
+
         if (endExclusive - start == 1)
         {
             return InferSingleTokenType(state, scope, start);
+        }
+
+        if (TryInferIndexerExpressionType(state, scope, start, endExclusive, out string? indexerType))
+        {
+            return indexerType;
+        }
+
+        if (TryInferMemberAccessType(state, scope, start, endExclusive, out string? memberType))
+        {
+            return memberType;
         }
 
         int topLevelRange = FindTopLevelRangeOperator(state.Tokens, start, endExclusive);
@@ -596,6 +680,12 @@ internal sealed partial class PscpAnalyzer
                 int firstComma = FindTopLevelToken(state.Tokens, start + 1, closeBracket, TokenKind.Comma);
                 int firstElementEnd = firstComma >= 0 ? firstComma : closeBracket;
                 string? elementType = InferExpressionType(state, scope, start + 1, firstElementEnd);
+                if (FindTopLevelToken(state.Tokens, start + 1, firstElementEnd, TokenKind.Arrow) >= 0
+                    || FindTopLevelRangeOperator(state.Tokens, start + 1, firstElementEnd) >= 0)
+                {
+                    elementType = UnwrapEnumerableType(elementType) ?? elementType;
+                }
+
                 type = $"{elementType ?? "object"}[]";
                 return true;
             }
@@ -625,6 +715,164 @@ internal sealed partial class PscpAnalyzer
                 type = string.Equals(thenType, elseType, StringComparison.Ordinal) ? thenType : thenType ?? elseType;
                 return type is not null;
             }
+        }
+
+        return false;
+    }
+
+    private bool TryInferArrowExpressionType(AnalyzerState state, Scope scope, int start, int endExclusive, out string? type)
+    {
+        type = null;
+        int arrowIndex = FindTopLevelToken(state.Tokens, start, endExclusive, TokenKind.Arrow);
+        if (arrowIndex < 0)
+        {
+            return false;
+        }
+
+        string? itemType = InferLoopVariableType(state, scope, start, arrowIndex);
+        int cursor = arrowIndex + 1;
+        cursor = SkipSeparators(state.Tokens, cursor, endExclusive);
+        if (!IsIdentifier(state.Tokens, cursor))
+        {
+            return false;
+        }
+
+        int firstBinding = cursor++;
+        int? secondBinding = null;
+        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.Comma && IsIdentifier(state.Tokens, cursor + 1))
+        {
+            secondBinding = cursor + 1;
+            cursor += 2;
+        }
+
+        cursor = SkipSeparators(state.Tokens, cursor, endExclusive);
+        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.Do)
+        {
+            cursor++;
+        }
+
+        Scope bodyScope = state.CreateScope(scope, state.Tokens[firstBinding].Position, scope.EndOffset);
+        AddSyntheticInferenceBinding(bodyScope, state.Tokens[firstBinding], secondBinding is null ? itemType : "int");
+        if (secondBinding is int second)
+        {
+            AddSyntheticInferenceBinding(bodyScope, state.Tokens[second], itemType);
+        }
+
+        string? bodyType;
+        int bodyStart = SkipSeparators(state.Tokens, cursor, endExclusive);
+        if (bodyStart < endExclusive && state.Tokens[bodyStart].Kind == TokenKind.OpenBrace)
+        {
+            int close = FindMatching(state.Tokens, bodyStart, TokenKind.OpenBrace, TokenKind.CloseBrace, endExclusive);
+            int bodyEnd = close < 0 ? endExclusive : close;
+            int tailStart = FindLastStatementStart(state.Tokens, bodyStart + 1, bodyEnd);
+            bodyType = tailStart < bodyEnd ? InferExpressionType(state, bodyScope, tailStart, bodyEnd) : null;
+        }
+        else
+        {
+            bodyType = bodyStart < endExclusive ? InferExpressionType(state, bodyScope, bodyStart, endExclusive) : null;
+        }
+
+        type = $"IEnumerable<{bodyType ?? "object"}>";
+        return true;
+    }
+
+    private static void AddSyntheticInferenceBinding(Scope scope, Token token, string? typeDisplay)
+    {
+        if (token.Text == "_")
+        {
+            return;
+        }
+
+        scope.Add(new PscpServerSymbol(
+            $"__infer_{token.Position}",
+            token.Text,
+            PscpServerSymbolKind.Parameter,
+            token.Span,
+            token.Span,
+            new ScopeSpan(token.Position, scope.EndOffset),
+            typeDisplay,
+            IsMutable: false,
+            IsIntrinsic: false,
+            ContainerSymbolId: null,
+            Documentation: null));
+    }
+
+    private bool TryInferIndexerExpressionType(AnalyzerState state, Scope scope, int start, int endExclusive, out string? type)
+    {
+        type = null;
+        if (endExclusive <= start || state.Tokens[endExclusive - 1].Kind != TokenKind.CloseBracket)
+        {
+            return false;
+        }
+
+        int openBracket = FindMatchingBackward(state.Tokens, endExclusive - 1, TokenKind.OpenBracket, TokenKind.CloseBracket, start);
+        if (openBracket <= start)
+        {
+            return false;
+        }
+
+        string? receiverType = InferExpressionType(state, scope, start, openBracket);
+        if (string.IsNullOrWhiteSpace(receiverType))
+        {
+            return false;
+        }
+
+        if (receiverType.EndsWith("[][]", StringComparison.Ordinal))
+        {
+            type = receiverType[..^2];
+            return true;
+        }
+
+        if (receiverType.EndsWith("[]", StringComparison.Ordinal))
+        {
+            type = receiverType[..^2];
+            return true;
+        }
+
+        if (receiverType == "string")
+        {
+            type = "char";
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryInferMemberAccessType(AnalyzerState state, Scope scope, int start, int endExclusive, out string? type)
+    {
+        type = null;
+        int dot = -1;
+        int searchStart = start;
+        while (true)
+        {
+            int nextDot = FindTopLevelToken(state.Tokens, searchStart, endExclusive, TokenKind.Dot);
+            if (nextDot < 0)
+            {
+                break;
+            }
+
+            dot = nextDot;
+            searchStart = nextDot + 1;
+        }
+
+        if (dot < 0 || dot + 1 >= endExclusive || !IsIdentifier(state.Tokens, dot + 1))
+        {
+            return false;
+        }
+
+        string? receiverType = InferExpressionType(state, scope, start, dot);
+        if (!string.IsNullOrWhiteSpace(receiverType)
+            && state.TryResolveTypeMember(receiverType!, state.Tokens[dot + 1].Text, out PscpServerSymbol? memberSymbol)
+            && memberSymbol is not null)
+        {
+            type = memberSymbol.TypeDisplay;
+            return type is not null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(receiverType)
+            && TryInferKnownExternalMemberReturnType(receiverType!, instanceContext: true, state.Tokens[dot + 1].Text, out type))
+        {
+            return type is not null;
         }
 
         return false;
@@ -741,6 +989,22 @@ internal sealed partial class PscpAnalyzer
         }
 
         return normalized is "string" or "String" ? "char" : null;
+    }
+
+    private static string? UnwrapEnumerableType(string? type)
+    {
+        if (string.IsNullOrWhiteSpace(type))
+        {
+            return null;
+        }
+
+        string normalized = type.Trim();
+        if (normalized.StartsWith("IEnumerable<", StringComparison.Ordinal) && normalized.EndsWith(">", StringComparison.Ordinal))
+        {
+            return normalized["IEnumerable<".Length..^1];
+        }
+
+        return null;
     }
 
     private static bool TryInferKnownExternalMemberReturnType(string receiverName, bool instanceContext, string memberName, out string? type)
@@ -1047,6 +1311,112 @@ internal sealed partial class PscpAnalyzer
     {
         string? argumentType = InferFirstArgumentType(state, scope, openParen);
         return argumentType == "decimal" ? "decimal" : "double";
+    }
+
+    private string? InferSingleLambdaParameterTypeFromCallContext(AnalyzerState state, Scope scope, int parameterIndex)
+    {
+        int? previous = PreviousNonTrivia(state.Tokens, parameterIndex - 1);
+        if (previous is not int openParen || state.Tokens[openParen].Kind != TokenKind.OpenParen)
+        {
+            return null;
+        }
+
+        int? memberIndex = PreviousNonTrivia(state.Tokens, openParen - 1);
+        if (memberIndex is not int member || !IsIdentifier(state.Tokens, member))
+        {
+            return null;
+        }
+
+        int? dotIndex = PreviousNonTrivia(state.Tokens, member - 1);
+        if (dotIndex is not int dot || state.Tokens[dot].Kind != TokenKind.Dot)
+        {
+            return null;
+        }
+
+        int receiverStart = FindSimpleReceiverStart(state.Tokens, dot);
+        string? receiverType = InferExpressionType(state, scope, receiverStart, dot);
+        return string.IsNullOrWhiteSpace(receiverType) ? null : InferElementType(receiverType!);
+    }
+
+    private static int FindSimpleReceiverStart(IReadOnlyList<Token> tokens, int dotIndex)
+    {
+        int? previous = PreviousNonTrivia(tokens, dotIndex - 1);
+        if (previous is not int index)
+        {
+            return dotIndex;
+        }
+
+        if (tokens[index].Kind == TokenKind.CloseBracket)
+        {
+            int open = FindMatchingBackward(tokens, index, TokenKind.OpenBracket, TokenKind.CloseBracket, 0);
+            int? beforeOpen = PreviousNonTrivia(tokens, open - 1);
+            return beforeOpen is int before && IsIdentifier(tokens, before) ? before : open;
+        }
+
+        return index;
+    }
+
+    private static int FindMatchingBackward(IReadOnlyList<Token> tokens, int closeIndex, TokenKind openKind, TokenKind closeKind, int startInclusive)
+    {
+        int depth = 0;
+        for (int i = closeIndex; i >= startInclusive; i--)
+        {
+            if (tokens[i].Kind == closeKind)
+            {
+                depth++;
+            }
+            else if (tokens[i].Kind == openKind)
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    private static int FindLastStatementStart(IReadOnlyList<Token> tokens, int start, int endExclusive)
+    {
+        int parenDepth = 0;
+        int bracketDepth = 0;
+        int braceDepth = 0;
+        for (int i = endExclusive - 1; i >= start; i--)
+        {
+            switch (tokens[i].Kind)
+            {
+                case TokenKind.CloseParen:
+                    parenDepth++;
+                    break;
+                case TokenKind.OpenParen:
+                    parenDepth = Math.Max(0, parenDepth - 1);
+                    break;
+                case TokenKind.CloseBracket:
+                    bracketDepth++;
+                    break;
+                case TokenKind.OpenBracket:
+                    bracketDepth = Math.Max(0, bracketDepth - 1);
+                    break;
+                case TokenKind.CloseBrace:
+                    braceDepth++;
+                    break;
+                case TokenKind.OpenBrace:
+                    braceDepth = Math.Max(0, braceDepth - 1);
+                    break;
+                case TokenKind.NewLine:
+                case TokenKind.Semicolon:
+                    if (parenDepth == 0 && bracketDepth == 0 && braceDepth == 0)
+                    {
+                        return SkipSeparators(tokens, i + 1, endExclusive);
+                    }
+
+                    break;
+            }
+        }
+
+        return SkipSeparators(tokens, start, endExclusive);
     }
 
     private static bool TryReadFirstArgumentBounds(IReadOnlyList<Token> tokens, int openParen, out int argumentStart, out int argumentEnd)

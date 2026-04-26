@@ -8,7 +8,7 @@ internal sealed partial class CSharpEmitter
         {
             LiteralExpression literal => literal.RawText,
             InterpolatedStringExpression interpolated => EmitInterpolatedStringExpression(interpolated),
-            IdentifierExpression identifier => identifier.Name,
+            IdentifierExpression identifier => EmitIdentifierExpression(identifier),
             DiscardExpression => "_",
             TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitExpression(element)))})",
             BlockExpression block => EmitBlockExpression(block.Block),
@@ -45,6 +45,9 @@ internal sealed partial class CSharpEmitter
             TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitAssignmentTarget(element)))})",
             _ => EmitExpression(expression)
         };
+
+    private string EmitIdentifierExpression(IdentifierExpression identifier)
+        => TryGetIdentifierAlias(identifier.Name, out string? alias) ? alias! : identifier.Name;
 
     private string EmitBindingPattern(BindingTarget target)
         => target switch
@@ -119,6 +122,11 @@ internal sealed partial class CSharpEmitter
             return EmitCallLike(call.Callee, [new ExpressionArgumentSyntax(null, ArgumentModifier.None, left), .. call.Arguments]);
         }
 
+        if (right is IdentifierExpression identifier && TryEmitConversionPipe(identifier, left, out string? conversion))
+        {
+            return conversion!;
+        }
+
         return $"{EmitExpression(right)}({EmitExpression(left)})";
     }
 
@@ -127,6 +135,11 @@ internal sealed partial class CSharpEmitter
         if (left is CallExpression call)
         {
             return EmitCallLike(call.Callee, [.. call.Arguments, new ExpressionArgumentSyntax(null, ArgumentModifier.None, right)]);
+        }
+
+        if (left is IdentifierExpression identifier && TryEmitConversionPipe(identifier, right, out string? conversion))
+        {
+            return conversion!;
         }
 
         return $"{EmitExpression(left)}({EmitExpression(right)})";
@@ -645,7 +658,31 @@ internal sealed partial class CSharpEmitter
         return true;
     }
     private string EmitCallLike(Expression callee, IReadOnlyList<ArgumentSyntax> arguments)
-        => $"{EmitExpression(callee)}({string.Join(", ", arguments.Select(EmitArgument))})";
+    {
+        if (callee is IdentifierExpression identifier
+            && IsConversionKeyword(identifier.Name)
+            && TryEmitConversionIntrinsic(new CallExpression(callee, arguments, IsSpaceSeparated: false), identifier.Name, out string? conversion))
+        {
+            return conversion!;
+        }
+
+        return $"{EmitExpression(callee)}({string.Join(", ", arguments.Select(EmitArgument))})";
+    }
+
+    private bool TryEmitConversionPipe(IdentifierExpression identifier, Expression operand, out string? emitted)
+    {
+        emitted = null;
+        if (!IsConversionKeyword(identifier.Name))
+        {
+            return false;
+        }
+
+        CallExpression conversionCall = new(
+            identifier,
+            [new ExpressionArgumentSyntax(null, ArgumentModifier.None, operand)],
+            IsSpaceSeparated: false);
+        return TryEmitConversionIntrinsic(conversionCall, identifier.Name, out emitted);
+    }
 
     private string EmitArgument(ArgumentSyntax argument)
     {
@@ -908,23 +945,21 @@ internal sealed partial class CSharpEmitter
         string source = EmitEnumerable(builder.Source);
         if (builder.IndexTarget is null)
         {
-            string itemName = EmitBindingPattern(builder.ItemTarget);
+            string itemName = ChooseBindingName(builder.ItemTarget, "item");
+            string body = EmitLambdaBodyExpression(builder.Body, null, null, builder.ItemTarget, itemName);
             return builder.Body switch
             {
-                LambdaExpressionBody expressionBody => $"System.Linq.Enumerable.Select({source}, {itemName} => {EmitExpression(expressionBody.Expression)})",
-                LambdaBlockBody blockBody => $"System.Linq.Enumerable.Select({source}, {itemName} => __PscpThunk.run(() => {{ {EmitInlineBlockWithBindings(blockBody.Block, (null, null), (builder.ItemTarget, itemName), isVoidLike: false)} }}))",
+                LambdaExpressionBody or LambdaBlockBody => $"System.Linq.Enumerable.Select({source}, {itemName} => {body})",
                 _ => source
             };
         }
 
-        string itemTemp = NextTemporary("item");
-        string indexTemp = NextTemporary("index");
-        string itemNameBound = EmitBindingPattern(builder.ItemTarget);
-        string indexNameBound = EmitBindingPattern(builder.IndexTarget);
+        string itemNameBound = ChooseBindingName(builder.ItemTarget, "item");
+        string indexNameBound = ChooseBindingName(builder.IndexTarget, "index");
+        string indexedBody = EmitLambdaBodyExpression(builder.Body, builder.IndexTarget, indexNameBound, builder.ItemTarget, itemNameBound);
         return builder.Body switch
         {
-            LambdaExpressionBody expressionBody => $"System.Linq.Enumerable.Select({source}, ({itemTemp}, {indexTemp}) => __PscpThunk.run(() => {{ var {indexNameBound} = {indexTemp}; var {itemNameBound} = {itemTemp}; return {EmitExpression(expressionBody.Expression)}; }}))",
-            LambdaBlockBody blockBody => $"System.Linq.Enumerable.Select({source}, ({itemTemp}, {indexTemp}) => __PscpThunk.run(() => {{ var {indexNameBound} = {indexTemp}; var {itemNameBound} = {itemTemp}; {EmitInlineBlock(blockBody.Block, isVoidLike: false)} }}))",
+            LambdaExpressionBody or LambdaBlockBody => $"System.Linq.Enumerable.Select({source}, ({itemNameBound}, {indexNameBound}) => {indexedBody})",
             _ => source
         };
     }
@@ -1340,7 +1375,14 @@ internal sealed partial class CSharpEmitter
         => expression is RangeExpression range ? EmitRangeEnumerable(range, null) : EmitExpression(expression);
 
     private string EmitIndexExpression(IndexExpression index)
-        => $"{EmitExpression(index.Receiver)}[{string.Join(", ", index.Arguments.Select(EmitIndexArgument))}]";
+    {
+        string receiver = index.Receiver is IdentifierExpression identifier
+            && IsIdentifierAliasActive(identifier.Name)
+            && _declaredValueNames.Contains(identifier.Name)
+                ? identifier.Name
+                : EmitExpression(index.Receiver);
+        return $"{receiver}[{string.Join(", ", index.Arguments.Select(EmitIndexArgument))}]";
+    }
 
     private string EmitIndexArgument(Expression expression)
         => expression switch
@@ -1425,7 +1467,8 @@ internal sealed partial class CSharpEmitter
         }
 
         string operand = EmitExpression(expressionArgument.Expression);
-        TypeSyntax? sourceType = _semantic?.GetExpressionType(expressionArgument.Expression);
+        TypeSyntax? sourceType = _semantic?.GetExpressionType(expressionArgument.Expression)
+            ?? InferConversionOperandType(expressionArgument.Expression);
         emitted = name switch
         {
             "int" => EmitNumericConversion("int", "int.Parse", "Convert.ToInt32", operand, sourceType),
@@ -1439,6 +1482,17 @@ internal sealed partial class CSharpEmitter
         };
         return emitted is not null;
     }
+
+    private static TypeSyntax? InferConversionOperandType(Expression expression)
+        => expression switch
+        {
+            LiteralExpression { Kind: LiteralKind.True or LiteralKind.False }
+                or IsPatternExpression
+                or BinaryExpression { Operator: BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual or BinaryOperator.Equal or BinaryOperator.NotEqual or BinaryOperator.LogicalAnd or BinaryOperator.LogicalOr or BinaryOperator.LogicalXor }
+                or UnaryExpression { Operator: UnaryOperator.LogicalNot } => new NamedTypeSyntax("bool", Immutable.List<TypeSyntax>()),
+            CallExpression { Callee: MemberAccessExpression { MemberName: "Any" or "All" or "Contains" } } => new NamedTypeSyntax("bool", Immutable.List<TypeSyntax>()),
+            _ => null,
+        };
 
     private string EmitNumericConversion(string targetType, string parseMethod, string convertMethod, string operand, TypeSyntax? sourceType)
     {
@@ -1739,10 +1793,87 @@ internal sealed partial class CSharpEmitter
         };
 
     private string ChooseBindingName(BindingTarget? target, string prefix)
-        => TryGetPreferredBindingName(target) ?? NextTemporary(prefix);
+    {
+        string? preferred = TryGetPreferredBindingName(target);
+        if (preferred is null
+            || _declaredValueNames.Contains(preferred)
+            || IsIdentifierAliasActive(preferred))
+        {
+            return NextTemporary(prefix);
+        }
+
+        return preferred;
+    }
 
     private string EmitLoopBindingPattern(BindingTarget target, string prefix)
-        => target is DiscardTarget ? NextTemporary(prefix) : EmitBindingPattern(target);
+        => target switch
+        {
+            DiscardTarget => NextTemporary(prefix),
+            NameTarget nameTarget when _declaredValueNames.Contains(nameTarget.Name) || IsIdentifierAliasActive(nameTarget.Name) => NextTemporary(prefix),
+            _ => EmitBindingPattern(target),
+        };
+
+    private bool TryGetIdentifierAlias(string name, out string? alias)
+    {
+        alias = null;
+        if (!_identifierAliases.TryGetValue(name, out Stack<string>? aliases) || aliases.Count == 0)
+        {
+            return false;
+        }
+
+        alias = aliases.Peek();
+        return true;
+    }
+
+    private bool IsIdentifierAliasActive(string name)
+        => _identifierAliases.TryGetValue(name, out Stack<string>? aliases) && aliases.Count > 0;
+
+    private void PushBindingAlias(BindingTarget? target, string? sourceName)
+    {
+        if (target is not NameTarget nameTarget
+            || string.IsNullOrWhiteSpace(sourceName)
+            || string.Equals(nameTarget.Name, sourceName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!_identifierAliases.TryGetValue(nameTarget.Name, out Stack<string>? aliases))
+        {
+            aliases = new Stack<string>();
+            _identifierAliases[nameTarget.Name] = aliases;
+        }
+
+        aliases.Push(sourceName!);
+    }
+
+    private void PopBindingAlias(BindingTarget? target, string? sourceName)
+    {
+        if (target is not NameTarget nameTarget
+            || string.IsNullOrWhiteSpace(sourceName)
+            || string.Equals(nameTarget.Name, sourceName, StringComparison.Ordinal)
+            || !_identifierAliases.TryGetValue(nameTarget.Name, out Stack<string>? aliases)
+            || aliases.Count == 0)
+        {
+            return;
+        }
+
+        aliases.Pop();
+    }
+
+    private T EmitWithBindingAliases<T>(BindingTarget? indexTarget, string? indexName, BindingTarget itemTarget, string itemName, Func<T> emit)
+    {
+        PushBindingAlias(indexTarget, indexName);
+        PushBindingAlias(itemTarget, itemName);
+        try
+        {
+            return emit();
+        }
+        finally
+        {
+            PopBindingAlias(itemTarget, itemName);
+            PopBindingAlias(indexTarget, indexName);
+        }
+    }
 
     private string EmitBindingAliasStatements(BindingTarget? indexTarget, string? indexName, BindingTarget itemTarget, string itemName)
     {
@@ -1772,6 +1903,7 @@ internal sealed partial class CSharpEmitter
         return target switch
         {
             NameTarget nameTarget when nameTarget.Name == sourceName => string.Empty,
+            NameTarget nameTarget when IsIdentifierAliasActive(nameTarget.Name) => string.Empty,
             NameTarget nameTarget => $"var {nameTarget.Name} = {sourceName};",
             TupleTarget tupleTarget => $"var {EmitBindingPattern(tupleTarget)} = {sourceName};",
             DiscardTarget => string.Empty,
@@ -1946,18 +2078,14 @@ internal sealed partial class CSharpEmitter
             {
                 string directStart = EmitExpression(range.Start);
                 string directEnd = EmitExpression(range.End);
-                string directCount = range.Kind == RangeKind.RightExclusive
-                    ? $"{directStart} < {directEnd} ? {directEnd} - {directStart} : 0"
-                    : $"{directStart} <= {directEnd} ? ({directEnd} - {directStart}) + 1 : 0";
+                string directCount = EmitDefaultRangeCountExpression(directStart, directEnd, range.Kind);
                 string directLoop = indexName is null
                     ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++) {{ {resultName}[{slotName}] = {valueExpression}; }}"
                     : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++) {{ {resultName}[{indexName}] = {valueExpression}; }}";
                 return EmitEval($"{elementTypeText}[] {resultName} = new {elementTypeText}[{directCount}]; {directLoop} return {resultName};");
             }
 
-            string countExpression = range.Kind == RangeKind.RightExclusive
-                ? $"{startName} < {endName} ? {endName} - {startName} : 0"
-                : $"{startName} <= {endName} ? ({endName} - {startName}) + 1 : 0";
+            string countExpression = EmitDefaultRangeCountExpression(startName, endName, range.Kind);
             string loopUpdate = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
             return EmitEval($"int {startName} = {EmitExpression(range.Start)}; int {endName} = {EmitExpression(range.End)}; int {countName} = {countExpression}; {elementTypeText}[] {resultName} = new {elementTypeText}[{countName}]; int {slotName} = 0; {indexInit}for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {loopUpdate}) {{ {resultName}[{slotName}++] = {valueExpression}; }} return {resultName};");
         }
@@ -1991,6 +2119,20 @@ internal sealed partial class CSharpEmitter
             return {{resultName}};
             """);
     }
+
+    private static string EmitDefaultRangeCountExpression(string start, string end, RangeKind kind)
+    {
+        if (kind == RangeKind.RightExclusive)
+        {
+            return IsZeroExpressionText(start) ? end : $"{end} - {start}";
+        }
+
+        return IsZeroExpressionText(start) ? $"{end} + 1" : $"({end} - {start}) + 1";
+    }
+
+    private static bool IsZeroExpressionText(string text)
+        => string.Equals(text.Trim(), "0", StringComparison.Ordinal)
+            || string.Equals(text.Trim(), "0L", StringComparison.OrdinalIgnoreCase);
 
     private string EmitGeneralCollectionMaterialization(CollectionExpression collection, TypeSyntax? targetTypeHint, TypeSyntax? elementHint)
     {
@@ -2048,15 +2190,18 @@ internal sealed partial class CSharpEmitter
 
     private string EmitLambdaBodyExpression(LambdaBody body, BindingTarget? indexTarget, string? indexName, BindingTarget itemTarget, string itemName)
     {
-        string aliases = EmitBindingAliasStatements(indexTarget, indexName, itemTarget, itemName);
-        return body switch
+        return EmitWithBindingAliases(indexTarget, indexName, itemTarget, itemName, () =>
         {
-            LambdaExpressionBody expressionBody when string.IsNullOrWhiteSpace(aliases) => EmitExpression(expressionBody.Expression),
-            LambdaExpressionBody expressionBody => EmitEval($"{aliases} return {EmitExpression(expressionBody.Expression)};"),
-            LambdaBlockBody blockBody when string.IsNullOrWhiteSpace(aliases) => EmitEval($"{EmitInlineBlock(blockBody.Block, isVoidLike: false)}"),
-            LambdaBlockBody blockBody => EmitEval($"{aliases} {EmitInlineBlock(blockBody.Block, isVoidLike: false)}"),
-            _ => "default!",
-        };
+            string aliases = EmitBindingAliasStatements(indexTarget, indexName, itemTarget, itemName);
+            return body switch
+            {
+                LambdaExpressionBody expressionBody when string.IsNullOrWhiteSpace(aliases) => EmitExpression(expressionBody.Expression),
+                LambdaExpressionBody expressionBody => EmitEval($"{aliases} return {EmitExpression(expressionBody.Expression)};"),
+                LambdaBlockBody blockBody when string.IsNullOrWhiteSpace(aliases) => EmitEval($"{EmitInlineBlock(blockBody.Block, isVoidLike: false)}"),
+                LambdaBlockBody blockBody => EmitEval($"{aliases} {EmitInlineBlock(blockBody.Block, isVoidLike: false)}"),
+                _ => "default!",
+            };
+        });
     }
 
     private bool TryEmitLambdaBodyValueStatement(
@@ -2068,22 +2213,27 @@ internal sealed partial class CSharpEmitter
         Func<string, string> emitValueStatement,
         out string emitted)
     {
-        string aliases = EmitBindingAliasStatements(indexTarget, indexName, itemTarget, itemName);
-        if (body is LambdaExpressionBody expressionBody)
+        string result = string.Empty;
+        bool success = EmitWithBindingAliases(indexTarget, indexName, itemTarget, itemName, () =>
         {
-            emitted = JoinInlineStatements(aliases, emitValueStatement(EmitExpression(expressionBody.Expression)));
-            return true;
-        }
+            string aliases = EmitBindingAliasStatements(indexTarget, indexName, itemTarget, itemName);
+            if (body is LambdaExpressionBody expressionBody)
+            {
+                result = JoinInlineStatements(aliases, emitValueStatement(EmitExpression(expressionBody.Expression)));
+                return true;
+            }
 
-        if (body is LambdaBlockBody blockBody
-            && TryEmitBlockValueStatement(blockBody.Block, emitValueStatement, out string blockStatement))
-        {
-            emitted = JoinInlineStatements(aliases, blockStatement);
-            return true;
-        }
+            if (body is LambdaBlockBody blockBody
+                && TryEmitBlockValueStatement(blockBody.Block, emitValueStatement, out string blockStatement))
+            {
+                result = JoinInlineStatements(aliases, blockStatement);
+                return true;
+            }
 
-        emitted = string.Empty;
-        return false;
+            return false;
+        });
+        emitted = result;
+        return success;
     }
 
     private bool TryEmitBlockValueStatement(
@@ -2589,52 +2739,59 @@ internal sealed partial class CSharpEmitter
         emitted = null;
         string itemName = ChooseBindingName(aggregation.ItemTarget, "item");
         string? indexName = aggregation.IndexTarget is null ? null : ChooseBindingName(aggregation.IndexTarget, "index");
-        string aliases = EmitBindingAliasStatements(aggregation.IndexTarget, indexName, aggregation.ItemTarget, itemName);
-        string prefix = string.IsNullOrWhiteSpace(aliases) ? string.Empty : aliases + " ";
-        string wherePrefix = aggregation.WhereExpression is null ? string.Empty : $"if (!({EmitExpression(aggregation.WhereExpression)})) continue; ";
 
-        switch (aggregation.AggregatorName)
+        string? result = null;
+        bool success = EmitWithBindingAliases(aggregation.IndexTarget, indexName, aggregation.ItemTarget, itemName, () =>
         {
-            case "sum":
+            string aliases = EmitBindingAliasStatements(aggregation.IndexTarget, indexName, aggregation.ItemTarget, itemName);
+            string prefix = string.IsNullOrWhiteSpace(aliases) ? string.Empty : aliases + " ";
+            string wherePrefix = aggregation.WhereExpression is null ? string.Empty : $"if (!({EmitExpression(aggregation.WhereExpression)})) continue; ";
+
+            switch (aggregation.AggregatorName)
             {
-                TypeSyntax? resultType = _semantic?.GetExpressionType(aggregation);
-                if (resultType is null)
+                case "sum":
                 {
-                    return false;
-                }
+                    TypeSyntax? resultType = _semantic?.GetExpressionType(aggregation);
+                    if (resultType is null)
+                    {
+                        return false;
+                    }
 
-                string sumName = NextTemporary("sum");
-                string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}{sumName} += {EmitExpression(aggregation.Body)};", indexName);
-                emitted = EmitEval($"{EmitType(resultType)} {sumName} = default; {loop} return {sumName};");
-                return true;
-            }
-            case "count":
-            {
-                string countName = NextTemporary("count");
-                string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}if ({EmitExpression(aggregation.Body)}) {{ {countName}++; }}", indexName);
-                emitted = EmitEval($"int {countName} = 0; {loop} return {countName};");
-                return true;
-            }
-            case "min":
-            case "max":
-            {
-                TypeSyntax? resultType = _semantic?.GetExpressionType(aggregation);
-                if (resultType is null)
+                    string sumName = NextTemporary("sum");
+                    string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}{sumName} += {EmitExpression(aggregation.Body)};", indexName);
+                    result = EmitEval($"{EmitType(resultType)} {sumName} = default; {loop} return {sumName};");
+                    return true;
+                }
+                case "count":
                 {
-                    return false;
+                    string countName = NextTemporary("count");
+                    string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}if ({EmitExpression(aggregation.Body)}) {{ {countName}++; }}", indexName);
+                    result = EmitEval($"int {countName} = 0; {loop} return {countName};");
+                    return true;
                 }
+                case "min":
+                case "max":
+                {
+                    TypeSyntax? resultType = _semantic?.GetExpressionType(aggregation);
+                    if (resultType is null)
+                    {
+                        return false;
+                    }
 
-                string hasValueName = NextTemporary("hasValue");
-                string bestName = NextTemporary("best");
-                string valueName = NextTemporary("value");
-                string comparison = EmitPreferredComparison(valueName, bestName, resultType, preferLower: aggregation.AggregatorName == "min");
-                string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {comparison}) {{ {bestName} = {valueName}; {hasValueName} = true; }}", indexName);
-                emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
-                return true;
+                    string hasValueName = NextTemporary("hasValue");
+                    string bestName = NextTemporary("best");
+                    string valueName = NextTemporary("value");
+                    string comparison = EmitPreferredComparison(valueName, bestName, resultType, preferLower: aggregation.AggregatorName == "min");
+                    string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {comparison}) {{ {bestName} = {valueName}; {hasValueName} = true; }}", indexName);
+                    result = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
+                    return true;
+                }
             }
-        }
 
-        return false;
+            return false;
+        });
+        emitted = result;
+        return success;
     }
 
     private string EmitFallbackAggregationExpression(AggregationExpression aggregation)

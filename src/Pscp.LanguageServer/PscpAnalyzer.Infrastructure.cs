@@ -600,6 +600,7 @@ internal sealed class AnalyzerState
     private readonly Dictionary<int, string> _tokenToSymbolId = [];
     private readonly Dictionary<int, PscpHoverEntry> _hoverByTokenIndex = [];
     private readonly Dictionary<int, PscpCompletionEntry> _intrinsicMembers = [];
+    private readonly Dictionary<string, Dictionary<string, PscpServerSymbol>> _typeMembers = new(StringComparer.Ordinal);
     private readonly List<PscpCodeActionEntry> _codeActions = [];
     private readonly List<PscpInlayHintEntry> _inlayHints = [];
     private int _symbolId;
@@ -664,6 +665,42 @@ internal sealed class AnalyzerState
 
     public bool TryResolve(Scope scope, string name, int position, out PscpServerSymbol? symbol)
         => scope.TryResolve(name, position, out symbol);
+
+    public void AddTypeMember(string typeName, PscpServerSymbol symbol)
+    {
+        string normalizedTypeName = NormalizeTypeName(typeName);
+        if (!_typeMembers.TryGetValue(normalizedTypeName, out Dictionary<string, PscpServerSymbol>? members))
+        {
+            members = new Dictionary<string, PscpServerSymbol>(StringComparer.Ordinal);
+            _typeMembers[normalizedTypeName] = members;
+        }
+
+        members[symbol.Name] = symbol;
+    }
+
+    public bool TryResolveTypeMember(string receiverType, string memberName, out PscpServerSymbol? symbol)
+    {
+        string normalizedTypeName = NormalizeTypeName(receiverType);
+        if (_typeMembers.TryGetValue(normalizedTypeName, out Dictionary<string, PscpServerSymbol>? members)
+            && members.TryGetValue(memberName, out symbol))
+        {
+            return true;
+        }
+
+        symbol = null;
+        return false;
+    }
+
+    private static string NormalizeTypeName(string typeName)
+    {
+        string normalized = typeName.Trim();
+        if (normalized.EndsWith("?", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^1].TrimEnd();
+        }
+
+        return PscpExternalMetadata.NormalizeTypeReceiver(normalized);
+    }
 
     public bool Match(ref int index, TokenKind kind, out int matchedIndex)
     {
@@ -741,6 +778,10 @@ internal sealed class AnalyzerState
             TokenToSymbolId = new Dictionary<int, string>(_tokenToSymbolId),
             HoverByTokenIndex = new Dictionary<int, PscpHoverEntry>(_hoverByTokenIndex),
             IntrinsicMembers = new Dictionary<int, PscpCompletionEntry>(_intrinsicMembers),
+            TypeMembers = _typeMembers.ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyDictionary<string, PscpServerSymbol>)new Dictionary<string, PscpServerSymbol>(pair.Value, StringComparer.Ordinal),
+                StringComparer.Ordinal),
             Signatures = new Dictionary<string, PscpSignatureEntry>(Signatures, StringComparer.Ordinal),
             CodeActions = _codeActions.ToArray(),
             InlayHints = _inlayHints.ToArray(),

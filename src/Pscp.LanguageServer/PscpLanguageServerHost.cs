@@ -880,6 +880,11 @@ public static class PscpLanguageServerHost
                     instanceContext = true;
                 }
             }
+            else if (TryInferIndexedReceiverType(analysis, receiverIndex, out string? indexedReceiverType))
+            {
+                receiverName = indexedReceiverType!;
+                instanceContext = true;
+            }
 
             IEnumerable<PscpCompletionEntry> intrinsicMembers = receiverName switch
             {
@@ -900,6 +905,19 @@ public static class PscpLanguageServerHost
             if (IsCollectionLikeReceiver(receiverName, instanceContext, analysis.Tokens[receiverIndex].Kind))
             {
                 members.AddRange(PscpIntrinsics.CollectionMembers.Values);
+            }
+
+            if (instanceContext
+                && analysis.TypeMembers.TryGetValue(NormalizeTypeMemberReceiver(receiverName), out IReadOnlyDictionary<string, PscpServerSymbol>? userMembers))
+            {
+                members.AddRange(userMembers.Values.Select(symbol => new PscpCompletionEntry(
+                    symbol.Name,
+                    ToCompletionKind(symbol.Kind),
+                    symbol.TypeDisplay,
+                    symbol.Documentation,
+                    null,
+                    null,
+                    symbol.Name)));
             }
 
             members.AddRange(PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext));
@@ -960,7 +978,7 @@ public static class PscpLanguageServerHost
                 return false;
             }
 
-            if (receiverTokenKind is TokenKind.CloseParen or TokenKind.CloseBracket)
+            if (!instanceContext && receiverTokenKind is (TokenKind.CloseParen or TokenKind.CloseBracket))
             {
                 return true;
             }
@@ -969,6 +987,115 @@ public static class PscpLanguageServerHost
             return receiverName.EndsWith("[]", StringComparison.Ordinal)
                 || normalized is "Array" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet"
                 || normalized.StartsWith("IEnumerable", StringComparison.Ordinal);
+        }
+
+        private static bool TryInferIndexedReceiverType(PscpAnalysisResult analysis, int receiverIndex, out string? type)
+        {
+            type = null;
+            if (receiverIndex < 0
+                || receiverIndex >= analysis.Tokens.Count
+                || analysis.Tokens[receiverIndex].Kind != TokenKind.CloseBracket)
+            {
+                return false;
+            }
+
+            int openBracket = FindMatchingBackward(analysis.Tokens, receiverIndex, TokenKind.OpenBracket, TokenKind.CloseBracket);
+            if (openBracket <= 0)
+            {
+                return false;
+            }
+
+            int sourceIndex = PreviousNonTrivia(analysis.Tokens, openBracket - 1);
+            string? sourceType = null;
+            if (sourceIndex >= 0 && analysis.Tokens[sourceIndex].Kind == TokenKind.CloseBracket)
+            {
+                _ = TryInferIndexedReceiverType(analysis, sourceIndex, out sourceType);
+            }
+            else if (sourceIndex >= 0
+                && analysis.TokenToSymbolId.TryGetValue(sourceIndex, out string? symbolId)
+                && analysis.Symbols.FirstOrDefault(candidate => candidate.Id == symbolId) is PscpServerSymbol sourceSymbol
+                && !string.IsNullOrWhiteSpace(sourceSymbol.TypeDisplay))
+            {
+                sourceType = sourceSymbol.TypeDisplay;
+            }
+
+            type = InferElementType(sourceType);
+            return type is not null;
+        }
+
+        private static string NormalizeTypeMemberReceiver(string receiverName)
+        {
+            string normalized = receiverName.Trim();
+            if (normalized.EndsWith("?", StringComparison.Ordinal))
+            {
+                normalized = normalized[..^1].TrimEnd();
+            }
+
+            return PscpExternalMetadata.NormalizeTypeReceiver(normalized);
+        }
+
+        private static string? InferElementType(string? type)
+        {
+            if (string.IsNullOrWhiteSpace(type))
+            {
+                return null;
+            }
+
+            string normalized = type.Trim();
+            if (normalized.EndsWith("?", StringComparison.Ordinal))
+            {
+                normalized = normalized[..^1];
+            }
+
+            if (normalized.EndsWith("[]", StringComparison.Ordinal))
+            {
+                return normalized[..^2];
+            }
+
+            int open = normalized.IndexOf('<');
+            int close = normalized.LastIndexOf('>');
+            if (open > 0 && close > open)
+            {
+                string name = PscpExternalMetadata.NormalizeTypeReceiver(normalized[..open]);
+                if (name is "IEnumerable" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet")
+                {
+                    return normalized[(open + 1)..close].Trim();
+                }
+            }
+
+            return normalized is "string" or "String" ? "char" : null;
+        }
+
+        private static int PreviousNonTrivia(IReadOnlyList<Token> tokens, int index)
+        {
+            while (index >= 0 && tokens[index].Kind is TokenKind.NewLine or TokenKind.Semicolon)
+            {
+                index--;
+            }
+
+            return index;
+        }
+
+        private static int FindMatchingBackward(IReadOnlyList<Token> tokens, int closeIndex, TokenKind openKind, TokenKind closeKind)
+        {
+            int depth = 0;
+            for (int i = closeIndex; i >= 0; i--)
+            {
+                if (tokens[i].Kind == closeKind)
+                {
+                    depth++;
+                }
+                else if (tokens[i].Kind == openKind)
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return i;
+                    }
+                }
+            }
+
+            return -1;
         }
 
         private static bool IsValidRenameIdentifier(string value)

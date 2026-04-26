@@ -202,9 +202,9 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- run .\sample\main.pscp --st
 ```text
 pscp init [directory] [--force]
 pscp check [file.pscp]
-pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C]
-pscp build [file.pscp] [-c Debug|Release] [--release] [--debug]
-pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug]
+pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty]
+pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
+pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
 pscp lsp
 pscp version
 ```
@@ -288,13 +288,13 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.4.vsix
+artifacts\vscode\local.pscp-vscode-0.6.5.vsix
 ```
 
 설치 방법:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.4.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.5.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.

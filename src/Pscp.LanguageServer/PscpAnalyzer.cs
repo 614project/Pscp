@@ -140,6 +140,11 @@ internal sealed partial class PscpAnalyzer
                     index = FindStatementEnd(state.Tokens, index, endExclusive);
                     break;
                 default:
+                    if (TryAnalyzeTypeDeclaration(state, scope, ref index, endExclusive, topLevel))
+                    {
+                        break;
+                    }
+
                     if (topLevel && TryAnalyzeFunction(state, scope, ref index, endExclusive))
                     {
                         break;
@@ -154,6 +159,135 @@ internal sealed partial class PscpAnalyzer
                     break;
             }
         }
+    }
+
+    private bool TryAnalyzeTypeDeclaration(AnalyzerState state, Scope scope, ref int index, int endExclusive, bool topLevel)
+    {
+        int saved = index;
+        int cursor = index;
+        while (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.Identifier && IsTypeModifier(state.Tokens[cursor].Text))
+        {
+            state.MarkToken(cursor, "modifier");
+            cursor++;
+        }
+
+        bool isRecord = false;
+        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.Record)
+        {
+            isRecord = true;
+            state.MarkToken(cursor, "keyword");
+            cursor++;
+        }
+
+        if (cursor < endExclusive && state.Tokens[cursor].Kind is TokenKind.Class or TokenKind.Struct)
+        {
+            state.MarkToken(cursor, "keyword");
+            cursor++;
+        }
+        else if (!isRecord)
+        {
+            index = saved;
+            return false;
+        }
+
+        if (!IsIdentifier(state.Tokens, cursor))
+        {
+            index = saved;
+            return false;
+        }
+
+        int nameIndex = cursor++;
+        string typeName = state.Tokens[nameIndex].Text;
+        int primaryOpenParen = -1;
+        List<ParameterInfo> primaryParameters = [];
+        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.OpenParen)
+        {
+            primaryOpenParen = cursor;
+            cursor++;
+            if (!TryReadParameters(state, ref cursor, out primaryParameters))
+            {
+                index = saved;
+                return false;
+            }
+        }
+
+        int openBraceIndex = FindTopLevelToken(state.Tokens, cursor, endExclusive, TokenKind.OpenBrace);
+        int closeBraceIndex = -1;
+        int declarationEnd;
+        if (openBraceIndex >= 0)
+        {
+            closeBraceIndex = FindMatching(state.Tokens, openBraceIndex, TokenKind.OpenBrace, TokenKind.CloseBrace, endExclusive);
+            declarationEnd = closeBraceIndex < 0 ? endExclusive : closeBraceIndex + 1;
+        }
+        else
+        {
+            declarationEnd = FindStatementEnd(state.Tokens, saved, endExclusive);
+        }
+
+        TextSpan declarationSpan = new(state.Tokens[saved].Position, Math.Max(0, EndOf(state.Tokens[Math.Max(declarationEnd - 1, saved)]) - state.Tokens[saved].Position));
+        PscpServerSymbol typeSymbol = state.AddSymbol(
+            scope,
+            typeName,
+            PscpServerSymbolKind.Type,
+            state.Tokens[nameIndex].Span,
+            state.Tokens[nameIndex].Span,
+            new ScopeSpan(state.Tokens[nameIndex].Position, scope.EndOffset),
+            typeName,
+            isMutable: false,
+            isIntrinsic: false,
+            containerSymbolId: null,
+            documentation: $"type `{typeName}`");
+        state.MarkToken(nameIndex, "type", "declaration");
+        state.AddReference(typeSymbol, nameIndex, isDeclaration: true, isWrite: false);
+
+        if (topLevel)
+        {
+            state.AddDocumentSymbol(new PscpDocumentSymbol(
+                typeName,
+                23,
+                declarationSpan,
+                state.Tokens[nameIndex].Span,
+                Array.Empty<PscpDocumentSymbol>()));
+        }
+
+        Scope typeScope = state.CreateScope(scope, state.Tokens[nameIndex].Position, declarationSpan.End);
+        foreach (ParameterInfo parameter in primaryParameters)
+        {
+            foreach (int typeToken in parameter.TypeTokenIndices)
+            {
+                state.MarkToken(typeToken, "type");
+            }
+
+            if (parameter.IsDiscard)
+            {
+                state.MarkToken(parameter.NameTokenIndex, "variable", "declaration");
+                continue;
+            }
+
+            PscpServerSymbol memberSymbol = state.AddSymbol(
+                typeScope,
+                parameter.Name,
+                PscpServerSymbolKind.Property,
+                state.Tokens[parameter.NameTokenIndex].Span,
+                state.Tokens[parameter.NameTokenIndex].Span,
+                new ScopeSpan(state.Tokens[parameter.NameTokenIndex].Position, declarationSpan.End),
+                parameter.TypeDisplay,
+                isMutable: false,
+                isIntrinsic: false,
+                containerSymbolId: typeSymbol.Id,
+                documentation: $"record member `{typeName}.{parameter.Name}: {parameter.TypeDisplay}`");
+            state.MarkToken(parameter.NameTokenIndex, "property", "declaration");
+            state.AddReference(memberSymbol, parameter.NameTokenIndex, isDeclaration: true, isWrite: false);
+            state.AddTypeMember(typeName, memberSymbol);
+        }
+
+        if (primaryOpenParen >= 0)
+        {
+            state.MarkToken(primaryOpenParen, "operator");
+        }
+
+        index = declarationEnd;
+        return true;
     }
 
     private bool TryAnalyzeFunction(AnalyzerState state, Scope scope, ref int index, int endExclusive)
@@ -593,11 +727,12 @@ internal sealed partial class PscpAnalyzer
             }
         }
 
+        string? itemType = InferLoopVariableType(state, scope, start, arrowIndex);
         Scope bodyScope = state.CreateScope(scope, state.Tokens[firstBinding].Position, scopeEnd);
-        AddFastForBinding(state, bodyScope, firstBinding, secondBinding is not null, isIndex: secondBinding is not null);
+        AddFastForBinding(state, bodyScope, firstBinding, secondBinding is not null, isIndex: secondBinding is not null, typeDisplay: secondBinding is null ? itemType : "int");
         if (secondBinding is not null)
         {
-            AddFastForBinding(state, bodyScope, secondBinding.Value, hasSecond: true, isIndex: false);
+            AddFastForBinding(state, bodyScope, secondBinding.Value, hasSecond: true, isIndex: false, typeDisplay: itemType);
         }
 
         if (bodyStart < statementEnd && state.Tokens[bodyStart].Kind == TokenKind.OpenBrace)
@@ -611,7 +746,7 @@ internal sealed partial class PscpAnalyzer
         return statementEnd;
     }
 
-    private void AddFastForBinding(AnalyzerState state, Scope scope, int tokenIndex, bool hasSecond, bool isIndex)
+    private void AddFastForBinding(AnalyzerState state, Scope scope, int tokenIndex, bool hasSecond, bool isIndex, string? typeDisplay = null)
     {
         state.MarkToken(tokenIndex, "variable", "declaration");
         if (state.Tokens[tokenIndex].Text == "_")
@@ -619,7 +754,7 @@ internal sealed partial class PscpAnalyzer
             return;
         }
 
-        string? type = isIndex ? "int" : null;
+        string? type = typeDisplay ?? (isIndex ? "int" : null);
         PscpServerSymbol symbol = state.AddSymbol(
             scope,
             state.Tokens[tokenIndex].Text,
@@ -786,6 +921,18 @@ internal sealed partial class PscpAnalyzer
 
         return string.Join("\n\n", lines);
     }
+
+    private static bool IsTypeModifier(string text)
+        => text is "public"
+            or "private"
+            or "protected"
+            or "internal"
+            or "readonly"
+            or "partial"
+            or "sealed"
+            or "abstract"
+            or "static"
+            or "unsafe";
 
     private static string snapshotText(AnalyzerState state, int startTokenIndex, int endTokenIndexExclusive)
         => string.Concat(state.Tokens.Skip(startTokenIndex).Take(Math.Max(0, endTokenIndexExclusive - startTokenIndex)).Select(token => token.Text == "\n" ? "\n" : token.Text + (NeedsTrailingSpace(token.Kind) ? " " : string.Empty))).Trim();

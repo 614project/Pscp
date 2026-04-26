@@ -501,9 +501,9 @@ static class PscpCli
         Console.WriteLine("Commands:");
         Console.WriteLine("  pscp init [directory] [--force]");
         Console.WriteLine("  pscp check [file.pscp]");
-        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
-        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
-        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--explain] [--older]");
+        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
+        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
+        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
         Console.WriteLine("  pscp lsp");
         Console.WriteLine("  pscp version");
         Console.WriteLine();
@@ -523,7 +523,8 @@ static class PscpCli
         string? StdinFile,
         HelperEmissionMode HelperEmission,
         bool Explain,
-        bool Older);
+        bool Older,
+        bool Pretty);
 
     private static BackendOptions ParseBackendOptions(string[] args, int startIndex, bool allowOutput, bool allowStdinFile)
     {
@@ -536,6 +537,7 @@ static class PscpCli
         HelperEmissionMode helperEmission = HelperEmissionMode.Compact;
         bool explain = false;
         bool older = false;
+        bool pretty = false;
 
         for (int i = startIndex; i < args.Length; i++)
         {
@@ -591,6 +593,9 @@ static class PscpCli
                 case "--explain":
                     explain = true;
                     break;
+                case "--pretty":
+                    pretty = true;
+                    break;
                 case "--older":
                     older = true;
                     break;
@@ -599,7 +604,7 @@ static class PscpCli
             }
         }
 
-        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older);
+        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older, pretty);
     }
 
     private static TranspilationOptions CreateTranspilationOptions(string sourcePath, string sourceText, BackendOptions options, string? suffix)
@@ -609,7 +614,8 @@ static class PscpCli
             options.HelperEmission,
             options.Explain,
             options.Older,
-            options.Explain ? sourceText : null);
+            options.Explain ? sourceText : null,
+            options.Pretty);
 
     private static bool HasErrors(IReadOnlyList<Diagnostic> diagnostics)
         => diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);

@@ -44,6 +44,18 @@ internal static class TestRunner
                 "+7 -2147483648",
                 "7\n-2147483648\n"),
             new(
+                "ConstLetLoweringRuntime",
+                """
+                let mod = 16769023
+                let nl = '\n'
+                let msg = "ok"
+                += mod % 10
+                += msg
+                += int nl
+                """,
+                "",
+                "3\nok\n10\n"),
+            new(
                 "LambdaBlockInputShorthand",
                 """
                 int n =
@@ -124,14 +136,12 @@ internal static class TestRunner
                 "DefaultRangeStepSemantics",
                 """
                 let forward = [1..3]
-                let descendingDefault = [3..1]
                 let descendingStepped = [3..-1..1]
                 += forward
-                += descendingDefault.Length
                 += descendingStepped
                 """,
                 "",
-                "1 2 3\n0\n3 2 1\n"),
+                "1 2 3\n3 2 1\n"),
             new(
                 "HelpersAndDirectApi",
                 """
@@ -207,6 +217,24 @@ internal static class TestRunner
                 """,
                 "",
                 "1\n"),
+            new(
+                "RecordPrimaryConstructorGeneratorMax",
+                """
+                record struct Dish(long T, long A, long B) {
+                    operator<=>(other) => T <=> other.T
+                }
+
+                int n =
+                let dishes = [0..<n -> _ {
+                    long t, a, b =
+                    new Dish(t, a, b)
+                }]
+
+                var result = max (dishes -> x do x.A + x.B)
+                += result
+                """,
+                "2\n1 2 3\n2 10 20\n",
+                "30\n"),
             new(
                 "ClassMembersNamedArgsAndCStyleFor",
                 """
@@ -313,6 +341,32 @@ internal static class TestRunner
                 """,
                 "",
                 "124\nTrue\nFalse\n123\n"),
+            new(
+                "PipeConversionAndShadowedAggregationBindings",
+                """
+                int n =
+                int[n][n] a =
+                int[n][n] b =
+
+                = sum (0..<n -> a do
+                    sum (0..<n -> b do
+                        (0..<n).Any(c => a[a][c] is 1 and b[c][b] is 1) |> int
+                    )
+                )
+                """,
+                "2\n1 0\n0 1\n1 0\n0 1\n",
+                "2"),
+            new(
+                "StatementLoopShadowedBinding",
+                """
+                int n = 3
+                int[] a = [10, 20, 30]
+                mut int total = 0
+                for a in 0..<n do total += a
+                += total
+                """,
+                "",
+                "3\n"),
             new(
                 "GeneratorAndValueAssignment",
                 """
@@ -735,10 +789,13 @@ internal static class TestRunner
         }
 
         VerifyBinaryMinMaxLowering(failures);
+        VerifyConstLetLowering(failures);
+        VerifyPipeConversionAndShadowedBindingLowering(failures);
         VerifyDirectRangeBuilderLowering(failures);
         VerifyDirectGeneratorAggregateLowering(failures);
         VerifyDirectRangeCollectionLowering(failures);
         VerifyDirectFastForLowering(failures);
+        VerifyRecordPrimaryConstructorMaxAndRangeLowering(failures);
         VerifyInterpolatedStringLowering(failures);
         VerifyDotNetPassThroughLowering(failures);
         VerifyStructObjectInitializerLowering(failures);
@@ -761,6 +818,7 @@ internal static class TestRunner
         VerifyCompactPrunesStdoutRender(failures);
         VerifyStringSplitCopyOutputStaysCompact(failures);
         VerifyDictionaryIndexTypeAvoidsStdoutFallback(failures);
+        VerifyRuntimeHelperFormatting(failures);
         VerifyEmptyMinMaxPolicy(failures);
         VerifyMathIntrinsicLowering(failures);
         VerifyV06MathLowering(failures);
@@ -774,6 +832,7 @@ internal static class TestRunner
         await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
         await VerifyLanguageServerLoopBlockAndIndexerDiagnosticsAsync(failures);
         await VerifyLanguageServerCollectionMutationAndNullableLoopAsync(failures);
+        await VerifyLanguageServerRecordCollectionInferenceAndRenameAsync(failures);
 
         if (failures.Count > 0)
         {
@@ -815,6 +874,79 @@ internal static class TestRunner
             || !result.CSharpCode.Contains("System.Math.Max(a, b)", StringComparison.Ordinal))
         {
             failures.Add($"BinaryMinMaxLowering: expected System.Math lowering not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyConstLetLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                let mod = 16769023
+                let big = 16769023L
+                let pi = 3.5
+                let ok = true
+                let nl = '\n'
+                let msg = "hello"
+                var mutable = 1
+                let runtime = mod + mutable
+                += runtime
+                """),
+            new TranspilationOptions("Pscp.Generated", "ConstLetLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ConstLetLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("const int mod = 16769023;", StringComparison.Ordinal)
+            || !userCode.Contains("const long big = 16769023L;", StringComparison.Ordinal)
+            || !userCode.Contains("const double pi = 3.5;", StringComparison.Ordinal)
+            || !userCode.Contains("const bool ok = true;", StringComparison.Ordinal)
+            || !userCode.Contains("const char nl = '\\n';", StringComparison.Ordinal)
+            || !userCode.Contains("const string msg = \"hello\";", StringComparison.Ordinal)
+            || !userCode.Contains("var mutable = 1;", StringComparison.Ordinal)
+            || userCode.Contains("const int runtime", StringComparison.Ordinal)
+            || userCode.Contains("var mod = 16769023;", StringComparison.Ordinal))
+        {
+            failures.Add($"ConstLetLowering: expected immutable literal let bindings to lower to C# const only when safe\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyPipeConversionAndShadowedBindingLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n =
+                int[n][n] a =
+                int[n][n] b =
+
+                = sum (0..<n -> a do
+                    sum (0..<n -> b do
+                        (0..<n).Any(c => a[a][c] is 1 and b[c][b] is 1) |> int
+                    )
+                )
+                """),
+            new TranspilationOptions("Pscp.Generated", "PipeConversionAndShadowedBindingLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"PipeConversionAndShadowedBindingLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("? 1 : 0", StringComparison.Ordinal)
+            || userCode.Contains("Convert.ToInt32", StringComparison.Ordinal)
+            || userCode.Contains("for (int a =", StringComparison.Ordinal)
+            || userCode.Contains("for (int b =", StringComparison.Ordinal)
+            || !userCode.Contains("a[__", StringComparison.Ordinal)
+            || !userCode.Contains("b[c][__", StringComparison.Ordinal))
+        {
+            failures.Add($"PipeConversionAndShadowedBindingLowering: expected direct bool-to-int pipe and generated binding aliases\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -956,6 +1088,46 @@ internal static class TestRunner
             || userCode.Contains("__PscpSeq.rangeInt", StringComparison.Ordinal))
         {
             failures.Add($"DirectFastForLowering: expected direct range loop not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyRecordPrimaryConstructorMaxAndRangeLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                record struct Dish(long T, long A, long B) {
+                    operator<=>(other) => T <=> other.T
+                }
+
+                int n =
+                let dishes = [0..<n -> _ {
+                    long t, a, b =
+                    new Dish(t, a, b)
+                }]
+
+                var result = max (dishes -> x do x.A + x.B)
+                += result
+                """),
+            new TranspilationOptions("Pscp.Generated", "RecordPrimaryConstructorMaxAndRangeProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"RecordPrimaryConstructorMaxAndRangeLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (!userCode.Contains("Dish[] dishes = new Dish[n];", StringComparison.Ordinal)
+            || !userCode.Contains("long result = default!;", StringComparison.Ordinal)
+            || !userCode.Contains("foreach (var x in dishes)", StringComparison.Ordinal)
+            || userCode.Contains("object result", StringComparison.Ordinal)
+            || userCode.Contains("Comparer<object>", StringComparison.Ordinal)
+            || userCode.Contains("Enumerable.Select", StringComparison.Ordinal)
+            || userCode.Contains("0 < n ?", StringComparison.Ordinal)
+            || userCode.Contains(": 0", StringComparison.Ordinal))
+        {
+            failures.Add($"RecordPrimaryConstructorMaxAndRangeLowering: expected typed direct max/range lowering not found\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1651,6 +1823,52 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyRuntimeHelperFormatting(List<string> failures)
+    {
+        string source = NormalizeSource(
+            """
+            += 1
+            """);
+
+        TranspilationResult compactResult = PscpTranspiler.Transpile(
+            source,
+            new TranspilationOptions("Pscp.Generated", "CompactRuntimeFormattingProgram", HelperEmissionMode.Verbose));
+
+        if (compactResult.Diagnostics.Count > 0)
+        {
+            failures.Add($"RuntimeHelperFormattingCompact: unexpected diagnostics\n{FormatDiagnostics(compactResult.Diagnostics)}");
+            return;
+        }
+
+        string compactRuntime = GetRuntimeCodePortion(compactResult.CSharpCode);
+        if (!compactRuntime.Contains("public static class __PscpArray{", StringComparison.Ordinal)
+            || compactRuntime.Contains("public static class __PscpArray\n{", StringComparison.Ordinal)
+            || compactRuntime.Contains("\n    public static T[] zero", StringComparison.Ordinal)
+            || !compactRuntime.Contains("#if DEBUG\n", StringComparison.Ordinal)
+            || !compactRuntime.Contains("\n#endif\n", StringComparison.Ordinal))
+        {
+            failures.Add($"RuntimeHelperFormattingCompact: expected compact one-line helper output with line-safe preprocessor directives\nGenerated:\n{compactResult.CSharpCode}");
+        }
+
+        TranspilationResult prettyResult = PscpTranspiler.Transpile(
+            source,
+            new TranspilationOptions("Pscp.Generated", "PrettyRuntimeFormattingProgram", HelperEmissionMode.Verbose, Pretty: true));
+
+        if (prettyResult.Diagnostics.Count > 0)
+        {
+            failures.Add($"RuntimeHelperFormattingPretty: unexpected diagnostics\n{FormatDiagnostics(prettyResult.Diagnostics)}");
+            return;
+        }
+
+        string prettyRuntime = GetRuntimeCodePortion(prettyResult.CSharpCode);
+        if (!prettyRuntime.Contains("public static class __PscpArray {", StringComparison.Ordinal)
+            || prettyRuntime.Contains("public static class __PscpArray\n{", StringComparison.Ordinal)
+            || !prettyRuntime.Contains("public static T[] fillNew<T>(int n) where T : new() {", StringComparison.Ordinal))
+        {
+            failures.Add($"RuntimeHelperFormattingPretty: expected K&R helper style when Pretty is enabled\nGenerated:\n{prettyResult.CSharpCode}");
+        }
+    }
+
     private static bool HasUnguardedSequenceEmptyThrow(string csharpCode)
     {
         const string marker = "throw new InvalidOperationException(\"Sequence contains no elements.\")";
@@ -1984,6 +2202,51 @@ internal static class TestRunner
         }
     }
 
+    private static async Task VerifyLanguageServerRecordCollectionInferenceAndRenameAsync(List<string> failures)
+    {
+        const string source = """
+            record struct Dish(long A, long B) {}
+
+            let dishes = [new Dish(1, 2)]
+            let sorted = dishes.sort()
+            let best = max (dishes -> x do x.A + x.B)
+            += sorted[0].A + best
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        IReadOnlyList<string> diagnostics = await session.ReadDiagnosticsAsync();
+        if (diagnostics.Count != 0)
+        {
+            failures.Add($"LanguageServerRecordCollectionInferenceAndRename: expected no diagnostics\nActual: {string.Join(" | ", diagnostics)}");
+        }
+
+        IReadOnlyList<string> inlayHints = await session.RequestInlayHintLabelsAsync();
+        if (inlayHints.Count(label => label == ": Dish[]") < 2 || !inlayHints.Contains(": long", StringComparer.Ordinal))
+        {
+            failures.Add($"LanguageServerRecordCollectionInferenceAndRename: expected Dish[]/long inlay hints\nActual: {string.Join(", ", inlayHints)}");
+        }
+
+        IReadOnlyList<string> memberLabels = await session.RequestCompletionLabelsAsync(line: 5, character: 13);
+        if (!memberLabels.Contains("A", StringComparer.Ordinal)
+            || !memberLabels.Contains("B", StringComparer.Ordinal)
+            || memberLabels.Contains("sort", StringComparer.Ordinal))
+        {
+            failures.Add($"LanguageServerRecordCollectionInferenceAndRename: expected record member completions for indexed element\nActual: {string.Join(", ", memberLabels)}");
+        }
+
+        int lambdaRenameEditCount = await session.RequestRenameEditCountAsync(line: 4, character: 26, newName: "dish");
+        if (lambdaRenameEditCount != 3)
+        {
+            failures.Add($"LanguageServerRecordCollectionInferenceAndRename: expected 3 lambda rename edits, got {lambdaRenameEditCount}");
+        }
+
+        int memberRenameEditCount = await session.RequestRenameEditCountAsync(line: 0, character: 24, newName: "Alpha");
+        if (memberRenameEditCount != 3)
+        {
+            failures.Add($"LanguageServerRecordCollectionInferenceAndRename: expected 3 record member rename edits, got {memberRenameEditCount}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -2039,6 +2302,12 @@ internal static class TestRunner
             .Min();
 
         return index >= 0 ? generatedCode[..index] : generatedCode;
+    }
+
+    private static string GetRuntimeCodePortion(string generatedCode)
+    {
+        string userCode = GetUserCodePortion(generatedCode);
+        return userCode.Length < generatedCode.Length ? generatedCode[userCode.Length..] : string.Empty;
     }
 
     private static string CreateProjectFile()
@@ -2205,6 +2474,29 @@ internal static class TestRunner
 
             response.Dispose();
             return count;
+        }
+
+        public async Task<IReadOnlyList<string>> RequestInlayHintLabelsAsync()
+        {
+            int id = _nextRequestId++;
+            string request = "{\"jsonrpc\":\"2.0\",\"id\":" + id
+                + ",\"method\":\"textDocument/inlayHint\",\"params\":{\"textDocument\":{\"uri\":\"" + _uri
+                + "\"},\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":200,\"character\":0}}}}";
+            await SendAsync(request);
+            JsonDocument response = await ReadMessageAsync();
+            List<string> labels = [];
+            if (response.RootElement.TryGetProperty("result", out JsonElement result)
+                && result.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement item in result.EnumerateArray())
+                {
+                    JsonElement label = item.GetProperty("label");
+                    labels.Add(label.ValueKind == JsonValueKind.String ? label.GetString() ?? string.Empty : label.ToString());
+                }
+            }
+
+            response.Dispose();
+            return labels;
         }
 
         public async Task SendDidChangeAsync(string source, int version)

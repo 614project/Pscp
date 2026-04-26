@@ -179,9 +179,9 @@ internal static class PscpSemanticAnalyzer
             _types.TryAdd(declaration.Name, info);
             if (parent is not null) parent.NestedTypes.TryAdd(declaration.Name, info);
 
-            foreach (string primaryMember in GetPrimaryConstructorMembers(declaration))
+            foreach ((string primaryMember, TypeSyntax? primaryType) in GetPrimaryConstructorMembers(declaration))
             {
-                info.Members.TryAdd(primaryMember, new Symbol(SymbolKind.Field, null, true));
+                info.Members.TryAdd(primaryMember, new Symbol(SymbolKind.Field, Normalize(primaryType), true));
             }
 
             foreach (TypeMember member in declaration.Members)
@@ -2152,17 +2152,44 @@ internal static class PscpSemanticAnalyzer
         }
 
 
-        private static IEnumerable<string> GetPrimaryConstructorMembers(TypeDeclaration declaration)
+        private static IEnumerable<(string Name, TypeSyntax? Type)> GetPrimaryConstructorMembers(TypeDeclaration declaration)
         {
             int open = declaration.HeaderText.IndexOf('(');
             int close = declaration.HeaderText.LastIndexOf(')');
             if (open < 0 || close <= open) yield break;
 
             string parameterText = declaration.HeaderText[(open + 1)..close];
-            foreach (Match match in Regex.Matches(parameterText, @"(?:^|,)\s*(?:ref|out|in\s+)?[A-Za-z_][A-Za-z0-9_<>.,\[\]]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?=,|$)"))
+            foreach (string parameter in SplitTopLevelCommaSeparated(parameterText))
             {
-                if (match.Groups.Count > 1) yield return match.Groups[1].Value;
+                if (TryParsePrimaryConstructorParameter(parameter, out string? name, out TypeSyntax? type))
+                {
+                    yield return (name!, type);
+                }
             }
+        }
+
+        private static bool TryParsePrimaryConstructorParameter(string parameterText, out string? name, out TypeSyntax? type)
+        {
+            name = null;
+            type = null;
+
+            string trimmed = parameterText.Trim();
+            if (trimmed.Length == 0)
+            {
+                return false;
+            }
+
+            trimmed = Regex.Replace(trimmed, @"^(?:ref|out|in)\s+", string.Empty);
+            Match match = Regex.Match(trimmed, @"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=.*)?$");
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            name = match.Groups[1].Value;
+            string typeText = trimmed[..match.Index].Trim();
+            type = ParseTypeText(typeText);
+            return type is not null;
         }
 
         private static IEnumerable<string> GetCStyleForHeaderBindings(string headerText)
