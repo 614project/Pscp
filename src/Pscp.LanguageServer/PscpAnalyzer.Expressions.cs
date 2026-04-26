@@ -650,6 +650,138 @@ internal sealed partial class PscpAnalyzer
             return type is not null;
         }
 
+        if (TryInferKnownMemberCallType(state, scope, start, openParen, out type))
+        {
+            return type is not null;
+        }
+
+        return false;
+    }
+
+    private bool TryInferKnownMemberCallType(AnalyzerState state, Scope scope, int start, int openParen, out string? type)
+    {
+        type = null;
+        int dot = -1;
+        int searchStart = start;
+        while (true)
+        {
+            int nextDot = FindTopLevelToken(state.Tokens, searchStart, openParen, TokenKind.Dot);
+            if (nextDot < 0)
+            {
+                break;
+            }
+
+            dot = nextDot;
+            searchStart = nextDot + 1;
+        }
+
+        if (dot < 0 || dot + 1 >= openParen || !IsIdentifier(state.Tokens, dot + 1))
+        {
+            return false;
+        }
+
+        string memberName = state.Tokens[dot + 1].Text;
+        string? receiverType = InferExpressionType(state, scope, start, dot);
+        string receiverName = receiverType ?? BuildCompactText(state.Tokens, start, dot);
+        bool instanceContext = receiverType is not null;
+        if (instanceContext && IsCollectionLikeReceiver(receiverName, instanceContext)
+            && TryInferCollectionMemberReturnType(receiverName, memberName, out type))
+        {
+            return type is not null;
+        }
+
+        return TryInferKnownExternalMemberReturnType(receiverName, instanceContext, memberName, out type);
+    }
+
+    private static bool TryInferCollectionMemberReturnType(string receiverType, string memberName, out string? type)
+    {
+        type = null;
+        string? elementType = InferElementType(receiverType);
+        if (string.IsNullOrWhiteSpace(elementType))
+        {
+            return false;
+        }
+
+        type = memberName switch
+        {
+            "sum" or "min" or "max" or "minBy" or "maxBy" => elementType,
+            "count" or "findIndex" or "findLastIndex" => "int",
+            "any" or "all" => "bool",
+            "find" => $"{elementType}?",
+            "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" => $"{elementType}[]",
+            "groupCount" or "freq" or "index" => $"Dictionary<{elementType}, int>",
+            "map" or "filter" or "fold" or "scan" or "mapFold" => null,
+            _ => null,
+        };
+        return type is not null;
+    }
+
+    private static string? InferElementType(string type)
+    {
+        string normalized = type.Trim();
+        if (normalized.EndsWith("?", StringComparison.Ordinal))
+        {
+            normalized = normalized[..^1];
+        }
+
+        if (normalized.EndsWith("[]", StringComparison.Ordinal))
+        {
+            return normalized[..^2];
+        }
+
+        int open = normalized.IndexOf('<');
+        int close = normalized.LastIndexOf('>');
+        if (open > 0 && close > open)
+        {
+            string name = PscpExternalMetadata.NormalizeTypeReceiver(normalized[..open]);
+            if (name is "IEnumerable" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet")
+            {
+                return normalized[(open + 1)..close].Trim();
+            }
+        }
+
+        return normalized is "string" or "String" ? "char" : null;
+    }
+
+    private static bool TryInferKnownExternalMemberReturnType(string receiverName, bool instanceContext, string memberName, out string? type)
+    {
+        type = null;
+        string normalized = PscpExternalMetadata.NormalizeTypeReceiver(receiverName);
+        if (instanceContext && normalized == "String")
+        {
+            type = memberName switch
+            {
+                "Length" or "IndexOf" or "LastIndexOf" => "int",
+                "Contains" or "StartsWith" or "EndsWith" => "bool",
+                "Split" => "string[]",
+                "ToCharArray" => "char[]",
+                "Substring" or "Replace" or "Trim" or "TrimStart" or "TrimEnd" or "ToLower" or "ToUpper" => "string",
+                _ => null,
+            };
+            return type is not null;
+        }
+
+        if (!instanceContext && normalized == "Console")
+        {
+            type = memberName switch
+            {
+                "ReadLine" => "string?",
+                "Write" or "WriteLine" => "void",
+                _ => null,
+            };
+            return type is not null;
+        }
+
+        if (!instanceContext && normalized == "Math")
+        {
+            type = memberName switch
+            {
+                "Sqrt" or "Pow" or "Log" or "Log10" or "Sin" or "Cos" or "Tan" or "Asin" or "Acos" or "Atan" or "Atan2" => "double",
+                _ => null,
+            };
+            return type is not null;
+        }
+
         return false;
     }
 

@@ -343,7 +343,11 @@ internal sealed partial class CSharpEmitter
                 public static T min<T>(this IEnumerable<T> source)
                 {
                     using IEnumerator<T> enumerator = source.GetEnumerator();
+                #if DEBUG
                     if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
+                #else
+                    enumerator.MoveNext();
+                #endif
                     T best = enumerator.Current;
                     while (enumerator.MoveNext())
                     {
@@ -359,7 +363,11 @@ internal sealed partial class CSharpEmitter
                 public static T max<T>(this IEnumerable<T> source)
                 {
                     using IEnumerator<T> enumerator = source.GetEnumerator();
+                #if DEBUG
                     if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
+                #else
+                    enumerator.MoveNext();
+                #endif
                     T best = enumerator.Current;
                     while (enumerator.MoveNext())
                     {
@@ -375,7 +383,11 @@ internal sealed partial class CSharpEmitter
                 public static T minBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> selector)
                 {
                     using IEnumerator<T> enumerator = source.GetEnumerator();
+                #if DEBUG
                     if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
+                #else
+                    enumerator.MoveNext();
+                #endif
                     T bestItem = enumerator.Current;
                     TKey bestKey = selector(bestItem);
                     while (enumerator.MoveNext())
@@ -395,7 +407,11 @@ internal sealed partial class CSharpEmitter
                 public static T maxBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> selector)
                 {
                     using IEnumerator<T> enumerator = source.GetEnumerator();
+                #if DEBUG
                     if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
+                #else
+                    enumerator.MoveNext();
+                #endif
                     T bestItem = enumerator.Current;
                     TKey bestKey = selector(bestItem);
                     while (enumerator.MoveNext())
@@ -1484,7 +1500,7 @@ internal sealed partial class CSharpEmitter
         builder.AppendLine("    public void flush() => _writer.Flush();");
         builder.AppendLine();
 
-        foreach (string kind in _stdoutDirectScalarKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        foreach (string kind in _stdoutDirectScalarWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
         {
             builder.AppendLine(kind switch
             {
@@ -1497,8 +1513,12 @@ internal sealed partial class CSharpEmitter
                 "string" => "    public void write(string? value) => _writer.Write(value ?? string.Empty);",
                 _ => string.Empty,
             });
+        }
 
-            builder.AppendLine(
+        foreach (string kind in _stdoutDirectScalarWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            AppendStdoutMember(
+                builder,
                 kind switch
                 {
                     "int" => """
@@ -1554,213 +1574,270 @@ internal sealed partial class CSharpEmitter
                 });
         }
 
-        foreach (string kind in _stdoutDirectNullableScalarKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        foreach (string kind in _stdoutDirectNullableScalarWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
         {
-            builder.AppendLine(kind switch
-            {
-                "int" => """
-                    public void write(int? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(int? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "long" => """
-                    public void write(long? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(long? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "double" => """
-                    public void write(double? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(double? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "decimal" => """
-                    public void write(decimal? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(decimal? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "bool" => """
-                    public void write(bool? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(bool? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "char" => """
-                    public void write(char? value)
-                    {
-                        if (value.HasValue) write(value.GetValueOrDefault());
-                    }
-
-                    public void writeln(char? value)
-                    {
-                        write(value);
-                        _writer.WriteLine();
-                    }
-                    """,
-                _ => string.Empty,
-            });
+            AppendStdoutMember(
+                builder,
+                kind switch
+                {
+                    "int" => """
+                        public void write(int? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    "long" => """
+                        public void write(long? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    "double" => """
+                        public void write(double? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    "decimal" => """
+                        public void write(decimal? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    "bool" => """
+                        public void write(bool? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    "char" => """
+                        public void write(char? value)
+                        {
+                            if (value.HasValue) write(value.GetValueOrDefault());
+                        }
+                        """,
+                    _ => string.Empty,
+                });
         }
 
-        if (_stdoutDirectScalarKinds.Count == 0)
+        foreach (string kind in _stdoutDirectNullableScalarWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            AppendStdoutMember(
+                builder,
+                kind switch
+                {
+                    "int" => """
+                        public void writeln(int? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "long" => """
+                        public void writeln(long? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "double" => """
+                        public void writeln(double? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "decimal" => """
+                        public void writeln(decimal? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "bool" => """
+                        public void writeln(bool? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "char" => """
+                        public void writeln(char? value)
+                        {
+                            write(value);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    _ => string.Empty,
+                });
+        }
+
+        if (_stdoutNeedsBlankLine)
         {
             builder.AppendLine("    public void writeln() => _writer.WriteLine();");
         }
 
-        foreach (string kind in _stdoutDirectArrayKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        foreach (string kind in _stdoutDirectArrayWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
         {
-            builder.AppendLine(kind switch
-            {
-                "int" => """
-                    public void write(int[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+            AppendStdoutMember(
+                builder,
+                kind switch
+                {
+                    "int" => """
+                        public void write(int[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(int[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "long" => """
-                    public void write(long[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "long" => """
+                        public void write(long[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(long[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "double" => """
-                    public void write(double[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "double" => """
+                        public void write(double[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(double[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "decimal" => """
-                    public void write(decimal[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "decimal" => """
+                        public void write(decimal[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(decimal[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "bool" => """
-                    public void write(bool[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "bool" => """
+                        public void write(bool[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(bool[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "char" => """
-                    public void write(char[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "char" => """
+                        public void write(char[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
-
-                    public void writeln(char[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                "string" => """
-                    public void write(string[] values)
-                    {
-                        for (int i = 0; i < values.Length; i++)
+                        """,
+                    "string" => """
+                        public void write(string[] values)
                         {
-                            if (i > 0) _writer.Write(' ');
-                            write(values[i]);
+                            for (int i = 0; i < values.Length; i++)
+                            {
+                                if (i > 0) _writer.Write(' ');
+                                write(values[i]);
+                            }
                         }
-                    }
+                        """,
+                    _ => string.Empty,
+                });
+        }
 
-                    public void writeln(string[] values)
-                    {
-                        write(values);
-                        _writer.WriteLine();
-                    }
-                    """,
-                _ => string.Empty,
-            });
+        foreach (string kind in _stdoutDirectArrayWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
+        {
+            AppendStdoutMember(
+                builder,
+                kind switch
+                {
+                    "int" => """
+                        public void writeln(int[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "long" => """
+                        public void writeln(long[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "double" => """
+                        public void writeln(double[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "decimal" => """
+                        public void writeln(decimal[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "bool" => """
+                        public void writeln(bool[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "char" => """
+                        public void writeln(char[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    "string" => """
+                        public void writeln(string[] values)
+                        {
+                            write(values);
+                            _writer.WriteLine();
+                        }
+                        """,
+                    _ => string.Empty,
+                });
         }
 
         builder.AppendLine("}");
         WriteRuntimeBlock(builder.ToString());
+    }
+
+    private static void AppendStdoutMember(System.Text.StringBuilder builder, string member)
+    {
+        if (string.IsNullOrWhiteSpace(member))
+        {
+            return;
+        }
+
+        foreach (string line in member.Replace("\r", string.Empty).TrimEnd('\n').Split('\n'))
+        {
+            if (line.Length == 0)
+            {
+                builder.AppendLine();
+                continue;
+            }
+
+            builder.Append("    ");
+            builder.AppendLine(line);
+        }
     }
 
     private void EmitRenderHelpers()

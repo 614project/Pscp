@@ -407,12 +407,12 @@ internal static class PscpSemanticAnalyzer
                     break;
                 case IfStatement ifStatement:
                     AnalyzeExpression(ifStatement.Condition, scope);
-                    AnalyzeStatement(ifStatement.ThenBranch, new Scope(scope));
-                    if (ifStatement.ElseBranch is not null) AnalyzeStatement(ifStatement.ElseBranch, new Scope(scope));
+                    AnalyzeStatement(ifStatement.ThenBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: true));
+                    if (ifStatement.ElseBranch is not null) AnalyzeStatement(ifStatement.ElseBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: false));
                     break;
                 case WhileStatement whileStatement:
                     AnalyzeExpression(whileStatement.Condition, scope);
-                    AnalyzeStatement(whileStatement.Body, new Scope(scope));
+                    AnalyzeStatement(whileStatement.Body, CreateConditionScope(scope, whileStatement.Condition, assumeTrue: true));
                     break;
                 case ForInStatement forIn:
                     AnalyzeExpression(forIn.Source, scope);
@@ -1310,6 +1310,11 @@ internal static class PscpSemanticAnalyzer
                 return TypeName("int");
             }
 
+            if (TryInferKnownExternalMemberType(receiverName, effectiveReceiverType, hasTypeLikeReceiver, memberName, out TypeSyntax? knownExternalType))
+            {
+                return knownExternalType;
+            }
+
             return null;
         }
 
@@ -2037,6 +2042,113 @@ internal static class PscpSemanticAnalyzer
                     }
                     break;
             }
+        }
+
+        private Scope CreateConditionScope(Scope parent, Expression condition, bool assumeTrue)
+        {
+            Scope narrowed = new(parent);
+            ApplyNonNullConditionNarrowing(parent, narrowed, condition, assumeTrue);
+            return narrowed;
+        }
+
+        private static void ApplyNonNullConditionNarrowing(Scope sourceScope, Scope targetScope, Expression condition, bool assumeTrue)
+        {
+            if (!TryGetNullComparisonCandidate(condition, out Expression? candidate, out bool isNonNullWhenTrue)
+                || candidate is null
+                || assumeTrue != isNonNullWhenTrue
+                || !TryGetNarrowableIdentifier(candidate, out string? name)
+                || name is null
+                || !sourceScope.TryResolveValue(name, out Symbol? symbol)
+                || symbol?.Type is not NullableTypeSyntax nullable)
+            {
+                return;
+            }
+
+            targetScope.DeclareValue(name, symbol with { Type = nullable.InnerType });
+        }
+
+        private static bool TryGetNullComparisonCandidate(Expression condition, out Expression? candidate, out bool isNonNullWhenTrue)
+        {
+            candidate = null;
+            isNonNullWhenTrue = false;
+            if (condition is not BinaryExpression binary
+                || binary.Operator is not (BinaryOperator.Equal or BinaryOperator.NotEqual))
+            {
+                return false;
+            }
+
+            if (IsNullLiteral(binary.Left))
+            {
+                candidate = binary.Right;
+            }
+            else if (IsNullLiteral(binary.Right))
+            {
+                candidate = binary.Left;
+            }
+            else
+            {
+                return false;
+            }
+
+            isNonNullWhenTrue = binary.Operator == BinaryOperator.NotEqual;
+            return true;
+        }
+
+        private static bool TryGetNarrowableIdentifier(Expression expression, out string? name)
+        {
+            switch (expression)
+            {
+                case IdentifierExpression identifier:
+                    name = identifier.Name;
+                    return true;
+                case AssignmentExpression { Target: IdentifierExpression identifier, Operator: AssignmentOperator.Assign }:
+                    name = identifier.Name;
+                    return true;
+                default:
+                    name = null;
+                    return false;
+            }
+        }
+
+        private static bool IsNullLiteral(Expression expression)
+            => expression is LiteralExpression { Kind: LiteralKind.Null };
+
+        private static bool TryInferKnownExternalMemberType(
+            string receiverName,
+            TypeSyntax? receiverType,
+            bool hasTypeLikeReceiver,
+            string memberName,
+            out TypeSyntax? type)
+        {
+            type = null;
+            if (hasTypeLikeReceiver)
+            {
+                type = receiverName switch
+                {
+                    "Console" when memberName == "ReadLine" => new NullableTypeSyntax(TypeName("string")),
+                    "Console" when memberName is "Write" or "WriteLine" => TypeName("void"),
+                    "Math" when memberName is "Sqrt" or "Pow" or "Log" or "Log10" or "Sin" or "Cos" or "Tan" or "Asin" or "Acos" or "Atan" or "Atan2" => TypeName("double"),
+                    "Math" when memberName is "Abs" or "Min" or "Max" => null,
+                    _ => null,
+                };
+                return type is not null;
+            }
+
+            if (receiverType is NamedTypeSyntax { Name: "string" or "String" })
+            {
+                type = memberName switch
+                {
+                    "Length" or "IndexOf" or "LastIndexOf" => TypeName("int"),
+                    "Contains" or "StartsWith" or "EndsWith" => TypeName("bool"),
+                    "Split" => new ArrayTypeSyntax(TypeName("string"), 1),
+                    "ToCharArray" => new ArrayTypeSyntax(TypeName("char"), 1),
+                    "Substring" or "Replace" or "Trim" or "TrimStart" or "TrimEnd" or "ToLower" or "ToUpper" => TypeName("string"),
+                    _ => null,
+                };
+                return type is not null;
+            }
+
+            return false;
         }
 
 

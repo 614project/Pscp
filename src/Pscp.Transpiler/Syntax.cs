@@ -116,7 +116,7 @@ public enum HelperEmissionMode
 public static class PscpVersionInfo
 {
     public const string LanguageVersion = "0.6";
-    public const string ToolVersion = "0.6.2";
+    public const string ToolVersion = "0.6.4";
 }
 
 public sealed record Diagnostic(string Message, TextSpan Span, DiagnosticSeverity Severity = DiagnosticSeverity.Error);

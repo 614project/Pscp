@@ -1,21 +1,23 @@
 ﻿# PSCP 
 
+PSCP 언어를 제공하기 위한 도구들(트랜스파일러, 언어 서버, 확장 등)이 준비되어 있는 저장소입니다.
+
 ## 🚀 PSCP 언어 소개
 
-**PSCP**는 알고리즘 문제 해결(PS)과 경쟁 프로그래밍(CP)에 최적화된 새로운 프로그래밍 언어입니다. 
-가장 빠르고 간결하게 의도를 코드로 표현하고, 이를 빠르고 최적화된 **C# 코드로 트랜스파일(Transpile)**하는 것을 목표로 설계되었습니다.
+**PSCP**는 알고리즘 문제 해결(PS)과 경쟁 프로그래밍(CP)에 최적화된 새로운 프로그래밍 언어입니다.
+적게 쓰고 많이 표현하며, 더이상의 장황함은 산출물인 C# 코드에서만 남기도록합니다.
 
-F#은 매우 뛰어난 표현력을 가집니다. 특히 컬렉션을 다루는 편리함은 압도적입니다. 하지만 때로는 함수형의 철학을 무시하거나(break, return) C#의 문법 설탕이 절실히 필요해지는 상황이 오기도 합니다. 또한 두 언어 모두 입출력에서 매우 장황하다는 단점을 공유하고 있습니다.
-이를 해소하기 위해 PSCP라는 언어를 새로 고안하게 되었습니다. 최대한 많은걸 표현하도록 최적화된 문법과, 풍부한 PSCP상의 API를 제공하여, 적게 쓰고 더 많이 표현할수 있게 합니다.
+F#은 매우 뛰어난 표현력을 가집니다. 특히 컬렉션을 다루는 편리함은 압도적입니다. 하지만 때로는 `break`, `return` 등 함수형의 철학을 무시하거나, C#의 문법 설탕이 그리운 상황이 오기도 합니다. 또한 두 언어 모두 입출력에서 매우 장황하다는 단점을 공유하고 있습니다.  
+이를 해소하기 위해 PSCP라는 언어를 새로 고안하게 되었습니다. 두 언어의 장점을 더 간결한 표현으로 가져올수 있게 합니다.
 
 ---
 
 ## ✨ 핵심 철학
 
-* **반복 작업의 최소화:** 입력 파싱, 배열 생성, 범위 순회 등 PS에서 매번 작성하는 귀찮은 보일러플레이트 코드를 언어 차원의 문법 설탕(Syntax Sugar)으로 대폭 줄였습니다.
-* **직관적이고 짧은 문법:** 코드의 길이를 줄여 타이핑 시간을 단축하고 버그 발생 확률을 낮춥니다.
-* **제로 코스트 추상화:** 문법 설탕은 런타임 오버헤드를 발생시키지 않습니다. 불필요한 배열 생성이나 LINQ 체인 대신, 트랜스파일러가 직접적이고 빠른 C# 코드로 변환합니다.
-* **기본 불변성(Default Immutability):** 변수는 기본적으로 불변(`let`)이며, 필요할 때만 가변(`var`, `mut`)으로 선언하여 사이드 이펙트를 통제합니다.
+* **반복 작업의 최소화:** 입력 파싱, 출력 형식, 배열 생성, 범위 순회 등 PS에서 매번 작성하는 귀찮은 보일러플레이트 코드를 언어 차원의 문법 설탕(Syntax Sugar)으로 대폭 줄였습니다.
+* **짧고 간결한 문법:** 간결한 키워드와 헬퍼 매서드를 적극 제공하여, 코드 길이를 단축하고 의도하던 로직에 빠르게 도달할수 있게 합니다.
+* **릴리즈 제로 코스트 추상화:** 문법 설탕이 런타임 오버헤드를 발생시키지 않도록 합니다. 불필요한 배열 생성이나 LINQ 체인 대신, 트랜스파일러가 직접적이고 빠른 C# 코드로 변환하며, 안정성을 위한 코드들은 모두 전처리기 지시문으로 디버깅에서만 동작하게 하여 문제를 조기에 확인할수 있게 합니다.
+* **기본 불변성(Default Immutability):** 변수는 기본적으로 불변(`let`)이며, 필요할 때만 가변(`var`, `mut`)으로 선언하여 사이드 이펙트를 통제합니다. 하지만 이는 강제가 아니며, 트랜스파일러 차원에서 경고하며 의도적인 위반에 간섭하지 않는 융통성을 챙깁니다.
 
 ---
 
@@ -108,7 +110,7 @@ bool union(int a, int b) {
     if a == b then
         false
 
-    if size[a] < size[b] {
+    if parent[a] < parent[b] {
         (a, b) = (b, a) // 튜플 스왑
     }
 
@@ -131,22 +133,12 @@ query -> q {
 
 ## 빠른 시작
 
-.NET 10 이상의 [SDK](https://dotnet.microsoft.com/)를 설치한 후, installer/Build-Installer.ps1 을 실행하면 artifacts/installer/setup 폴더에 setup.exe라는 파일명으로 pscp의 SDK 설치 파일이 생성되는데, 이를 설치하시면 됩니다.  
-이후 원하는 폴더에서 ``main.pscp`` 파일을 생성하고, pscp 코드를 작성한 후 터미널에 ``pscp run``를 입력하면 실행 결과를 바로 볼수 있습니다.
+.NET 10 이상의 [SDK](https://dotnet.microsoft.com/)를 설치한 후, `installer/Build-Installer.ps1` 을 실행하면 `artifacts/installer/setup` 폴더에 `setup.exe`라는 파일명으로 pscp의 SDK 설치 파일이 생성되는데, 이를 설치하시면 됩니다.  
+이후 원하는 폴더에서 `main.pscp` 파일을 생성하고, pscp 코드를 작성한 후 터미널에 `pscp run`를 입력하면 실행 결과를 바로 볼수 있습니다.
 
 ## 구성
 
-이 저장소에는 다음 구현이 들어 있습니다.
-
-- C# 기반 `pscp` 트랜스파일러
-- SDK 스타일 `pscp` CLI
-- stdio 기반 `pscp` 언어 서버
-- `.pscp` 파일용 VS Code 확장
-- Windows 설치 프로그램
-
-언어 및 언어 서버 관련 참고 문서는 [docs](./docs) 아래에 있습니다.
-목록은 다음과 같습니다.
-
+이 저장소에는 다음 구현이 들어 있습니다:
 - `src/Pscp.Transpiler`: `pscp` -> C# 트랜스파일러
 - `src/Pscp.Cli`: CLI 및 SDK 진입점 (`pscp.exe`)
 - `src/Pscp.LanguageServer`: LSP 서버
@@ -155,6 +147,7 @@ query -> q {
 - `vscode/pscp-vscode`: VS Code 확장
 - `vscode/Build-Vsix.ps1`: VSIX 빌드 스크립트
 - `installer/Build-Installer.ps1`: 설치기 빌드 스크립트
+- `docs` : 언어 및 서버 관련 문서
 
 ## 빠른 SDK 빌드
 
@@ -295,13 +288,13 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.2.vsix
+artifacts\vscode\local.pscp-vscode-0.6.4.vsix
 ```
 
 설치 방법:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.2.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.4.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.

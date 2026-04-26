@@ -1037,7 +1037,7 @@ internal sealed partial class CSharpEmitter
     {
         if (declaration.IsInputShorthand)
         {
-            return "throw new InvalidOperationException(\"Input shorthand is not supported in expression blocks.\");";
+            return EmitInlineInputDeclaration(declaration);
         }
 
         if (declaration.Targets.Count == 1 && declaration.Targets[0] is TupleTarget tupleTarget)
@@ -1060,6 +1060,42 @@ internal sealed partial class CSharpEmitter
         string typeText = declaration.ExplicitType is null ? "var" : EmitType(NormalizeSizedType(declaration.ExplicitType));
         string initializerText = declaration.Initializer is null ? EmitImplicitInitializer(declaration.ExplicitType) : EmitExpression(declaration.Initializer, declaration.ExplicitType);
         return $"{typeText} {name} = {initializerText};";
+    }
+
+    private string EmitInlineInputDeclaration(DeclarationStatement declaration)
+    {
+        if (declaration.ExplicitType is null)
+        {
+            return "/* invalid input shorthand */";
+        }
+
+        if (declaration.Targets.Count == 1 && declaration.Targets[0] is TupleTarget tupleTarget)
+        {
+            return $"var {EmitBindingPattern(tupleTarget)} = {EmitInputRead(declaration.ExplicitType)};";
+        }
+
+        if (declaration.Targets.Count > 1)
+        {
+            List<string> parts = [];
+            foreach (BindingTarget target in declaration.Targets)
+            {
+                string readExpression = EmitInputRead(declaration.ExplicitType);
+                parts.Add(target is DiscardTarget
+                    ? $"_ = {readExpression};"
+                    : $"{EmitType(NormalizeSizedType(declaration.ExplicitType))} {EmitBindingPattern(target)} = {readExpression};");
+            }
+
+            return JoinInlineStatements(parts);
+        }
+
+        BindingTarget onlyTarget = declaration.Targets[0];
+        string onlyReadExpression = EmitInputRead(declaration.ExplicitType);
+        if (onlyTarget is DiscardTarget)
+        {
+            return $"_ = {onlyReadExpression};";
+        }
+
+        return $"{EmitType(NormalizeSizedType(declaration.ExplicitType))} {EmitBindingPattern(onlyTarget)} = {onlyReadExpression};";
     }
 
     private string EmitInlineFastFor(FastForStatement fastFor)
@@ -1692,6 +1728,9 @@ internal sealed partial class CSharpEmitter
     private static string EmitEval(string body)
         => $"__PscpThunk.run(() => {{ {body} }})";
 
+    private static string EmitDebugEmptySequenceCheckInline(string hasValueName)
+        => $"\n#if DEBUG\nif (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");\n#endif\n";
+
     private static string? TryGetPreferredBindingName(BindingTarget? target)
         => target switch
         {
@@ -2253,7 +2292,7 @@ internal sealed partial class CSharpEmitter
             GeneratorExpression generator => EmitGeneratedMinMaxLoop(generator, resultType, bestName, hasValueName, preferLower: name == "min"),
             _ => EmitMinMaxLoop(source!, resultType, bestName, hasValueName, preferLower: name == "min"),
         };
-        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop} if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\"); return {bestName};");
+        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
         return true;
     }
 
@@ -2288,7 +2327,7 @@ internal sealed partial class CSharpEmitter
         string selectorExpression = EmitLambdaBodyExpression(selector.Body, null, null, selector.Parameters[0].Target, itemName);
         string comparison = EmitPreferredComparison(keyName, bestKeyName, keyType, preferLower: name == "minBy");
         string loop = EmitLoopOverSource(source!, itemName, $"var {keyName} = {selectorExpression}; if (!{hasValueName} || {comparison}) {{ {bestItemName} = {itemName}; {bestKeyName} = {keyName}; {hasValueName} = true; }}");
-        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestItemName} = default!; {EmitType(keyType)} {bestKeyName} = default!; {loop} if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\"); return {bestItemName};");
+        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestItemName} = default!; {EmitType(keyType)} {bestKeyName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestItemName};");
         return true;
     }
 
@@ -2590,7 +2629,7 @@ internal sealed partial class CSharpEmitter
                 string valueName = NextTemporary("value");
                 string comparison = EmitPreferredComparison(valueName, bestName, resultType, preferLower: aggregation.AggregatorName == "min");
                 string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {comparison}) {{ {bestName} = {valueName}; {hasValueName} = true; }}", indexName);
-                emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop} if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\"); return {bestName};");
+                emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
                 return true;
             }
         }

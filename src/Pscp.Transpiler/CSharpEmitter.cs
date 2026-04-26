@@ -11,11 +11,15 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<DeclarationStatement> _hoistedGlobalDeclarations = [];
     private readonly HashSet<string> _declaredTypeNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectScalarKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectNullableScalarKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectArrayKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectScalarWriteKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectScalarWritelnKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectNullableScalarWriteKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectNullableScalarWritelnKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectArrayWriteKinds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _stdoutDirectArrayWritelnKinds = new(StringComparer.Ordinal);
     private bool _emitStdin;
     private bool _emitStdout;
+    private bool _stdoutNeedsBlankLine;
     private bool _stdoutNeedsFallbackHelpers;
     private int _temporaryId;
 
@@ -1677,7 +1681,7 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine($"bool {hasValueName} = false;");
             _writer.WriteLine($"{typeText} {name} = default!;");
             _writer.WriteLine(EmitLoopOverSource(minMaxSource!, itemName, $"if (!{hasValueName} || {EmitPreferredComparison(itemName, name, declaredType, preferLower: intrinsicName == "min")}) {{ {name} = {itemName}; {hasValueName} = true; }}"));
-            _writer.WriteLine($"if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");");
+            EmitDebugEmptySequenceCheckStatement(hasValueName);
             return true;
         }
 
@@ -1718,7 +1722,7 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine($"{typeText} {name} = default!;");
             _writer.WriteLine($"{EmitType(keyType)} {bestKeyName} = default!;");
             _writer.WriteLine(EmitLoopOverSource(minBySource!, itemName, $"var {keyName} = {selectorExpression}; if (!{hasValueName} || {EmitPreferredComparison(keyName, bestKeyName, keyType, preferLower: intrinsicName == "minBy")}) {{ {name} = {itemName}; {bestKeyName} = {keyName}; {hasValueName} = true; }}"));
-            _writer.WriteLine($"if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");");
+            EmitDebugEmptySequenceCheckStatement(hasValueName);
             return true;
         }
 
@@ -1892,12 +1896,19 @@ internal sealed partial class CSharpEmitter
                         wherePrefix,
                         valueExpression => $"var {valueName} = {valueExpression}; if (!{hasValueName} || {EmitPreferredComparison(valueName, name, declaredType, preferLower: aggregation.AggregatorName == "min")}) {{ {name} = {valueName}; {hasValueName} = true; }}"),
                     indexName));
-                _writer.WriteLine($"if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");");
+                EmitDebugEmptySequenceCheckStatement(hasValueName);
                 return true;
             }
         }
 
         return false;
+    }
+
+    private void EmitDebugEmptySequenceCheckStatement(string hasValueName)
+    {
+        _writer.WriteLine("#if DEBUG");
+        _writer.WriteLine($"if (!{hasValueName}) throw new InvalidOperationException(\"Sequence contains no elements.\");");
+        _writer.WriteLine("#endif");
     }
 
     private string EmitAggregationBodyValueStatement(
@@ -1937,7 +1948,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutType(_semantic.GetExpressionType(call));
+        RegisterStdoutUsage(output.Kind, _semantic.GetExpressionType(call));
         _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
         return true;
     }
@@ -1951,7 +1962,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutType(aggregationType);
+        RegisterStdoutUsage(output.Kind, aggregationType);
         _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
         return true;
     }
@@ -1978,7 +1989,7 @@ internal sealed partial class CSharpEmitter
 
     private string EmitOutputInvocation(OutputKind kind, Expression expression)
     {
-        RegisterStdoutType(_semantic?.GetExpressionType(expression));
+        RegisterStdoutUsage(kind, _semantic?.GetExpressionType(expression));
         return $"stdout.{(kind == OutputKind.Write ? "write" : "writeln")}({EmitExpression(expression)});";
     }
 
@@ -1990,7 +2001,11 @@ internal sealed partial class CSharpEmitter
             case "writeln":
                 if (arguments.Count == 1 && arguments[0] is ExpressionArgumentSyntax expressionArgument)
                 {
-                    RegisterStdoutType(_semantic?.GetExpressionType(expressionArgument.Expression));
+                    RegisterStdoutUsage(memberName == "write" ? OutputKind.Write : OutputKind.WriteLine, _semantic?.GetExpressionType(expressionArgument.Expression));
+                }
+                else if (memberName == "writeln" && arguments.Count == 0)
+                {
+                    _stdoutNeedsBlankLine = true;
                 }
                 else
                 {
@@ -2005,16 +2020,16 @@ internal sealed partial class CSharpEmitter
         }
     }
 
-    private void RegisterStdoutType(TypeSyntax? type)
+    private void RegisterStdoutUsage(OutputKind kind, TypeSyntax? type)
     {
         if (type is NullableTypeSyntax nullable
             && UnwrapNullableType(nullable.InnerType) is NamedTypeSyntax { TypeArguments.Count: 0 } nullableNamed
             && IsDirectStdoutScalar(nullableNamed.Name))
         {
-            _stdoutDirectScalarKinds.Add(nullableNamed.Name);
+            RegisterStdoutScalarUsage(kind, nullableNamed.Name);
             if (nullableNamed.Name != "string")
             {
-                _stdoutDirectNullableScalarKinds.Add(nullableNamed.Name);
+                RegisterStdoutNullableScalarUsage(kind, nullableNamed.Name);
             }
             return;
         }
@@ -2022,19 +2037,41 @@ internal sealed partial class CSharpEmitter
         TypeSyntax? normalized = UnwrapNullableType(type);
         if (normalized is NamedTypeSyntax { TypeArguments.Count: 0 } named && IsDirectStdoutScalar(named.Name))
         {
-            _stdoutDirectScalarKinds.Add(named.Name);
+            RegisterStdoutScalarUsage(kind, named.Name);
             return;
         }
 
         if (normalized is ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { TypeArguments.Count: 0 } elementNamed }
             && IsDirectStdoutScalar(elementNamed.Name))
         {
-            _stdoutDirectScalarKinds.Add(elementNamed.Name);
-            _stdoutDirectArrayKinds.Add(elementNamed.Name);
+            _stdoutDirectScalarWriteKinds.Add(elementNamed.Name);
+            _stdoutDirectArrayWriteKinds.Add(elementNamed.Name);
+            if (kind == OutputKind.WriteLine)
+            {
+                _stdoutDirectArrayWritelnKinds.Add(elementNamed.Name);
+            }
             return;
         }
 
         _stdoutNeedsFallbackHelpers = true;
+    }
+
+    private void RegisterStdoutScalarUsage(OutputKind kind, string scalarKind)
+    {
+        _stdoutDirectScalarWriteKinds.Add(scalarKind);
+        if (kind == OutputKind.WriteLine)
+        {
+            _stdoutDirectScalarWritelnKinds.Add(scalarKind);
+        }
+    }
+
+    private void RegisterStdoutNullableScalarUsage(OutputKind kind, string scalarKind)
+    {
+        _stdoutDirectNullableScalarWriteKinds.Add(scalarKind);
+        if (kind == OutputKind.WriteLine)
+        {
+            _stdoutDirectNullableScalarWritelnKinds.Add(scalarKind);
+        }
     }
 
     private static bool IsDirectStdoutScalar(string name)

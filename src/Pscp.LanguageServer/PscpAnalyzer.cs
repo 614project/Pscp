@@ -640,11 +640,11 @@ internal sealed partial class PscpAnalyzer
     private void AnalyzeAssignment(AnalyzerState state, Scope scope, int start, int assignmentIndex, int statementEnd, FunctionContext? functionContext, int loopDepth)
     {
         state.MarkToken(assignmentIndex, "operator");
-        AnalyzeAssignmentTarget(state, scope, start, assignmentIndex, functionContext, loopDepth);
+        AnalyzeAssignmentTarget(state, scope, start, assignmentIndex, state.Tokens[assignmentIndex].Kind, functionContext, loopDepth);
         AnalyzeExpression(state, scope, assignmentIndex + 1, statementEnd, functionContext, loopDepth);
     }
 
-    private void AnalyzeAssignmentTarget(AnalyzerState state, Scope scope, int start, int endExclusive, FunctionContext? functionContext, int loopDepth)
+    private void AnalyzeAssignmentTarget(AnalyzerState state, Scope scope, int start, int endExclusive, TokenKind assignmentKind, FunctionContext? functionContext, int loopDepth)
     {
         start = SkipSeparators(state.Tokens, start, endExclusive);
         while (endExclusive > start && IsTerminatorToken(state.Tokens, endExclusive - 1, endExclusive))
@@ -652,7 +652,7 @@ internal sealed partial class PscpAnalyzer
             endExclusive--;
         }
 
-        if (TryAnalyzeSimpleAssignmentTargets(state, scope, start, endExclusive))
+        if (TryAnalyzeSimpleAssignmentTargets(state, scope, start, endExclusive, assignmentKind))
         {
             return;
         }
@@ -660,7 +660,7 @@ internal sealed partial class PscpAnalyzer
         AnalyzeExpression(state, scope, start, endExclusive, functionContext, loopDepth);
     }
 
-    private bool TryAnalyzeSimpleAssignmentTargets(AnalyzerState state, Scope scope, int start, int endExclusive)
+    private bool TryAnalyzeSimpleAssignmentTargets(AnalyzerState state, Scope scope, int start, int endExclusive, TokenKind assignmentKind)
     {
         if (start >= endExclusive)
         {
@@ -669,7 +669,7 @@ internal sealed partial class PscpAnalyzer
 
         if (IsIdentifier(state.Tokens, start) && start + 1 == endExclusive)
         {
-            AnalyzeAssignableBinding(state, scope, start);
+            AnalyzeAssignableBinding(state, scope, start, assignmentKind);
             return true;
         }
 
@@ -696,7 +696,7 @@ internal sealed partial class PscpAnalyzer
 
             int comma = FindTopLevelToken(state.Tokens, elementStart, close, TokenKind.Comma);
             int elementEnd = comma >= 0 ? comma : close;
-            if (!TryAnalyzeSimpleAssignmentTargets(state, scope, elementStart, elementEnd))
+            if (!TryAnalyzeSimpleAssignmentTargets(state, scope, elementStart, elementEnd, assignmentKind))
             {
                 return false;
             }
@@ -708,7 +708,7 @@ internal sealed partial class PscpAnalyzer
         return sawElement;
     }
 
-    private void AnalyzeAssignableBinding(AnalyzerState state, Scope scope, int tokenIndex)
+    private void AnalyzeAssignableBinding(AnalyzerState state, Scope scope, int tokenIndex, TokenKind assignmentKind)
     {
         if (state.Tokens[tokenIndex].Text == "_")
         {
@@ -722,10 +722,31 @@ internal sealed partial class PscpAnalyzer
         }
 
         state.AddReference(symbol!, tokenIndex, isDeclaration: false, isWrite: true);
-        if (!symbol!.IsMutable && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic)
+        if (!symbol!.IsMutable
+            && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic
+            && !IsKnownCollectionMutationAssignment(symbol.TypeDisplay, assignmentKind))
         {
             state.AddDiagnostic("PSCP2007", $"Cannot assign to immutable binding `{symbol.Name}`.", state.Tokens[tokenIndex].Span, ServerDiagnosticSeverity.Error, symbol.Id);
         }
+    }
+
+    private static bool IsKnownCollectionMutationAssignment(string? typeDisplay, TokenKind assignmentKind)
+    {
+        if (assignmentKind is not (TokenKind.PlusEqual or TokenKind.MinusEqual)
+            || string.IsNullOrWhiteSpace(typeDisplay))
+        {
+            return false;
+        }
+
+        string normalized = PscpExternalMetadata.NormalizeTypeReceiver(typeDisplay!);
+        return normalized is "List"
+            or "LinkedList"
+            or "Queue"
+            or "Stack"
+            or "HashSet"
+            or "SortedSet"
+            or "Dictionary"
+            or "PriorityQueue";
     }
 
     private string? InferLoopVariableType(AnalyzerState state, Scope scope, int start, int endExclusive)

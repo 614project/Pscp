@@ -44,6 +44,19 @@ internal static class TestRunner
                 "+7 -2147483648",
                 "7\n-2147483648\n"),
             new(
+                "LambdaBlockInputShorthand",
+                """
+                int n =
+                let papers = (0..<n -> _ {
+                    int w, h =
+                    (min w h, max w h)
+                }).sort()
+                += papers[0].1
+                += papers[^1].2
+                """,
+                "3\n3 2\n5 7\n4 1\n",
+                "1\n7\n"),
+            new(
                 "LineReaderAfterTokenInput",
                 """
                 int n =
@@ -743,8 +756,10 @@ internal static class TestRunner
         VerifyCollectionSeparatorTolerance(failures);
         VerifyDiscardLoopLowering(failures);
         VerifyShorthandInputAvoidsGenericHelpers(failures);
+        VerifyLambdaInputShorthandLowering(failures);
         VerifySortByLowering(failures);
         VerifyCompactPrunesStdoutRender(failures);
+        VerifyStringSplitCopyOutputStaysCompact(failures);
         VerifyDictionaryIndexTypeAvoidsStdoutFallback(failures);
         VerifyEmptyMinMaxPolicy(failures);
         VerifyMathIntrinsicLowering(failures);
@@ -758,6 +773,7 @@ internal static class TestRunner
         await VerifyLanguageServerDotNetCompletionAsync(failures);
         await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
         await VerifyLanguageServerLoopBlockAndIndexerDiagnosticsAsync(failures);
+        await VerifyLanguageServerCollectionMutationAndNullableLoopAsync(failures);
 
         if (failures.Count > 0)
         {
@@ -1458,6 +1474,34 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyLambdaInputShorthandLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int n =
+                let papers = (0..<n -> _ {
+                    int w, h =
+                    (min w h, max w h)
+                }).sort()
+                += papers[0].1
+                """),
+            new TranspilationOptions("Pscp.Generated", "LambdaInputShorthandLoweringProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"LambdaInputShorthandLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        if (result.CSharpCode.Contains("Input shorthand is not supported", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("int w = stdin.readInt();", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("int h = stdin.readInt();", StringComparison.Ordinal))
+        {
+            failures.Add($"LambdaInputShorthandLowering: expected lambda block input shorthand to lower to direct typed reads\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
     private static void VerifyCompactPrunesStdoutRender(List<string> failures)
     {
         TranspilationResult result = PscpTranspiler.Transpile(
@@ -1479,6 +1523,37 @@ internal static class TestRunner
             || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal))
         {
             failures.Add($"CompactPrunesStdoutRender: expected scalar-only output to avoid generic render helpers\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
+    private static void VerifyStringSplitCopyOutputStaysCompact(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                string? line;
+                while (line := Console.ReadLine()) != null {
+                    let steps = line.Split(' ')
+                    let result = steps.copy()
+                    += result
+                }
+                """),
+            new TranspilationOptions("Pscp.Generated", "StringSplitCopyOutputStaysCompactProgram", HelperEmissionMode.Compact));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"StringSplitCopyOutputStaysCompact: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}\nGenerated:\n{result.CSharpCode}");
+            return;
+        }
+
+        if (result.CSharpCode.Contains("WriteValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("public void writeln(string? value)", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("public void writeln(string[] values)", StringComparison.Ordinal))
+        {
+            failures.Add($"StringSplitCopyOutputStaysCompact: expected string-array output to stay on direct stdout helpers only\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1551,9 +1626,52 @@ internal static class TestRunner
         }
 
         if (!result.CSharpCode.Contains("throw new InvalidOperationException(\"Sequence contains no elements.\")", StringComparison.Ordinal)
+            || HasUnguardedSequenceEmptyThrow(result.CSharpCode)
             || result.CSharpCode.Contains("return default!", StringComparison.Ordinal))
         {
-            failures.Add($"EmptyMinMaxPolicy: expected explicit empty-sequence failure instead of default!\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"EmptyMinMaxPolicy: expected empty-sequence checks to be DEBUG-only without default! fallback\nGenerated:\n{result.CSharpCode}");
+        }
+
+        TranspilationResult verboseResult = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                += 1
+                """),
+            new TranspilationOptions("Pscp.Generated", "VerboseEmptyMinMaxPolicyProgram", HelperEmissionMode.Verbose));
+
+        if (verboseResult.Diagnostics.Count > 0)
+        {
+            failures.Add($"EmptyMinMaxPolicyVerbose: unexpected diagnostics\n{FormatDiagnostics(verboseResult.Diagnostics)}");
+            return;
+        }
+
+        if (HasUnguardedSequenceEmptyThrow(verboseResult.CSharpCode))
+        {
+            failures.Add($"EmptyMinMaxPolicyVerbose: expected fallback sequence helpers to keep empty-sequence throws behind DEBUG\nGenerated:\n{verboseResult.CSharpCode}");
+        }
+    }
+
+    private static bool HasUnguardedSequenceEmptyThrow(string csharpCode)
+    {
+        const string marker = "throw new InvalidOperationException(\"Sequence contains no elements.\")";
+        int searchStart = 0;
+        while (true)
+        {
+            int throwIndex = csharpCode.IndexOf(marker, searchStart, StringComparison.Ordinal);
+            if (throwIndex < 0)
+            {
+                return false;
+            }
+
+            int debugStart = csharpCode.LastIndexOf("#if DEBUG", throwIndex, StringComparison.Ordinal);
+            int previousDebugEnd = csharpCode.LastIndexOf("#endif", throwIndex, StringComparison.Ordinal);
+            int nextDebugEnd = csharpCode.IndexOf("#endif", throwIndex, StringComparison.Ordinal);
+            if (debugStart < 0 || previousDebugEnd > debugStart || nextDebugEnd < 0)
+            {
+                return true;
+            }
+
+            searchStart = throwIndex + marker.Length;
         }
     }
 
@@ -1846,6 +1964,26 @@ internal static class TestRunner
         }
     }
 
+    private static async Task VerifyLanguageServerCollectionMutationAndNullableLoopAsync(List<string> failures)
+    {
+        const string source = """
+            string? line;
+            while (line := Console.ReadLine()) != null {
+                let steps = line.Split(' ')
+                List<int> errs
+                errs += 1
+                += steps
+            }
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        IReadOnlyList<string> diagnostics = await session.ReadDiagnosticsAsync();
+        if (diagnostics.Count != 0)
+        {
+            failures.Add($"LanguageServerCollectionMutationAndNullableLoop: expected no immutable/nullability diagnostics for collection mutation inside null-guarded loop\nActual: {string.Join(" | ", diagnostics)}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -2008,7 +2146,7 @@ internal static class TestRunner
             });
 
             LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
-            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.2\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
+            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.4\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
             _ = await session.ReadMessageAsync();
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");
