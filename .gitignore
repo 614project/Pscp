@@ -493,3 +493,4 @@ $RECYCLE.BIN/
 .tmp_repro/
 artifacts/
 src/Pscp.Installer/payload.zip
+**/.pscp/
