@@ -123,6 +123,42 @@ internal static class TestRunner
                 "",
                 "1\n2 1\n"),
             new(
+                "ImplicitReturnConstructorAndSortWith",
+                """
+                record struct Edge(int U, int V, long W, int Id)
+
+                int[] parent = [0..1]
+                int[] size = [1, 2]
+
+                rec int find(int x) {
+                    if x == parent[x] then x
+                    else parent[x] := find(parent[x])
+                }
+
+                bool unite(int x, int y) {
+                    var a = find(x)
+                    var b = find(y)
+                    if a == b then return false
+
+                    if size[a] < size[b] {
+                        (a, b) = (b, a)
+                    }
+
+                    parent[b] = a
+                    size[a] += size[b]
+                    return true
+                }
+
+                Edge[] edges = [Edge(1, 2, 7L, 1), Edge(1, 2, 3L, 2)]
+                let sorted = edges.sortWith((a, b) => a.W <=> b.W)
+
+                += sorted[0].Id
+                += unite(0, 1)
+                += find(0)
+                """,
+                "",
+                "2\nTrue\n1\n"),
+            new(
                 "BuilderAggregationAndFastFor",
                 """
                 int n =
@@ -162,6 +198,28 @@ internal static class TestRunner
                 """,
                 "",
                 "3\n7\n"),
+            new(
+                "BitwiseOperators",
+                """
+                int a = 6
+                long b = 3L
+                bool p = true
+                bool q = false
+                let andValue = a & int b
+                let orValue = a
+                    |
+                    int b
+                let xorValue = a ^ int b
+                let xorKeyword = p xor q
+                += andValue
+                += orValue
+                += xorValue
+                += p & q
+                += p | q
+                += xorKeyword
+                """,
+                "",
+                "2\n7\n5\nFalse\nTrue\nTrue\n"),
             new(
                 "ComparatorAndOutVarDecl",
                 """
@@ -591,7 +649,7 @@ internal static class TestRunner
                 """
                 rec int gcd(int a, int b) {
                     if b == 0 then a
-                    else gcd(b, a % b)
+                    else gcd(b, a % b) + 0
                 }
 
                 int x = 6
@@ -796,6 +854,7 @@ internal static class TestRunner
         VerifyDirectRangeCollectionLowering(failures);
         VerifyDirectFastForLowering(failures);
         VerifyRecordPrimaryConstructorMaxAndRangeLowering(failures);
+        VerifyImplicitReturnConstructorSortAndHoistedRangeLowering(failures);
         VerifyInterpolatedStringLowering(failures);
         VerifyDotNetPassThroughLowering(failures);
         VerifyStructObjectInitializerLowering(failures);
@@ -1131,6 +1190,60 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyImplicitReturnConstructorSortAndHoistedRangeLowering(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                record struct Edge(int U, int V, long W, int Id)
+
+                int[] parent = [0..1]
+                int[] size = [1, 2]
+
+                rec int find(int x) {
+                    if x == parent[x] then x
+                    else parent[x] := find(parent[x])
+                }
+
+                bool unite(int x, int y) {
+                    var a = find(x)
+                    var b = find(y)
+                    if a == b then return false
+
+                    if size[a] < size[b] {
+                        (a, b) = (b, a)
+                    }
+
+                    parent[b] = a
+                    size[a] += size[b]
+                    return true
+                }
+
+                Edge[] edges = [Edge(1, 2, 7L, 1), Edge(1, 2, 3L, 2)]
+                let sorted = edges.sortWith((a, b) => a.W <=> b.W)
+                += sorted[0].Id
+                """),
+            new TranspilationOptions("Pscp.Generated", "ImplicitReturnConstructorSortAndHoistedRangeProgram"));
+
+        if (result.Diagnostics.Count > 0)
+        {
+            failures.Add($"ImplicitReturnConstructorSortAndHoistedRangeLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            return;
+        }
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        if (userCode.Contains("return ((a, b) = (b, a));", StringComparison.Ordinal)
+            || !userCode.Contains("(a, b) = (b, a);", StringComparison.Ordinal)
+            || !userCode.Contains("return (parent[x] = find(parent[x]));", StringComparison.Ordinal)
+            || !userCode.Contains("new Edge(1, 2, 7L, 1)", StringComparison.Ordinal)
+            || userCode.Contains("Edge(1, 2, 7L, 1)", StringComparison.Ordinal) && !userCode.Contains("new Edge(1, 2, 7L, 1)", StringComparison.Ordinal)
+            || !userCode.Contains("parent = new int[1 + 1];", StringComparison.Ordinal)
+            || userCode.Contains("__PscpThunk.run", StringComparison.Ordinal))
+        {
+            failures.Add($"ImplicitReturnConstructorSortAndHoistedRangeLowering: expected statement/value lowering shape not found\nGenerated:\n{result.CSharpCode}");
+        }
+    }
+
     private static void VerifyInterpolatedStringLowering(List<string> failures)
     {
         TranspilationResult result = PscpTranspiler.Transpile(
@@ -1418,7 +1531,7 @@ internal static class TestRunner
             }
             += bad()
             """,
-            "Final expression in `bad` returns `void`, but `int` is required.");
+            "`bad` must end with a return value of type `int`.");
 
         ExpectDiagnostic(
             failures,

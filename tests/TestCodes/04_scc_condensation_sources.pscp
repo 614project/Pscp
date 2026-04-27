@@ -1,0 +1,68 @@
+using System.Collections.Generic
+
+void solve() {
+    int n, m =
+    List<int>[] graph = new![n]
+    List<int>[] reverseGraph = new![n]
+
+    0..<m -> _ {
+        int a, b =
+        let u = a - 1
+        let v = b - 1
+        graph[u] += v
+        reverseGraph[v] += u
+    }
+
+    bool[n] visited;
+    List<int> order;
+
+    rec void dfsForward(int v) {
+        visited[v] = true
+        graph[v] -> to {
+            if not visited[to] then dfsForward(to)
+        }
+        order += v
+    }
+
+    0..<n -> v {
+        if not visited[v] then dfsForward(v)
+    }
+
+    int[n] comp;
+    0..<n -> i { comp[i] = -1 }
+
+    rec void dfsBackward(int v, int id) {
+        comp[v] = id
+        reverseGraph[v] -> to {
+            if comp[to] == -1 then dfsBackward(to, id)
+        }
+    }
+
+    var compCount = 0
+    order.reverse() -> v {
+        if comp[v] == -1 {
+            dfsBackward(v, compCount)
+            compCount += 1
+        }
+    }
+
+    int[compCount] indeg;
+    HashSet<(int, int)> seenEdges;
+
+    0..<n -> u {
+        graph[u] -> v {
+            let cu = comp[u]
+            let cv = comp[v]
+            if cu != cv and (seenEdges += (cu, cv)) {
+                indeg[cv] += 1
+            }
+        }
+    }
+
+    let sources = (0..<compCount -> c do c).filter(c => indeg[c] == 0).map(c => c + 1)
+    += compCount
+    stdout.join(' ', sources)
+    += ""
+}
+
+solve()

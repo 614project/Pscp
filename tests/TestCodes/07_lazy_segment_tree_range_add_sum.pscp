@@ -1,0 +1,73 @@
+void solve() {
+    int n, q =
+    long[n] a =
+
+    long[4 * n + 5] tree;
+    long[4 * n + 5] lazy;
+
+    rec void build(int node, int left, int right) {
+        if left == right {
+            tree[node] = a[left]
+        } else {
+            let mid = (left + right) / 2
+            build(node * 2, left, mid)
+            build(node * 2 + 1, mid + 1, right)
+            tree[node] = tree[node * 2] + tree[node * 2 + 1]
+        }
+    }
+
+    void apply(int node, int left, int right, long delta) {
+        tree[node] += delta * (right - left + 1)
+        lazy[node] += delta
+    }
+
+    void push(int node, int left, int right) {
+        if lazy[node] != 0 and left != right {
+            let mid = (left + right) / 2
+            apply(node * 2, left, mid, lazy[node])
+            apply(node * 2 + 1, mid + 1, right, lazy[node])
+            lazy[node] = 0
+        } else if left == right {
+            lazy[node] = 0
+        }
+    }
+
+    rec void addRange(int node, int left, int right, int ql, int qr, long delta) {
+        if qr < left or right < ql then return
+        if ql <= left and right <= qr {
+            apply(node, left, right, delta)
+        } else {
+            push(node, left, right)
+            let mid = (left + right) / 2
+            addRange(node * 2, left, mid, ql, qr, delta)
+            addRange(node * 2 + 1, mid + 1, right, ql, qr, delta)
+            tree[node] = tree[node * 2] + tree[node * 2 + 1]
+        }
+    }
+
+    rec long queryRange(int node, int left, int right, int ql, int qr) {
+        if qr < left or right < ql then 0
+        else if ql <= left and right <= qr then tree[node]
+        else {
+            push(node, left, right)
+            let mid = (left + right) / 2
+            queryRange(node * 2, left, mid, ql, qr) + queryRange(node * 2 + 1, mid + 1, right, ql, qr)
+        }
+    }
+
+    build(1, 0, n - 1)
+
+    0..<q -> _ {
+        int kind = stdin.readInt()
+        int l = stdin.readInt()
+        int r = stdin.readInt()
+        if kind == 1 {
+            long x = stdin.readLong()
+            addRange(1, 0, n - 1, l - 1, r - 1, x)
+        } else {
+            += queryRange(1, 0, n - 1, l - 1, r - 1)
+        }
+    }
+}
+
+solve()

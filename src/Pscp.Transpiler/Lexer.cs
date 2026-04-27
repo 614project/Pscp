@@ -155,6 +155,8 @@ public sealed class Lexer
             '!' => new Token(TokenKind.Bang, "!", tokenStart),
             '^' => new Token(TokenKind.Caret, "^", tokenStart),
             '~' => new Token(TokenKind.Tilde, "~", tokenStart),
+            '&' => new Token(TokenKind.Amp, "&", tokenStart),
+            '|' => new Token(TokenKind.Pipe, "|", tokenStart),
             _ => UnknownToken(tokenStart),
         };
     }

@@ -1,0 +1,54 @@
+using System
+using System.Collections.Generic
+
+string s = stdin.readLine()
+let n = s.Length
+let maxNodes = n + 3
+int[maxNodes][26] next;
+int[] len = new[maxNodes]
+int[] link = new[maxNodes]
+long[] occ = new[maxNodes]
+
+for i in 0..<maxNodes {
+    for c in 0..<26 do next[i][c] = 0
+}
+
+len[0] = -1
+link[0] = 0
+len[1] = 0
+link[1] = 0
+mut int sz = 2
+mut int suff = 1
+
+int getLink(int v, int pos) {
+    while true {
+        let l = len[v]
+        if pos - 1 - l >= 0 and s[pos - 1 - l] == s[pos] then return v
+        v = link[v]
+    }
+    return v
+}
+
+for i in 0..<n {
+    let c = int(s[i]) - int('a')
+    let cur = getLink(suff, i)
+    if next[cur][c] == 0 {
+        let node = sz
+        sz += 1
+        len[node] = len[cur] + 2
+        if len[node] == 1 {
+            link[node] = 1
+        } else {
+            let suffix = getLink(link[cur], i)
+            link[node] = next[suffix][c]
+        }
+        next[cur][c] = node
+    }
+    suff = next[cur][c]
+    occ[suff] += 1L
+}
+
+for v in sz-1..-1..2 do occ[link[v]] += occ[v]
+mut long total = 0L
+for v in 2..<sz do total += occ[v]
++= $"{sz - 2} {total}"

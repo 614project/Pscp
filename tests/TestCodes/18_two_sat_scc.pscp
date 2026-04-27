@@ -1,0 +1,79 @@
+using System
+using System.Collections.Generic
+
+int n, m =
+let vn = n * 2
+List<int>[] g = new![vn]
+List<int>[] rg = new![vn]
+
+int id(int lit) {
+    let v = abs(lit) - 1
+    if lit > 0 then return v * 2
+    return v * 2 + 1
+}
+
+int neg(int x) {
+    return x ^ 1
+}
+
+void addImp(int a, int b) {
+    g[a] += b
+    rg[b] += a
+}
+
+for _ in 0..<m {
+    int a, b =
+    let x = id(a)
+    let y = id(b)
+    addImp(neg(x), y)
+    addImp(neg(y), x)
+}
+
+bool[] used = new[vn]
+List<int> order;
+int[] comp = new[vn]
+
+rec void dfs1(int v) {
+    used[v] = true
+    g[v] -> to {
+        if not used[to] then dfs1(to)
+    }
+    order += v
+}
+
+rec void dfs2(int v, int c) {
+    comp[v] = c
+    rg[v] -> to {
+        if comp[to] == -1 then dfs2(to, c)
+    }
+}
+
+for i in 0..<vn do comp[i] = -1
+for v in 0..<vn {
+    if not used[v] then dfs1(v)
+}
+let revOrder = order.reverse()
+mut int cc = 0
+revOrder -> v {
+    if comp[v] == -1 {
+        dfs2(v, cc)
+        cc += 1
+    }
+}
+
+bool ok = true
+int[] ans = new[n]
+for i in 0..<n {
+    if comp[i * 2] == comp[i * 2 + 1] {
+        ok = false
+    }
+    ans[i] = if comp[i * 2] > comp[i * 2 + 1] then 1 else 0
+}
+
+if not ok {
+    += 0
+} else {
+    += 1
+    stdout.join(' ', ans)
+    += ""
+}

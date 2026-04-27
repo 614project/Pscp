@@ -605,12 +605,25 @@ internal sealed partial class PscpAnalyzer
             TokenKind.AmpAmp,
             TokenKind.PipePipe,
             TokenKind.And,
-            TokenKind.Or,
-            TokenKind.Xor,
-            TokenKind.Caret);
+            TokenKind.Or);
         if (topLevelComparison >= 0)
         {
             return state.Tokens[topLevelComparison].Kind == TokenKind.Spaceship ? "int" : "bool";
+        }
+
+        int topLevelBitwise = FindFirstTopLevelOperator(
+            state.Tokens,
+            start,
+            endExclusive,
+            TokenKind.Amp,
+            TokenKind.Caret,
+            TokenKind.Pipe,
+            TokenKind.Xor);
+        if (topLevelBitwise >= 0)
+        {
+            string? left = InferExpressionType(state, scope, start, topLevelBitwise);
+            string? right = InferExpressionType(state, scope, topLevelBitwise + 1, endExclusive);
+            return InferBitwiseType(left, right);
         }
 
         int additive = FindFirstTopLevelOperator(state.Tokens, start, endExclusive, TokenKind.Plus, TokenKind.Minus);
@@ -636,6 +649,11 @@ internal sealed partial class PscpAnalyzer
 
         return null;
     }
+
+    private static string? InferBitwiseType(string? left, string? right)
+        => left == "bool" && right == "bool"
+            ? "bool"
+            : PromoteNumericType(left, right);
 
     private bool TryInferSpecialFormType(AnalyzerState state, Scope scope, int start, int endExclusive, out string? type)
     {

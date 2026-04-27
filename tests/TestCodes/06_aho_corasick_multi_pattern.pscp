@@ -1,0 +1,81 @@
+using System.Collections.Generic
+
+void solve() {
+    int patternCount =
+
+    List<int[]> next;
+    List<int> fail;
+    List<int> outputCount;
+
+    int[] makeNode() {
+        int[] node = new[26]
+        0..<26 -> i { node[i] = -1 }
+        node
+    }
+
+    void addPattern(string pattern) {
+        var v = 0
+        0..<pattern.Length -> i {
+            let c = pattern[i] - 'a'
+            if next[v][c] == -1 {
+                next[v][c] = next.Count
+                next += makeNode()
+                fail += 0
+                outputCount += 0
+            }
+            v = next[v][c]
+        }
+        outputCount[v] += 1
+    }
+
+    void buildAutomaton() {
+        Queue<int> q;
+        0..<26 -> c {
+            let u = next[0][c]
+            if u == -1 {
+                next[0][c] = 0
+            } else {
+                q += u
+            }
+        }
+
+        while q.Count > 0 {
+            let v = --q
+            outputCount[v] += outputCount[fail[v]]
+            0..<26 -> c {
+                let u = next[v][c]
+                if u == -1 {
+                    next[v][c] = next[fail[v]][c]
+                } else {
+                    fail[u] = next[fail[v]][c]
+                    q += u
+                }
+            }
+        }
+    }
+
+    next += makeNode()
+    fail += 0
+    outputCount += 0
+
+    0..<patternCount -> _ {
+        string p = stdin.readLine()
+        addPattern(p)
+    }
+
+    buildAutomaton()
+
+    string text = stdin.readLine()
+    var state = 0
+    var matches = 0L
+
+    0..<text.Length -> i {
+        let c = text[i] - 'a'
+        state = next[state][c]
+        matches += outputCount[state]
+    }
+
+    += matches
+}
+
+solve()

@@ -1,0 +1,117 @@
+using System
+using System.Collections.Generic
+
+record struct Edge(int To, int Rev, long Cap, long Cost)
+
+int n, m, s, t =
+s -= 1
+t -= 1
+List<Edge>[] g = new![n]
+
+void addEdge(int from, int to, long cap, long cost) {
+    let a = new Edge(to, g[to].Count, cap, cost)
+    let b = new Edge(from, g[from].Count, 0L, -cost)
+    g[from] += a
+    g[to] += b
+}
+
+for _ in 0..<m {
+    int a, b =
+    long cap, cost =
+    addEdge(a - 1, b - 1, cap, cost)
+}
+
+let INF = 4000000000000000000L
+long[] potential = new[n]
+long[] dist = new[n]
+int[] pv = new[n]
+int[] pe = new[n]
+bool[] inq = new[n]
+
+void initPotential() {
+    for i in 0..<n do potential[i] = INF
+    Queue<int> q;
+    potential[s] = 0L
+    q += s
+    inq[s] = true
+    while q.Count > 0 {
+        let v = --q
+        inq[v] = false
+        for i in 0..<g[v].Count {
+            let e = g[v][i]
+            if e.Cap <= 0 then continue
+            let nd = potential[v] + e.Cost
+            if nd < potential[e.To] {
+                potential[e.To] = nd
+                if not inq[e.To] {
+                    inq[e.To] = true
+                    q += e.To
+                }
+            }
+        }
+    }
+    for i in 0..<n {
+        if potential[i] == INF then potential[i] = 0L
+    }
+}
+
+bool shortestPath() {
+    for i in 0..<n do dist[i] = INF
+    bool[] done = new[n]
+    PriorityQueue<int, long> pq;
+    dist[s] = 0L
+    pq += (s, 0L)
+    while pq.Count > 0 {
+        let v = --pq
+        if done[v] then continue
+        done[v] = true
+        for i in 0..<g[v].Count {
+            let e = g[v][i]
+            if e.Cap <= 0 then continue
+            let nd = dist[v] + e.Cost + potential[v] - potential[e.To]
+            if nd < dist[e.To] {
+                dist[e.To] = nd
+                pv[e.To] = v
+                pe[e.To] = i
+                pq += (e.To, nd)
+            }
+        }
+    }
+    return dist[t] < INF
+}
+
+(long, long) minCostMaxFlow() {
+    initPotential()
+    mut long flow = 0L
+    mut long cost = 0L
+    while shortestPath() {
+        for v in 0..<n {
+            if dist[v] < INF then potential[v] += dist[v]
+        }
+        mut long add = INF
+        mut int v = t
+        while v != s {
+            let e = g[pv[v]][pe[v]]
+            chmin ref add e.Cap
+            v = pv[v]
+        }
+        v = t
+        while v != s {
+            let p = pv[v]
+            let idx = pe[v]
+            var e = g[p][idx]
+            e.Cap -= add
+            g[p][idx] = e
+            var r = g[e.To][e.Rev]
+            r.Cap += add
+            g[e.To][e.Rev] = r
+            cost += add * e.Cost
+            v = p
+        }
+        flow += add
+    }
+    return (flow, cost)
+}
+
+let ans = minCostMaxFlow()
++= $"{ans.1} {ans.2}"

@@ -733,11 +733,17 @@ internal static class PscpSemanticAnalyzer
                 BinaryOperator.Add when IsNamed(left, "string") || IsNamed(right, "string") => TypeName("string"),
                 BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply or BinaryOperator.Divide or BinaryOperator.Modulo => Promote(left, right),
                 BinaryOperator.ShiftLeft or BinaryOperator.ShiftRight => left,
-                BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual or BinaryOperator.Equal or BinaryOperator.NotEqual or BinaryOperator.LogicalAnd or BinaryOperator.LogicalOr or BinaryOperator.LogicalXor => TypeName("bool"),
+                BinaryOperator.BitwiseAnd or BinaryOperator.BitwiseXor or BinaryOperator.BitwiseOr => InferBitwiseResult(left, right),
+                BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual or BinaryOperator.Equal or BinaryOperator.NotEqual or BinaryOperator.LogicalAnd or BinaryOperator.LogicalOr => TypeName("bool"),
                 BinaryOperator.Spaceship => TypeName("int"),
                 _ => right ?? left,
             };
         }
+
+        private TypeSyntax? InferBitwiseResult(TypeSyntax? left, TypeSyntax? right)
+            => IsNamed(left, "bool") && IsNamed(right, "bool")
+                ? TypeName("bool")
+                : Promote(left, right);
 
         private TypeSyntax AnalyzeRange(RangeExpression range, Scope scope)
         {
@@ -1570,7 +1576,9 @@ internal static class PscpSemanticAnalyzer
                 }
             }
 
-            if (body.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail)
+            Statement? tailStatement = body.Statements.LastOrDefault();
+            if (tailStatement is ExpressionStatement { HasSemicolon: false } tail
+                && IsImplicitReturnEligibleExpression(tail.Expression))
             {
                 TypeSyntax? tailType = GetType(tail.Expression);
                 if (tailType is not null && !CanImplicitlyConvert(tailType, returnType))
@@ -1580,7 +1588,37 @@ internal static class PscpSemanticAnalyzer
 
                 return;
             }
+
+            if (tailStatement is not null && IsImplicitReturningStatement(tailStatement))
+            {
+                return;
+            }
+
+            if (!ContainsExplicitReturn(body))
+            {
+                Error($"`{name}` must end with a return value of type `{DisplayType(returnType)}`. Use `return`, a return-eligible expression, or `:=` for value-yielding assignment.", declarationSpan);
+            }
         }
+
+        private static bool IsImplicitReturnEligibleExpression(Expression expression)
+            => expression switch
+            {
+                AssignmentExpression assignment => assignment.IsExplicitValueAssignment,
+                PrefixExpression or PostfixExpression => false,
+                CallExpression => false,
+                _ => true,
+            };
+
+        private static bool IsImplicitReturningStatement(Statement statement)
+            => statement switch
+            {
+                ReturnStatement => true,
+                ExpressionStatement { HasSemicolon: false } expressionStatement => IsImplicitReturnEligibleExpression(expressionStatement.Expression),
+                BlockStatement block => block.Statements.Count > 0 && IsImplicitReturningStatement(block.Statements[^1]),
+                IfStatement { ElseBranch: not null } ifStatement
+                    => IsImplicitReturningStatement(ifStatement.ThenBranch) && IsImplicitReturningStatement(ifStatement.ElseBranch),
+                _ => false,
+            };
 
         private static IEnumerable<ReturnStatement> EnumerateReturnStatements(BlockStatement block)
         {

@@ -1,0 +1,80 @@
+using System
+using System.Collections.Generic
+
+record struct Edge(int To, int Rev, long Cap)
+
+int n, m, s, t =
+s -= 1
+t -= 1
+List<Edge>[] g = new![n]
+
+void addEdge(int from, int to, long cap) {
+    let fwd = new Edge(to, g[to].Count, cap)
+    let rev = new Edge(from, g[from].Count, 0L)
+    g[from] += fwd
+    g[to] += rev
+}
+
+for _ in 0..<m {
+    int a, b =
+    long c =
+    addEdge(a - 1, b - 1, c)
+}
+
+int[] level = new[n]
+int[] it = new[n]
+
+bool bfs() {
+    for i in 0..<n do level[i] = -1
+    Queue<int> q;
+    level[s] = 0
+    q += s
+    while q.Count > 0 {
+        let v = --q
+        for i in 0..<g[v].Count {
+            let e = g[v][i]
+            if e.Cap > 0 and level[e.To] < 0 {
+                level[e.To] = level[v] + 1
+                q += e.To
+            }
+        }
+    }
+    return level[t] >= 0
+}
+
+rec long dfs(int v, int goal, long f) {
+    if v == goal then return f
+    while it[v] < g[v].Count {
+        let i = it[v]
+        var e = g[v][i]
+        if e.Cap > 0 and level[v] < level[e.To] {
+            let d = dfs(e.To, goal, min f e.Cap)
+            if d > 0 {
+                e.Cap -= d
+                g[v][i] = e
+                var r = g[e.To][e.Rev]
+                r.Cap += d
+                g[e.To][e.Rev] = r
+                return d
+            }
+        }
+        it[v] += 1
+    }
+    return 0L
+}
+
+long maxFlow() {
+    mut long flow = 0L
+    let INF = 4000000000000000000L
+    while bfs() {
+        for i in 0..<n do it[i] = 0
+        while true {
+            let f = dfs(s, t, INF)
+            if f == 0 then break
+            flow += f
+        }
+    }
+    return flow
+}
+
++= maxFlow()

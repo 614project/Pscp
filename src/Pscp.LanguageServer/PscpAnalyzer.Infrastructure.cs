@@ -90,6 +90,8 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.PercentEqual:
                 case TokenKind.Caret:
                 case TokenKind.Tilde:
+                case TokenKind.Amp:
+                case TokenKind.Pipe:
                 case TokenKind.AmpAmp:
                 case TokenKind.PipePipe:
                 case TokenKind.Spaceship:

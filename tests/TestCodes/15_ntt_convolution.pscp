@@ -1,0 +1,73 @@
+using System
+using System.Collections.Generic
+
+let MOD = 998244353L
+let G = 3L
+
+long modPow(long a, long e) {
+    mut long r = 1L
+    while e > 0 {
+        if e % 2L == 1L then r = r * a % MOD
+        a = a * a % MOD
+        e /= 2L
+    }
+    return r
+}
+
+void ntt(long[] a, bool invert) {
+    let n = a.Length
+    mut int j = 0
+    for i in 1..<n {
+        mut int bit = n / 2
+        while (j & bit) != 0 {
+            j ^= bit
+            bit /= 2
+        }
+        j ^= bit
+        if i < j {
+            let t = a[i]
+            a[i] = a[j]
+            a[j] = t
+        }
+    }
+    mut int len = 2
+    while len <= n {
+        mut long wlen = modPow(G, (MOD - 1L) / long(len))
+        if invert then wlen = modPow(wlen, MOD - 2L)
+        mut int i = 0
+        while i < n {
+            mut long w = 1L
+            for j2 in 0..<len/2 {
+                let u = a[i + j2]
+                let v = a[i + j2 + len / 2] * w % MOD
+                a[i + j2] = (u + v) % MOD
+                a[i + j2 + len / 2] = (u - v + MOD) % MOD
+                w = w * wlen % MOD
+            }
+            i += len
+        }
+        len *= 2
+    }
+    if invert {
+        let invN = modPow(long(n), MOD - 2L)
+        for i in 0..<n do a[i] = a[i] * invN % MOD
+    }
+}
+
+int n, m =
+long[n] aIn =
+long[m] bIn =
+mut int size = 1
+while size < n + m - 1 do size *= 2
+long[] a = new[size]
+long[] b = new[size]
+for i in 0..<n do a[i] = (aIn[i] % MOD + MOD) % MOD
+for i in 0..<m do b[i] = (bIn[i] % MOD + MOD) % MOD
+ntt(a, false)
+ntt(b, false)
+for i in 0..<size do a[i] = a[i] * b[i] % MOD
+ntt(a, true)
+long[] ans = new[n + m - 1]
+for i in 0..<ans.Length do ans[i] = a[i]
+stdout.join(' ', ans)
++= ""

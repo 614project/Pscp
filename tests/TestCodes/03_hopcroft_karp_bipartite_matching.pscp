@@ -1,0 +1,74 @@
+using System.Collections.Generic
+
+void solve() {
+    int leftCount, rightCount, edgeCount =
+    List<int>[] graph = new![leftCount]
+
+    0..<edgeCount -> _ {
+        int a, b =
+        graph[a - 1] += b - 1
+    }
+
+    int[leftCount] pairLeft;
+    int[rightCount] pairRight;
+    int[leftCount] dist;
+
+    0..<leftCount -> i { pairLeft[i] = -1 }
+    0..<rightCount -> i { pairRight[i] = -1 }
+
+    bool bfs() {
+        Queue<int> q;
+        var foundFreeRight = false
+
+        0..<leftCount -> u {
+            if pairLeft[u] == -1 {
+                dist[u] = 0
+                q += u
+            } else {
+                dist[u] = -1
+            }
+        }
+
+        while q.Count > 0 {
+            let u = --q
+            graph[u] -> v {
+                let mate = pairRight[v]
+                if mate == -1 {
+                    foundFreeRight = true
+                } else if dist[mate] == -1 {
+                    dist[mate] = dist[u] + 1
+                    q += mate
+                }
+            }
+        }
+
+        foundFreeRight
+    }
+
+    rec bool dfs(int u) {
+        graph[u] -> v {
+            let mate = pairRight[v]
+            if mate == -1 or (dist[mate] == dist[u] + 1 and dfs(mate)) {
+                pairLeft[u] = v
+                pairRight[v] = u
+                return true
+            }
+        }
+        dist[u] = -1
+        false
+    }
+
+    var matching = 0
+    while bfs() {
+        0..<leftCount -> u {
+            if pairLeft[u] == -1 and dfs(u) then matching += 1
+        }
+    }
+
+    += matching
+    0..<leftCount -> u {
+        if pairLeft[u] != -1 then += $"{u + 1} {pairLeft[u] + 1}"
+    }
+}
+
+solve()

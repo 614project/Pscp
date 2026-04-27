@@ -79,7 +79,7 @@ public sealed partial class Parser
 
     private Expression ParseOr()
     {
-        Expression expression = ParseXor();
+        Expression expression = ParseAnd();
 
         while (true)
         {
@@ -91,27 +91,7 @@ public sealed partial class Parser
 
             Next();
             SkipExpressionNewLines();
-            expression = new BinaryExpression(expression, BinaryOperator.LogicalOr, ParseXor());
-        }
-
-        return expression;
-    }
-
-    private Expression ParseXor()
-    {
-        Expression expression = ParseAnd();
-
-        while (true)
-        {
-            SkipExpressionNewLinesBefore(TokenKind.Caret, TokenKind.Xor);
-            if (Current.Kind is not TokenKind.Caret and not TokenKind.Xor)
-            {
-                break;
-            }
-
-            Next();
-            SkipExpressionNewLines();
-            expression = new BinaryExpression(expression, BinaryOperator.LogicalXor, ParseAnd());
+            expression = new BinaryExpression(expression, BinaryOperator.LogicalOr, ParseAnd());
         }
 
         return expression;
@@ -119,7 +99,7 @@ public sealed partial class Parser
 
     private Expression ParseAnd()
     {
-        Expression expression = ParseEquality();
+        Expression expression = ParseBitwiseOr();
 
         while (true)
         {
@@ -131,7 +111,67 @@ public sealed partial class Parser
 
             Next();
             SkipExpressionNewLines();
-            expression = new BinaryExpression(expression, BinaryOperator.LogicalAnd, ParseEquality());
+            expression = new BinaryExpression(expression, BinaryOperator.LogicalAnd, ParseBitwiseOr());
+        }
+
+        return expression;
+    }
+
+    private Expression ParseBitwiseOr()
+    {
+        Expression expression = ParseXor();
+
+        while (true)
+        {
+            SkipExpressionNewLinesBefore(TokenKind.Pipe);
+            if (Current.Kind is not TokenKind.Pipe)
+            {
+                break;
+            }
+
+            Next();
+            SkipExpressionNewLines();
+            expression = new BinaryExpression(expression, BinaryOperator.BitwiseOr, ParseXor());
+        }
+
+        return expression;
+    }
+
+    private Expression ParseXor()
+    {
+        Expression expression = ParseBitwiseAnd();
+
+        while (true)
+        {
+            SkipExpressionNewLinesBefore(TokenKind.Caret, TokenKind.Xor);
+            if (Current.Kind is not TokenKind.Caret and not TokenKind.Xor)
+            {
+                break;
+            }
+
+            Next();
+            SkipExpressionNewLines();
+            expression = new BinaryExpression(expression, BinaryOperator.BitwiseXor, ParseBitwiseAnd());
+        }
+
+        return expression;
+    }
+
+    private Expression ParseBitwiseAnd()
+    {
+        Expression expression = ParseEquality();
+
+        while (true)
+        {
+            SkipExpressionNewLinesBefore(TokenKind.Amp);
+            if (Current.Kind is not TokenKind.Amp)
+            {
+                break;
+            }
+
+            Next();
+            SkipExpressionNewLines();
+            expression = new BinaryExpression(expression, BinaryOperator.BitwiseAnd, ParseEquality());
         }
 
         return expression;

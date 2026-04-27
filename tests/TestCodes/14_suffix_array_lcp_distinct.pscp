@@ -1,0 +1,52 @@
+using System
+using System.Collections.Generic
+
+string s = stdin.readLine()
+let n = s.Length
+if n == 0 {
+    += 0
+} else {
+    var sa = [0..<n]
+    int[] rank = new[n]
+    int[] tmp = new[n]
+    for i in 0..<n do rank[i] = int(s[i])
+    mut int k = 1
+    while k < n {
+        sa = sa.sortWith((a, b) => {
+            if rank[a] != rank[b] then return rank[a] <=> rank[b]
+            let ra = if a + k < n then rank[a + k] else -1
+            let rb = if b + k < n then rank[b + k] else -1
+            return ra <=> rb
+        })
+        tmp[sa[0]] = 0
+        for i in 1..<n {
+            let a = sa[i - 1]
+            let b = sa[i]
+            mut int diff = 0
+            if rank[a] != rank[b] {
+                diff = 1
+            } else {
+                let ra = if a + k < n then rank[a + k] else -1
+                let rb = if b + k < n then rank[b + k] else -1
+                if ra != rb then diff = 1
+            }
+            tmp[b] = tmp[a] + diff
+        }
+        for i in 0..<n do rank[i] = tmp[i]
+        if rank[sa[n - 1]] == n - 1 then break
+        k *= 2
+    }
+
+    int[] lcp = new[n]
+    mut int h = 0
+    for i in 0..<n {
+        let r = rank[i]
+        if r == 0 then continue
+        let j = sa[r - 1]
+        while i + h < n and j + h < n and s[i + h] == s[j + h] do h += 1
+        lcp[r] = h
+        if h > 0 then h -= 1
+    }
+    let total = long(n) * long(n + 1) / 2L
+    += total - long(sum lcp)
+}

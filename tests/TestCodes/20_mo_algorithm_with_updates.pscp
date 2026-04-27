@@ -1,0 +1,132 @@
+using System
+using System.Collections.Generic
+
+record struct Query(int L, int R, int T, int Id)
+record struct Update(int Pos, int Prev, int Next)
+
+int n, q =
+int[n] initialRaw =
+int[] curRaw = new[n]
+List<int> values;
+for i in 0..<n {
+    curRaw[i] = initialRaw[i]
+    values += initialRaw[i]
+}
+
+char[] op = new[q]
+int[] x = new[q]
+int[] y = new[q]
+List<Query> queries;
+List<Update> updates;
+
+for i in 0..<q {
+    char c =
+    op[i] = c
+    if c == 'Q' {
+        int l, r =
+        l -= 1
+        r -= 1
+        if l > r {
+            let t = l
+            l = r
+            r = t
+        }
+        queries += new Query(l, r, updates.Count, queries.Count)
+    } else {
+        int p, v =
+        p -= 1
+        updates += new Update(p, curRaw[p], v)
+        curRaw[p] = v
+        values += v
+    }
+}
+
+let compressed = values.sort().distinct()
+let idx = compressed.index()
+int[] arr = new[n]
+for i in 0..<n do arr[i] = idx[initialRaw[i]]
+for i in 0..<updates.Count {
+    var u = updates[i]
+    u.Prev = idx[u.Prev]
+    u.Next = idx[u.Next]
+    updates[i] = u
+}
+
+let block = int(pow(double(n), 2.0 / 3.0)) + 1
+let sortedQueries = queries.sortWith((a, b) => {
+    let ab = a.L / block
+    let bb = b.L / block
+    if ab != bb then return ab <=> bb
+    let ar = a.R / block
+    let br = b.R / block
+    if ar != br then return ar <=> br
+    return a.T <=> b.T
+})
+
+int[] freq = new[compressed.Count]
+int[] answer = new[queries.Count]
+mut int distinct = 0
+
+void addValue(int v) {
+    if freq[v] == 0 then distinct += 1
+    freq[v] += 1
+}
+
+void removeValue(int v) {
+    freq[v] -= 1
+    if freq[v] == 0 then distinct -= 1
+}
+
+mut int left = 0
+mut int right = -1
+mut int time = 0
+
+void applyUpdate(int t) {
+    let u = updates[t]
+    let p = u.Pos
+    if left <= p and p <= right {
+        removeValue(arr[p])
+        addValue(u.Next)
+    }
+    arr[p] = u.Next
+}
+
+void undoUpdate(int t) {
+    let u = updates[t]
+    let p = u.Pos
+    if left <= p and p <= right {
+        removeValue(arr[p])
+        addValue(u.Prev)
+    }
+    arr[p] = u.Prev
+}
+
+sortedQueries -> qu {
+    while time < qu.T {
+        applyUpdate(time)
+        time += 1
+    }
+    while time > qu.T {
+        time -= 1
+        undoUpdate(time)
+    }
+    while right < qu.R {
+        right += 1
+        addValue(arr[right])
+    }
+    while right > qu.R {
+        removeValue(arr[right])
+        right -= 1
+    }
+    while left < qu.L {
+        removeValue(arr[left])
+        left += 1
+    }
+    while left > qu.L {
+        left -= 1
+        addValue(arr[left])
+    }
+    answer[qu.Id] = distinct
+}
+
+answer -> v do += v

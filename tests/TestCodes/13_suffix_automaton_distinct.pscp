@@ -1,0 +1,58 @@
+using System
+using System.Collections.Generic
+
+string s = stdin.readLine()
+let n = s.Length
+let maxStates = n * 2 + 5
+int[maxStates][26] next;
+int[] link = new[maxStates]
+int[] len = new[maxStates]
+
+for i in 0..<maxStates {
+    link[i] = -1
+    for c in 0..<26 do next[i][c] = -1
+}
+
+mut int sz = 1
+mut int last = 0
+
+void extend(int c) {
+    let cur = sz
+    sz += 1
+    len[cur] = len[last] + 1
+    mut int p = last
+    while p != -1 and next[p][c] == -1 {
+        next[p][c] = cur
+        p = link[p]
+    }
+    if p == -1 {
+        link[cur] = 0
+    } else {
+        let q = next[p][c]
+        if len[p] + 1 == len[q] {
+            link[cur] = q
+        } else {
+            let clone = sz
+            sz += 1
+            len[clone] = len[p] + 1
+            for x in 0..<26 do next[clone][x] = next[q][x]
+            link[clone] = link[q]
+            while p != -1 and next[p][c] == q {
+                next[p][c] = clone
+                p = link[p]
+            }
+            link[q] = clone
+            link[cur] = clone
+        }
+    }
+    last = cur
+}
+
+for i in 0..<n {
+    let c = int(s[i]) - int('a')
+    extend(c)
+}
+
+mut long ans = 0L
+for v in 1..<sz do ans += len[v] - len[link[v]]
++= ans

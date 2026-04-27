@@ -1,0 +1,94 @@
+using System
+using System.Collections.Generic
+
+long mulMod(long a, long b, long mod) {
+    a %= mod
+    b %= mod
+    mut long res = 0L
+    while b > 0 {
+        if (b & 1L) == 1L then res = (res + a) % mod
+        a = (a + a) % mod
+        b /= 2L
+    }
+    return res
+}
+
+long powMod(long a, long e, long mod) {
+    mut long r = 1L
+    while e > 0 {
+        if (e & 1L) == 1L then r = mulMod(r, a, mod)
+        a = mulMod(a, a, mod)
+        e /= 2L
+    }
+    return r
+}
+
+bool isPrime(long n) {
+    if n < 2 then return false
+    for p in [2L, 3L, 5L, 7L, 11L, 13L, 17L, 19L, 23L, 29L, 31L, 37L] {
+        if n == p then return true
+        if n % p == 0 then return false
+    }
+    mut long d = n - 1
+    mut int s = 0
+    while d % 2L == 0L {
+        d /= 2L
+        s += 1
+    }
+    let bases = [2L, 325L, 9375L, 28178L, 450775L, 9780504L, 1795265022L]
+    bases -> a0 {
+        let a = a0 % n
+        if a == 0 then continue
+        mut long x = powMod(a, d, n)
+        if x == 1 or x == n - 1 then continue
+        mut bool ok = false
+        for _ in 0..<s-1 {
+            x = mulMod(x, x, n)
+            if x == n - 1 {
+                ok = true
+                break
+            }
+        }
+        if not ok then return false
+    }
+    return true
+}
+
+Random rng = new Random(1)
+
+long rho(long n) {
+    if n % 2L == 0L then return 2L
+    while true {
+        let c = rng.NextInt64(1L, n - 1L)
+        mut long x = rng.NextInt64(0L, n - 1L)
+        mut long y = x
+        mut long d = 1L
+        while d == 1L {
+            x = (mulMod(x, x, n) + c) % n
+            y = (mulMod(y, y, n) + c) % n
+            y = (mulMod(y, y, n) + c) % n
+            d = gcd(abs(x - y), n)
+        }
+        if d != n then return d
+    }
+}
+
+Dictionary<long, int> factors;
+
+rec void factor(long n) {
+    if n == 1L then return
+    if isPrime(n) {
+        if factors.ContainsKey(n) then factors[n] += 1 else factors += (n, 1)
+        return
+    }
+    let d = rho(n)
+    factor(d)
+    factor(n / d)
+}
+
+long x =
+factor(x)
+let keys = factors.Keys.copy().sort()
+keys -> k {
+    += $"{k} {factors[k]}"
+}

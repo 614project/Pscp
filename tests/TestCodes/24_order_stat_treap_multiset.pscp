@@ -1,0 +1,135 @@
+using System
+using System.Collections.Generic
+
+int q =
+let MAX = q + 5
+int[] left = new[MAX]
+int[] right = new[MAX]
+int[] priority = new[MAX]
+int[] size = new[MAX]
+int[] key = new[MAX]
+int[] cnt = new[MAX]
+Random rng = new Random(7)
+mut int nodes = 0
+mut int root = 0
+
+int nodeSize(int x) {
+    if x == 0 then return 0
+    return size[x]
+}
+
+void pull(int x) {
+    if x != 0 then size[x] = nodeSize(left[x]) + nodeSize(right[x]) + cnt[x]
+}
+
+int newNode(int x) {
+    nodes += 1
+    key[nodes] = x
+    cnt[nodes] = 1
+    size[nodes] = 1
+    priority[nodes] = rng.Next()
+    return nodes
+}
+
+int rotateRight(int y) {
+    let x = left[y]
+    left[y] = right[x]
+    right[x] = y
+    pull(y)
+    pull(x)
+    return x
+}
+
+int rotateLeft(int x) {
+    let y = right[x]
+    right[x] = left[y]
+    left[y] = x
+    pull(x)
+    pull(y)
+    return y
+}
+
+rec int insert(int t, int x) {
+    if t == 0 then return newNode(x)
+    if x == key[t] {
+        cnt[t] += 1
+    } else if x < key[t] {
+        left[t] = insert(left[t], x)
+        if priority[left[t]] > priority[t] then t = rotateRight(t)
+    } else {
+        right[t] = insert(right[t], x)
+        if priority[right[t]] > priority[t] then t = rotateLeft(t)
+    }
+    pull(t)
+    return t
+}
+
+rec int erase(int t, int x) {
+    if t == 0 then return 0
+    if x == key[t] {
+        if cnt[t] > 1 {
+            cnt[t] -= 1
+        } else if left[t] == 0 {
+            return right[t]
+        } else if right[t] == 0 {
+            return left[t]
+        } else if priority[left[t]] > priority[right[t]] {
+            t = rotateRight(t)
+            right[t] = erase(right[t], x)
+        } else {
+            t = rotateLeft(t)
+            left[t] = erase(left[t], x)
+        }
+    } else if x < key[t] {
+        left[t] = erase(left[t], x)
+    } else {
+        right[t] = erase(right[t], x)
+    }
+    pull(t)
+    return t
+}
+
+int rankLess(int t, int x) {
+    mut int ans = 0
+    while t != 0 {
+        if x <= key[t] {
+            t = left[t]
+        } else {
+            ans += nodeSize(left[t]) + cnt[t]
+            t = right[t]
+        }
+    }
+    return ans
+}
+
+int kth(int t, int k) {
+    while t != 0 {
+        let lsz = nodeSize(left[t])
+        if k <= lsz {
+            t = left[t]
+        } else if k <= lsz + cnt[t] {
+            return key[t]
+        } else {
+            k -= lsz + cnt[t]
+            t = right[t]
+        }
+    }
+    return -1
+}
+
+for _ in 0..<q {
+    int typ, x =
+    if typ == 1 {
+        root = insert(root, x)
+    } else if typ == 2 {
+        root = erase(root, x)
+    } else if typ == 3 {
+        += rankLess(root, x) + 1
+    } else if typ == 4 {
+        += kth(root, x)
+    } else if typ == 5 {
+        += kth(root, rankLess(root, x))
+    } else {
+        += kth(root, rankLess(root, x + 1) + 1)
+    }
+}

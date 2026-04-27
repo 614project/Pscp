@@ -1,0 +1,86 @@
+using System
+using System.Collections.Generic
+
+int q =
+int[] typ = new[q]
+long[] aa = new[q]
+long[] bb = new[q]
+List<long> coords;
+
+for i in 0..<q {
+    int t =
+    typ[i] = t
+    if t == 1 {
+        long m, b =
+        aa[i] = m
+        bb[i] = b
+    } else {
+        long x =
+        aa[i] = x
+        coords += x
+    }
+}
+
+let xs = coords.sort().distinct()
+let index = xs.index()
+let n = xs.Count
+let INF = 4000000000000000000L
+long[] lm = new[n * 4 + 5]
+long[] lb = new[n * 4 + 5]
+bool[] has = new[n * 4 + 5]
+
+long evalLine(long m, long b, long x) {
+    return m * x + b
+}
+
+rec void addLine(long nm, long nb, int node, int l, int r) {
+    let mid = (l + r) / 2
+    let xl = xs[l]
+    let xm = xs[mid]
+    let xr = xs[r]
+    if not has[node] {
+        has[node] = true
+        lm[node] = nm
+        lb[node] = nb
+        return
+    }
+    mut long cm = lm[node]
+    mut long cb = lb[node]
+    if evalLine(nm, nb, xm) < evalLine(cm, cb, xm) {
+        let tm = cm
+        let tb = cb
+        cm = nm
+        cb = nb
+        nm = tm
+        nb = tb
+        lm[node] = cm
+        lb[node] = cb
+    }
+    if l == r then return
+    if evalLine(nm, nb, xl) < evalLine(cm, cb, xl) {
+        addLine(nm, nb, node * 2, l, mid)
+    } else if evalLine(nm, nb, xr) < evalLine(cm, cb, xr) {
+        addLine(nm, nb, node * 2 + 1, mid + 1, r)
+    }
+}
+
+rec long query(int p, int node, int l, int r) {
+    let x = xs[p]
+    mut long ans = INF
+    if has[node] then ans = evalLine(lm[node], lb[node], x)
+    if l == r then return ans
+    let mid = (l + r) / 2
+    if p <= mid then chmin ref ans (query(p, node * 2, l, mid))
+    else chmin ref ans (query(p, node * 2 + 1, mid + 1, r))
+    return ans
+}
+
+for i in 0..<q {
+    if typ[i] == 1 {
+        if n > 0 then addLine(aa[i], bb[i], 1, 0, n - 1)
+    } else {
+        let p = index[aa[i]]
+        let ans = query(p, 1, 0, n - 1)
+        += ans
+    }
+}

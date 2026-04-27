@@ -1,0 +1,135 @@
+using System
+using System.Collections.Generic
+
+record struct Edge(int To, int W, int Id)
+
+int n, q =
+List<Edge>[] tree = new![n]
+int[] eu = new[n - 1]
+int[] ev = new[n - 1]
+int[] ew = new[n - 1]
+
+for i in 0..<n-1 {
+    int a, b, w =
+    a -= 1
+    b -= 1
+    eu[i] = a
+    ev[i] = b
+    ew[i] = w
+    tree[a] += new Edge(b, w, i)
+    tree[b] += new Edge(a, w, i)
+}
+
+int[] parent = new[n]
+int[] depth = new[n]
+int[] heavy = new[n]
+int[] size = new[n]
+int[] head = new[n]
+int[] pos = new[n]
+int[] baseVal = new[n]
+mut int cur = 0
+
+rec int dfsSize(int v, int p) {
+    parent[v] = p
+    size[v] = 1
+    heavy[v] = -1
+    mut int best = 0
+    tree[v] -> e {
+        if e.To == p then continue
+        depth[e.To] = depth[v] + 1
+        baseVal[e.To] = e.W
+        let sub = dfsSize(e.To, v)
+        size[v] += sub
+        if sub > best {
+            best = sub
+            heavy[v] = e.To
+        }
+    }
+    return size[v]
+}
+
+rec void dfsDecompose(int v, int h) {
+    head[v] = h
+    pos[v] = cur
+    cur += 1
+    if heavy[v] != -1 then dfsDecompose(heavy[v], h)
+    tree[v] -> e {
+        if e.To != parent[v] and e.To != heavy[v] {
+            dfsDecompose(e.To, e.To)
+        }
+    }
+}
+
+dfsSize(0, -1)
+dfsDecompose(0, 0)
+
+mut int segN = 1
+while segN < n do segN *= 2
+int[] seg = new[segN * 2]
+for i in 0..<segN*2 do seg[i] = -1
+
+void segSet(int p, int value) {
+    p += segN
+    seg[p] = value
+    p /= 2
+    while p > 0 {
+        seg[p] = max seg[p * 2] seg[p * 2 + 1]
+        p /= 2
+    }
+}
+
+int segQuery(int l, int r) {
+    if l > r then return -1
+    l += segN
+    r += segN
+    mut int ans = -1
+    while l <= r {
+        if l % 2 == 1 {
+            chmax ref ans seg[l]
+            l += 1
+        }
+        if r % 2 == 0 {
+            chmax ref ans seg[r]
+            r -= 1
+        }
+        l /= 2
+        r /= 2
+    }
+    return ans
+}
+
+for v in 0..<n do segSet(pos[v], baseVal[v])
+
+int queryPath(int a, int b) {
+    mut int ans = -1
+    while head[a] != head[b] {
+        if depth[head[a]] < depth[head[b]] {
+            let tmp = a
+            a = b
+            b = tmp
+        }
+        chmax ref ans (segQuery(pos[head[a]], pos[a]))
+        a = parent[head[a]]
+    }
+    if depth[a] > depth[b] {
+        let tmp = a
+        a = b
+        b = tmp
+    }
+    chmax ref ans (segQuery(pos[a] + 1, pos[b]))
+    return ans
+}
+
+for _ in 0..<q {
+    int typ =
+    if typ == 1 {
+        int id, w =
+        id -= 1
+        mut int child = eu[id]
+        if depth[ev[id]] > depth[child] then child = ev[id]
+        segSet(pos[child], w)
+    } else {
+        int a, b =
+        += queryPath(a - 1, b - 1)
+    }
+}

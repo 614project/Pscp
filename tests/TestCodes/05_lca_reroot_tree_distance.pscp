@@ -1,0 +1,100 @@
+using System.Collections.Generic
+
+void solve() {
+    int n =
+    List<int>[] tree = new![n]
+
+    0..<n - 1 -> _ {
+        int a, b =
+        let u = a - 1
+        let v = b - 1
+        tree[u] += v
+        tree[v] += u
+    }
+
+    mut int LOG = 1
+    while (1 << LOG) <= n { LOG += 1 }
+
+    int[LOG][n] up;
+    int[n] depth;
+    int[n] size;
+    long[n] downSum;
+    long[n] allSum;
+
+    rec void dfsBuild(int v, int p) {
+        up[0][v] = p
+        size[v] = 1
+        tree[v] -> to {
+            if to != p {
+                depth[to] = depth[v] + 1
+                dfsBuild(to, v)
+                size[v] += size[to]
+                downSum[v] += downSum[to] + size[to]
+            }
+        }
+    }
+
+    rec void dfsReroot(int v, int p) {
+        tree[v] -> to {
+            if to != p {
+                allSum[to] = allSum[v] + n - 2 * size[to]
+                dfsReroot(to, v)
+            }
+        }
+    }
+
+    dfsBuild(0, 0)
+    1..<LOG -> k {
+        0..<n -> v {
+            up[k][v] = up[k - 1][up[k - 1][v]]
+        }
+    }
+    allSum[0] = downSum[0]
+    dfsReroot(0, 0)
+
+    int lift(int v, int delta) {
+        var x = v
+        0..<LOG -> k {
+            if ((delta >> k) & 1) == 1 then x = up[k][x]
+        }
+        x
+    }
+
+    int lca(int a, int b) {
+        var x = a
+        var y = b
+        if depth[x] < depth[y] {
+            let tmp = x
+            x = y
+            y = tmp
+        }
+        x = lift(x, depth[x] - depth[y])
+        if x == y then x
+        else {
+            (LOG - 1)..-1..0 -> k {
+                if up[k][x] != up[k][y] {
+                    x = up[k][x]
+                    y = up[k][y]
+                }
+            }
+            up[0][x]
+        }
+    }
+
+    int distance(int a, int b) {
+        let c = lca(a, b)
+        depth[a] + depth[b] - 2 * depth[c]
+    }
+
+    int q =
+    0..<q -> _ {
+        int a, b =
+        += distance(a - 1, b - 1)
+    }
+
+    let sums = allSum.map(x => x)
+    stdout.join(' ', sums)
+    += ""
+}
+
+solve()

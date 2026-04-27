@@ -1,0 +1,68 @@
+using System.Collections.Generic
+
+record struct Query(int Kind, int Index, int X)
+
+void solve() {
+    int n, q =
+    int[n] a =
+    Query[q] queries;
+    List<int> values;
+
+    a -> x { values += x }
+
+    0..<q -> i {
+        int kind = stdin.readInt()
+        if kind == 1 {
+            int index = stdin.readInt()
+            int value = stdin.readInt()
+            queries[i] = new Query(kind, index - 1, value)
+            values += value
+        } else {
+            int x = stdin.readInt()
+            queries[i] = new Query(kind, -1, x)
+            values += x
+        }
+    }
+
+    let sortedValues = values.sort().distinct()
+    let coord = sortedValues.index()
+    int[sortedValues.Length + 2] bit;
+
+    void add(int pos, int delta) {
+        var i = pos + 1
+        while i < bit.Length {
+            bit[i] += delta
+            i += i & -i
+        }
+    }
+
+    int sumPrefix(int pos) {
+        var i = pos + 1
+        var res = 0
+        while i > 0 {
+            res += bit[i]
+            i -= i & -i
+        }
+        res
+    }
+
+    int countLessOrEqual(int x) {
+        sumPrefix(coord[x])
+    }
+
+    0..<n -> i {
+        add(coord[a[i]], 1)
+    }
+
+    queries -> query {
+        if query.Kind == 1 {
+            add(coord[a[query.Index]], -1)
+            a[query.Index] = query.X
+            add(coord[a[query.Index]], 1)
+        } else {
+            += countLessOrEqual(query.X)
+        }
+    }
+}
+
+solve()

@@ -515,13 +515,6 @@ internal sealed partial class CSharpEmitter
                     return list.ToArray();
                 }
 
-                public static T[] sortWith<T>(this IEnumerable<T> source, Comparison<T> comparer)
-                {
-                    List<T> list = source.ToList();
-                    list.Sort(comparer);
-                    return list.ToArray();
-                }
-
                 public static T[] sortWith<T>(this IEnumerable<T> source, IComparer<T> comparer)
                 {
                     List<T> list = source.ToList();
@@ -1122,10 +1115,14 @@ internal sealed partial class CSharpEmitter
                     #endif
 
                         long value = 0;
+                    #if DEBUG
                         bool hasDigits = false;
+                    #endif
                         while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
                         {
+                    #if DEBUG
                             hasDigits = true;
+                    #endif
                             value = (value * 10L) + (_reader.Read() - '0');
                         }
 
@@ -1140,7 +1137,7 @@ internal sealed partial class CSharpEmitter
 
             if (needLineAlignment)
             {
-                builder.AppendLine("        _afterTokenRead = hasDigits;");
+                builder.AppendLine("        _afterTokenRead = true;");
             }
 
             builder.AppendLine(
@@ -1194,10 +1191,14 @@ internal sealed partial class CSharpEmitter
                     #endif
 
                         ulong value = 0UL;
+                    #if DEBUG
                         bool hasDigits = false;
+                    #endif
                         while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
                         {
+                    #if DEBUG
                             hasDigits = true;
+                    #endif
                             value = (value * 10UL) + (uint)(_reader.Read() - '0');
                         }
 
@@ -1212,7 +1213,7 @@ internal sealed partial class CSharpEmitter
 
             if (needLineAlignment)
             {
-                builder.AppendLine("        _afterTokenRead = hasDigits;");
+                builder.AppendLine("        _afterTokenRead = true;");
             }
 
             builder.AppendLine(

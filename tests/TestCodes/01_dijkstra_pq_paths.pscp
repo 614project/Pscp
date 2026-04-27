@@ -1,0 +1,73 @@
+using System.Collections.Generic
+
+void solve() {
+    int n, m, s =
+    (int, int, long)[m] edges =
+
+    List<(int, long)>[] graph = new![n]
+    edges -> e {
+        let a = e.1 - 1
+        let b = e.2 - 1
+        let w = e.3
+        graph[a] += (b, w)
+        graph[b] += (a, w)
+    }
+
+    long INF = 4000000000000000000
+    long[n] dist;
+    int[n] parent;
+    bool[n] done;
+
+    0..<n -> i {
+        dist[i] = INF
+        parent[i] = -1
+    }
+
+    let start = s - 1
+    dist[start] = 0
+
+    PriorityQueue<int, long> pq;
+    pq += (start, 0)
+
+    while pq.Count > 0 {
+        let v = --pq
+        if done[v] then continue
+        done[v] = true
+
+        graph[v] -> edge {
+            let to = edge.1
+            let w = edge.2
+            let nd = dist[v] + w
+            if nd < dist[to] {
+                dist[to] = nd
+                parent[to] = v
+                pq += (to, nd)
+            }
+        }
+    }
+
+    let printable = dist.map(x => if x == INF then -1 else x)
+    stdout.join(' ', printable)
+    += ""
+
+    int q =
+    0..<q -> _ {
+        int target =
+        let t = target - 1
+        if dist[t] == INF {
+            += "unreachable"
+        } else {
+            List<int> path;
+            mut int cur = t
+            while cur != -1 {
+                path += cur + 1
+                cur = parent[cur]
+            }
+            let rev = path.reverse()
+            stdout.join(' ', rev)
+            += ""
+        }
+    }
+}
+
+solve()

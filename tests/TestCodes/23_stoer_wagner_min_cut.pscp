@@ -1,0 +1,55 @@
+using System
+using System.Collections.Generic
+
+int n, m =
+long[n][n] w;
+for _ in 0..<m {
+    int a, b =
+    long c =
+    a -= 1
+    b -= 1
+    w[a][b] += c
+    w[b][a] += c
+}
+
+List<int> active;
+for i in 0..<n do active += i
+let INF = 4000000000000000000L
+mut long answer = INF
+
+while active.Count > 1 {
+    long[] weight = new[n]
+    bool[] added = new[n]
+    mut int prev = -1
+    mut int sel = -1
+    for phase in 0..<active.Count {
+        sel = -1
+        active -> v {
+            if not added[v] and (sel == -1 or weight[v] > weight[sel]) {
+                sel = v
+            }
+        }
+        if phase == active.Count - 1 {
+            chmin ref answer weight[sel]
+            active -> v {
+                if v != sel {
+                    w[prev][v] += w[sel][v]
+                    w[v][prev] = w[prev][v]
+                }
+            }
+            mut int removeAt = -1
+            for i in 0..<active.Count {
+                if active[i] == sel then removeAt = i
+            }
+            active.RemoveAt(removeAt)
+        } else {
+            added[sel] = true
+            prev = sel
+            active -> v {
+                if not added[v] then weight[v] += w[sel][v]
+            }
+        }
+    }
+}
+
++= answer

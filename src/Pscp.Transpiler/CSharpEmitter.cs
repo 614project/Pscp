@@ -731,7 +731,7 @@ internal sealed partial class CSharpEmitter
     {
         switch (statement)
         {
-            case ExpressionStatement { HasSemicolon: false } expressionStatement when isTerminal:
+            case ExpressionStatement { HasSemicolon: false } expressionStatement when isTerminal && IsImplicitReturnEligibleExpression(expressionStatement.Expression):
                 _writer.WriteLine($"return {EmitExpression(expressionStatement.Expression)};");
                 return true;
             case BlockStatement block when isTerminal:
@@ -759,7 +759,8 @@ internal sealed partial class CSharpEmitter
     private bool CanEmitReturningStatement(Statement statement)
         => statement switch
         {
-            ExpressionStatement { HasSemicolon: false } => true,
+            ReturnStatement => true,
+            ExpressionStatement { HasSemicolon: false } expressionStatement => IsImplicitReturnEligibleExpression(expressionStatement.Expression),
             BlockStatement block => block.Statements.Count > 0 && CanEmitReturningStatement(block.Statements[^1]),
             IfStatement ifStatement when ifStatement.ElseBranch is not null
                 => CanEmitReturningStatement(ifStatement.ThenBranch) && CanEmitReturningStatement(ifStatement.ElseBranch),
@@ -768,7 +769,8 @@ internal sealed partial class CSharpEmitter
 
     private void EmitReturningEmbeddedStatement(Statement statement)
     {
-        if (statement is ExpressionStatement { HasSemicolon: false } expressionStatement)
+        if (statement is ExpressionStatement { HasSemicolon: false } expressionStatement
+            && IsImplicitReturnEligibleExpression(expressionStatement.Expression))
         {
             _writer.WriteLine("{");
             _writer.Indent();
@@ -1635,12 +1637,23 @@ internal sealed partial class CSharpEmitter
 
     private bool TryEmitLoweredHoistedDeclarationInitialization(DeclarationStatement declaration, string name)
     {
+        TypeSyntax? declaredType = NormalizeSizedTypeOrNull(declaration.ExplicitType ?? _semantic?.GetExpressionType(declaration.Initializer!));
+        if (declaredType is null)
+        {
+            return false;
+        }
+
+        if (declaration.Initializer is CollectionExpression collection
+            && TryEmitLoweredCollectionAssignment(name, EmitType(declaredType), declaredType, collection))
+        {
+            return true;
+        }
+
         if (declaration.Initializer is not TargetTypedNewArrayExpression targetTypedNewArray)
         {
             return false;
         }
 
-        TypeSyntax? declaredType = NormalizeSizedTypeOrNull(declaration.ExplicitType ?? _semantic?.GetExpressionType(declaration.Initializer));
         if (declaredType is not ArrayTypeSyntax arrayType
             || targetTypedNewArray.Dimensions.Count != 1
             || !targetTypedNewArray.AutoConstructElements
@@ -1662,6 +1675,40 @@ internal sealed partial class CSharpEmitter
         _writer.Unindent();
         _writer.WriteLine("}");
         return true;
+    }
+
+    private bool TryEmitLoweredCollectionAssignment(string name, string typeText, TypeSyntax declaredType, CollectionExpression collection)
+    {
+        TypeSyntax? elementType = GetCollectionElementType(declaredType);
+        if (elementType is null)
+        {
+            return false;
+        }
+
+        if (declaredType is not ArrayTypeSyntax || collection.Elements.Count != 1)
+        {
+            return false;
+        }
+
+        switch (collection.Elements[0])
+        {
+            case RangeElement rangeElement when !IsLongRange(rangeElement.Range, declaredType):
+            {
+                string itemName = NextTemporary("value");
+                EmitRangeArrayInitialization(name, typeText, elementType, rangeElement.Range, itemName, null, itemName, declareVariable: false);
+                return true;
+            }
+            case BuilderElement builderElement when builderElement.Source is RangeExpression range && !IsLongRange(range, declaredType):
+            {
+                string itemName = ChooseBindingName(builderElement.ItemTarget, "item");
+                string? indexName = builderElement.IndexTarget is null ? null : ChooseBindingName(builderElement.IndexTarget, "index");
+                string valueExpression = EmitLambdaBodyExpression(builderElement.Body, builderElement.IndexTarget, indexName, builderElement.ItemTarget, itemName);
+                EmitRangeArrayInitialization(name, typeText, elementType, range, itemName, indexName, valueExpression, declareVariable: false);
+                return true;
+            }
+            default:
+                return false;
+        }
     }
 
     private bool TryEmitLoweredTargetTypedNewArrayDeclaration(string name, string typeText, TypeSyntax declaredType, TargetTypedNewArrayExpression targetTypedNewArray)
@@ -1773,13 +1820,17 @@ internal sealed partial class CSharpEmitter
         return true;
     }
 
-    private void EmitRangeArrayInitialization(string name, string typeText, TypeSyntax elementType, RangeExpression range, string itemName, string? indexName, string valueExpression)
+    private void EmitRangeArrayInitialization(string name, string typeText, TypeSyntax elementType, RangeExpression range, string itemName, string? indexName, string valueExpression, bool declareVariable = true)
     {
         string startName = NextTemporary("start");
         string endName = NextTemporary("end");
         string countName = NextTemporary("count");
         string slotName = NextTemporary("slot");
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
+        string EmitArrayAllocation(string lengthExpression)
+            => declareVariable
+                ? $"{typeText} {name} = new {EmitType(elementType)}[{lengthExpression}];"
+                : $"{name} = new {EmitType(elementType)}[{lengthExpression}];";
 
         if (range.Step is null)
         {
@@ -1788,7 +1839,7 @@ internal sealed partial class CSharpEmitter
                 string directStart = EmitExpression(range.Start);
                 string directEnd = EmitExpression(range.End);
                 string directCount = EmitDefaultRangeCountExpression(directStart, directEnd, range.Kind);
-                _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{directCount}];");
+                _writer.WriteLine(EmitArrayAllocation(directCount));
                 string directLoopHeader = indexName is null
                     ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++)"
                     : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++)";
@@ -1806,7 +1857,7 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
             string countExpression = EmitDefaultRangeCountExpression(startName, endName, range.Kind);
             _writer.WriteLine($"int {countName} = {countExpression};");
-            _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{countName}];");
+            _writer.WriteLine(EmitArrayAllocation(countName));
             _writer.WriteLine($"int {slotName} = 0;");
             string defaultLoopHeader = indexName is null
                 ? $"for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {itemName}++)"
@@ -1837,7 +1888,7 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("#endif");
         _writer.WriteLine($"int {absStepName} = {stepName} > 0 ? {stepName} : -{stepName};");
         _writer.WriteLine($"int {countName} = {stepName} > 0 ? {forwardCount} : {backwardCount};");
-        _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[{countName}];");
+        _writer.WriteLine(EmitArrayAllocation(countName));
         _writer.WriteLine($"int {slotName} = 0;");
         string loopHeader = indexName is null
             ? $"for (int {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {backwardOp} {endName}; {itemName} += {stepName})"
@@ -2982,6 +3033,14 @@ PSCP source:"
     private static bool IsBareInvocation(Expression expression)
         => expression is CallExpression;
 
+    private static bool IsImplicitReturnEligibleExpression(Expression expression)
+        => expression switch
+        {
+            AssignmentExpression assignment => assignment.IsExplicitValueAssignment,
+            PrefixExpression or PostfixExpression => false,
+            _ => !IsBareInvocation(expression),
+        };
+
     private static Expression? GetImplicitReturnExpression(BlockStatement block)
     {
         if (block.Statements.Count == 0)
@@ -2994,12 +3053,7 @@ PSCP source:"
             return null;
         }
 
-        if (expressionStatement.Expression is AssignmentExpression { IsExplicitValueAssignment: false })
-        {
-            return null;
-        }
-
-        return IsBareInvocation(expressionStatement.Expression) ? null : expressionStatement.Expression;
+        return IsImplicitReturnEligibleExpression(expressionStatement.Expression) ? expressionStatement.Expression : null;
     }
 
     private static bool ContainsExplicitReturn(BlockStatement block)

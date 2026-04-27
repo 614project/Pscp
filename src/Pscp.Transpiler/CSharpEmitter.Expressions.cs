@@ -107,6 +107,9 @@ internal sealed partial class CSharpEmitter
             BinaryOperator.GreaterThanOrEqual => ">=",
             BinaryOperator.Equal => "==",
             BinaryOperator.NotEqual => "!=",
+            BinaryOperator.BitwiseAnd => "&",
+            BinaryOperator.BitwiseXor => "^",
+            BinaryOperator.BitwiseOr => "|",
             BinaryOperator.LogicalAnd => "&&",
             BinaryOperator.LogicalOr => "||",
             _ => "^",
@@ -666,7 +669,14 @@ internal sealed partial class CSharpEmitter
             return conversion!;
         }
 
-        return $"{EmitExpression(callee)}({string.Join(", ", arguments.Select(EmitArgument))})";
+        string argumentText = string.Join(", ", arguments.Select(EmitArgument));
+        if (callee is IdentifierExpression typeIdentifier
+            && _declaredTypeNames.Contains(typeIdentifier.Name))
+        {
+            return $"new {typeIdentifier.Name}({argumentText})";
+        }
+
+        return $"{EmitExpression(callee)}({argumentText})";
     }
 
     private bool TryEmitConversionPipe(IdentifierExpression identifier, Expression operand, out string? emitted)
@@ -1488,7 +1498,7 @@ internal sealed partial class CSharpEmitter
         {
             LiteralExpression { Kind: LiteralKind.True or LiteralKind.False }
                 or IsPatternExpression
-                or BinaryExpression { Operator: BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual or BinaryOperator.Equal or BinaryOperator.NotEqual or BinaryOperator.LogicalAnd or BinaryOperator.LogicalOr or BinaryOperator.LogicalXor }
+                or BinaryExpression { Operator: BinaryOperator.LessThan or BinaryOperator.LessThanOrEqual or BinaryOperator.GreaterThan or BinaryOperator.GreaterThanOrEqual or BinaryOperator.Equal or BinaryOperator.NotEqual or BinaryOperator.LogicalAnd or BinaryOperator.LogicalOr or BinaryOperator.BitwiseAnd or BinaryOperator.BitwiseXor or BinaryOperator.BitwiseOr }
                 or UnaryExpression { Operator: UnaryOperator.LogicalNot } => new NamedTypeSyntax("bool", Immutable.List<TypeSyntax>()),
             CallExpression { Callee: MemberAccessExpression { MemberName: "Any" or "All" or "Contains" } } => new NamedTypeSyntax("bool", Immutable.List<TypeSyntax>()),
             _ => null,

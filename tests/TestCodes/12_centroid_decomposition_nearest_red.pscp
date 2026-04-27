@@ -1,0 +1,80 @@
+using System
+using System.Collections.Generic
+
+int n, q =
+List<int>[] graph = new![n]
+for _ in 0..<n-1 {
+    int a, b =
+    a -= 1
+    b -= 1
+    graph[a] += b
+    graph[b] += a
+}
+
+bool[] dead = new[n]
+int[] sub = new[n]
+List<(int, int)>[] up = new![n]
+let INF = 1000000000
+
+rec int calcSize(int v, int p) {
+    sub[v] = 1
+    graph[v] -> to {
+        if to != p and not dead[to] {
+            sub[v] += calcSize(to, v)
+        }
+    }
+    return sub[v]
+}
+
+rec int findCentroid(int v, int p, int total) {
+    graph[v] -> to {
+        if to != p and not dead[to] and sub[to] * 2 > total {
+            return findCentroid(to, v, total)
+        }
+    }
+    return v
+}
+
+rec void collect(int v, int p, int d, int c) {
+    up[v] += (c, d)
+    graph[v] -> to {
+        if to != p and not dead[to] {
+            collect(to, v, d + 1, c)
+        }
+    }
+}
+
+rec void build(int entry) {
+    let total = calcSize(entry, -1)
+    let c = findCentroid(entry, -1, total)
+    collect(c, -1, 0, c)
+    dead[c] = true
+    graph[c] -> to {
+        if not dead[to] then build(to)
+    }
+}
+
+build(0)
+int[] best = new[n]
+for i in 0..<n do best[i] = INF
+
+void paint(int v) {
+    up[v] -> p {
+        chmin ref best[p.1] p.2
+    }
+}
+
+int query(int v) {
+    mut int ans = INF
+    up[v] -> p {
+        chmin ref ans (best[p.1] + p.2)
+    }
+    return ans
+}
+
+paint(0)
+for _ in 0..<q {
+    int typ, v =
+    v -= 1
+    if typ == 1 then paint(v) else += query(v)
+}

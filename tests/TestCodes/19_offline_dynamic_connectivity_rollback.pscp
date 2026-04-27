@@ -1,0 +1,108 @@
+using System
+using System.Collections.Generic
+
+int n, q =
+List<(int, int)>[] seg = new![q * 4 + 5]
+Dictionary<(int, int), int> start;
+bool[] ask = new[q]
+
+(int, int) norm(int a, int b) {
+    if a > b {
+        let t = a
+        a = b
+        b = t
+    }
+    return (a, b)
+}
+
+rec void addSeg(int node, int l, int r, int ql, int qr, (int, int) e) {
+    if qr < l or r < ql then return
+    if ql <= l and r <= qr {
+        seg[node] += e
+        return
+    }
+    let mid = (l + r) / 2
+    addSeg(node * 2, l, mid, ql, qr, e)
+    addSeg(node * 2 + 1, mid + 1, r, ql, qr, e)
+}
+
+for time in 0..<q {
+    char op =
+    if op == '?' {
+        ask[time] = true
+    } else {
+        int a, b =
+        a -= 1
+        b -= 1
+        let e = norm(a, b)
+        if op == '+' {
+            start += (e, time)
+        } else {
+            let l = start[e]
+            start -= e
+            if l <= time - 1 then addSeg(1, 0, q - 1, l, time - 1, e)
+        }
+    }
+}
+
+start.Keys.copy() -> e {
+    let l = start[e]
+    if l <= q - 1 then addSeg(1, 0, q - 1, l, q - 1, e)
+}
+
+int[] parent = new[n]
+int[] sz = new[n]
+for i in 0..<n {
+    parent[i] = i
+    sz[i] = 1
+}
+mut int comps = n
+Stack<(int, int, int)> hist;
+
+int find(int x) {
+    while x != parent[x] do x = parent[x]
+    return x
+}
+
+void unite(int a, int b) {
+    a = find(a)
+    b = find(b)
+    if a == b {
+        hist += (-1, -1, -1)
+        return
+    }
+    if sz[a] < sz[b] {
+        let t = a
+        a = b
+        b = t
+    }
+    hist += (b, a, sz[a])
+    parent[b] = a
+    sz[a] += sz[b]
+    comps -= 1
+}
+
+void rollback() {
+    let h = --hist
+    if h.1 == -1 then return
+    parent[h.1] = h.1
+    sz[h.2] = h.3
+    comps += 1
+}
+
+rec void solve(int node, int l, int r) {
+    let before = hist.Count
+    seg[node] -> e {
+        unite(e.1, e.2)
+    }
+    if l == r {
+        if ask[l] then += comps
+    } else {
+        let mid = (l + r) / 2
+        solve(node * 2, l, mid)
+        solve(node * 2 + 1, mid + 1, r)
+    }
+    while hist.Count > before do rollback()
+}
+
+if q > 0 then solve(1, 0, q - 1)
