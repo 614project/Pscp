@@ -697,15 +697,17 @@ function createConfiguredServerLaunch(candidate, args = []) {
 
   const stat = fs.statSync(candidate);
   if (stat.isDirectory()) {
+    const directBinary = path.join(candidate, 'Pscp.LanguageServer');
     const directExe = path.join(candidate, 'Pscp.LanguageServer.exe');
     const directDll = path.join(candidate, 'Pscp.LanguageServer.dll');
-    const sdkExe = path.join(candidate, 'pscp.exe');
-    return createDirectServerLaunch(directExe, args)
+    const sdkExecutable = path.join(candidate, getPscpExecutableName());
+    return createDirectServerLaunch(directBinary, args)
+      || createDirectServerLaunch(directExe, args)
       || createDirectServerLaunch(directDll, args)
-      || createSdkLaunch(sdkExe);
+      || createSdkLaunch(sdkExecutable);
   }
 
-  if (path.basename(candidate).toLowerCase() === 'pscp.exe') {
+  if (path.basename(candidate).toLowerCase() === getPscpExecutableName()) {
     return createSdkLaunch(candidate);
   }
 
@@ -748,7 +750,7 @@ function createSdkLaunch(candidate) {
   }
 
   const sdkExecutable = fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()
-    ? path.join(candidate, 'pscp.exe')
+    ? path.join(candidate, getPscpExecutableName())
     : candidate;
   if (!fs.existsSync(sdkExecutable)) {
     return null;
@@ -765,13 +767,18 @@ function createSdkLaunch(candidate) {
 }
 
 function createPathSdkLaunch() {
-  const where = cp.spawnSync('where.exe', ['pscp'], { windowsHide: true, encoding: 'utf8' });
-  if (where.status !== 0 || !where.stdout) {
+  const finder = process.platform === 'win32' ? 'where.exe' : 'which';
+  const result = cp.spawnSync(finder, ['pscp'], { windowsHide: true, encoding: 'utf8' });
+  if (result.status !== 0 || !result.stdout) {
     return null;
   }
 
-  const candidate = where.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
+  const candidate = result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
   return candidate ? createSdkLaunch(candidate) : null;
+}
+
+function getPscpExecutableName() {
+  return process.platform === 'win32' ? 'pscp.exe' : 'pscp';
 }
 
 function getInstalledSdkCandidates() {
@@ -931,16 +938,16 @@ function resolvePscpExecutable(context) {
   const configuredTranspiler = normalizeConfiguredPath(config.get('transpiler.path'));
   if (configuredTranspiler && fs.existsSync(configuredTranspiler)) {
     return fs.statSync(configuredTranspiler).isDirectory()
-      ? path.join(configuredTranspiler, 'pscp.exe')
+      ? path.join(configuredTranspiler, getPscpExecutableName())
       : configuredTranspiler;
   }
 
   const configuredServer = normalizeConfiguredPath(config.get('server.path'));
   if (configuredServer && fs.existsSync(configuredServer)) {
     const candidate = fs.statSync(configuredServer).isDirectory()
-      ? path.join(configuredServer, 'pscp.exe')
+      ? path.join(configuredServer, getPscpExecutableName())
       : configuredServer;
-    if (path.basename(candidate).toLowerCase() === 'pscp.exe' && fs.existsSync(candidate)) {
+    if (path.basename(candidate).toLowerCase() === getPscpExecutableName() && fs.existsSync(candidate)) {
       return candidate;
     }
   }
@@ -948,7 +955,7 @@ function resolvePscpExecutable(context) {
   const configuredSdk = normalizeConfiguredPath(config.get('sdkPath'));
   if (configuredSdk && fs.existsSync(configuredSdk)) {
     const candidate = fs.statSync(configuredSdk).isDirectory()
-      ? path.join(configuredSdk, 'pscp.exe')
+      ? path.join(configuredSdk, getPscpExecutableName())
       : configuredSdk;
     if (fs.existsSync(candidate)) {
       return candidate;
