@@ -63,7 +63,7 @@ let sortedQueries = queries.sortWith((a, b) => {
     return a.T <=> b.T
 })
 
-int[] freq = new[compressed.Count]
+int[] freq = new[compressed.Length]
 int[] answer = new[queries.Count]
 mut int distinct = 0
 

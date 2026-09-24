@@ -207,6 +207,13 @@ public sealed partial class Parser
             SkipSeparators();
             Expect(TokenKind.Else, "Expected 'else' in one-line if expression.");
             SkipSeparators();
+            if (StartsStatementOnlyForm(Current.Kind))
+            {
+                // `if c then f(x) else += y`: the else branch can only be a statement, so the whole form is one.
+                Statement elseStatement = ParseEmbeddedStatement();
+                return new IfStatement(condition, new ExpressionStatement(thenExpression, false), elseStatement, true);
+            }
+
             Expression elseExpression = ParseExpression();
             bool hasSemicolon = TryConsumeSemicolon();
             return new ExpressionStatement(

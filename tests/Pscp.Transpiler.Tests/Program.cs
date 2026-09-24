@@ -787,6 +787,126 @@ internal static class TestRunner
                 """,
                 "",
                 "20\n"),
+            new(
+                "TupleAndGenericReturnTypes",
+                """
+                (int, int) pair(int a) {
+                    return (a, a + 1)
+                }
+
+                List<int> wrap(int a) {
+                    List<int> result
+                    result += a
+                    return result
+                }
+
+                let p = pair(3)
+                += p.2
+                += wrap(7).Count
+                """,
+                "",
+                "4\n1\n"),
+            new(
+                "SideEffectingPriorityQueueAndDictionaryAdd",
+                """
+                PriorityQueue<int, int> pq
+                pq += stdin.tuple2<int, int>()
+                Dictionary<int, int> d
+                d += stdin.tuple2<int, int>()
+                let rest = stdin.int()
+                += pq.Count
+                += d[30]
+                += rest
+                """,
+                "10 20 30 40 50",
+                "1\n40\n50\n"),
+            new(
+                "ChminEvaluatesTargetOnce",
+                """
+                mut int calls = 0
+                int idx() {
+                    calls += 1
+                    return 1
+                }
+
+                int[] d = [10, 20]
+                chmin(ref d[idx()], 5)
+                += calls
+                += d[1]
+                """,
+                "",
+                "1\n5\n"),
+            new(
+                "HoistedAggregatesInRefAndStructContexts",
+                """
+                record struct Bag(int[] Items) {
+                    public int Total() => sum (0..<Items.Length -> i do Items[i])
+                }
+
+                void relax(ref int best, int[] values) {
+                    chmin(ref best, min values)
+                }
+
+                mut int best = 100
+                relax(ref best, [7, 3, 9])
+                += Bag([1, 2, 3]).Total()
+                += best
+                """,
+                "",
+                "6\n3\n"),
+            new(
+                "OneLineIfWithVoidAndOutputBranches",
+                """
+                mut int c = 0
+                void inc() {
+                    c += 1
+                }
+
+                void paint(int v) {
+                    += v * 10
+                }
+
+                0..<3 -> i {
+                    if i % 2 == 0 then inc() else paint(i)
+                    if i == 2 then paint(i) else += i
+                }
+                += c
+                """,
+                "",
+                "0\n10\n1\n20\n2\n"),
+            new(
+                "ReassignedImmutableBindingIsNotConst",
+                """
+                bool ok = true
+                int n =
+                if n > 1 {
+                    ok = false
+                }
+                += ok
+                """,
+                "5",
+                "False\n")
+            {
+                ExpectedWarnings = ["is immutable but is modified"],
+            },
+            new(
+                "CompoundBitwiseAssignmentsAndCharJoin",
+                """
+                mut int x = 1
+                x |= 4
+                x ^= 1
+                x <<= 3
+                mut long y = 256
+                y >>= 2
+                y &= 12L
+                += x
+                += y
+                let a = [3, 1]
+                stdout.join(',', a)
+                += ""
+                """,
+                "",
+                "32\n0\n3,1\n"),
         ];
 
         List<string> failures = [];
@@ -846,6 +966,7 @@ internal static class TestRunner
             }
         }
 
+        await VerifySampleProgramsBuildAsync(workspaceRoot, generatedRoot, failures);
         VerifyBinaryMinMaxLowering(failures);
         VerifyConstLetLowering(failures);
         VerifyPipeConversionAndShadowedBindingLowering(failures);
@@ -886,6 +1007,7 @@ internal static class TestRunner
         VerifyExplainHeaderEmission(failures);
         VerifyWarningDiagnostics(failures);
         VerifyRemovedGenericReadSurface(failures);
+        VerifyHoistedValueBlocksAvoidThunks(failures);
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
         await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
@@ -2166,6 +2288,35 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyHoistedValueBlocksAvoidThunks(List<string> failures)
+    {
+        TranspilationResult result = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                record struct Bag(int[] Items) {
+                    public int Total() => sum (0..<Items.Length -> i do Items[i])
+                }
+
+                int n =
+                int[n] a =
+                let avg = sum(a) / n + count(a, x => x % 2 == 0)
+                if any(a, x => x == 2) and n > 0 {
+                    += "has2"
+                }
+                += avg
+                += n > 100 ? sum(a) : 0
+                """),
+            new TranspilationOptions("Pscp.Generated", "HoistProgram"));
+
+        string userCode = GetUserCodePortion(result.CSharpCode);
+        int thunkCount = userCode.Split("__PscpThunk.run(").Length - 1;
+        if (!result.Success || thunkCount != 1)
+        {
+            // Only the value inside the conditional branch must stay lazy; everything else is hoisted.
+            failures.Add($"HoistedValueBlocksAvoidThunks: expected exactly one thunk, found {thunkCount}\n{FormatDiagnostics(result.Diagnostics)}\n{userCode}");
+        }
+    }
+
     private static void VerifyRemovedGenericReadSurface(List<string> failures)
     {
         ExpectDiagnostic(
@@ -2401,6 +2552,7 @@ internal static class TestRunner
         string[] runtimeMarkers =
         [
             "public static class __PscpArray",
+            "public static class __PscpCollection",
             "public static class __PscpThunk",
             "public static class __PscpSeq",
             "public sealed class __PscpStdin",
@@ -2423,6 +2575,72 @@ internal static class TestRunner
         return userCode.Length < generatedCode.Length ? generatedCode[userCode.Length..] : string.Empty;
     }
 
+    // Every program under tests/TestCodes must transpile without errors and compile as C#. They are built
+    // together as one library, each in its own namespace, so a single `dotnet build` covers all of them.
+    private static async Task VerifySampleProgramsBuildAsync(string workspaceRoot, string generatedRoot, List<string> failures)
+    {
+        string samplesDirectory = Path.Combine(workspaceRoot, "tests", "TestCodes");
+        string[] samples = Directory.GetFiles(samplesDirectory, "*.pscp").OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        if (samples.Length == 0)
+        {
+            failures.Add($"SamplePrograms: no .pscp files found in {samplesDirectory}");
+            return;
+        }
+
+        string projectDirectory = Path.Combine(generatedRoot, "SamplePrograms");
+        if (Directory.Exists(projectDirectory))
+        {
+            Directory.Delete(projectDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(projectDirectory);
+        bool anyTranspiled = false;
+        foreach (string sample in samples)
+        {
+            string sampleName = Path.GetFileNameWithoutExtension(sample);
+            string safeName = "S" + string.Concat(sampleName.Where(char.IsLetterOrDigit));
+            string source = await File.ReadAllTextAsync(sample, Encoding.UTF8);
+            TranspilationResult result = PscpTranspiler.Transpile(
+                NormalizeSource(source),
+                new TranspilationOptions("Pscp.Samples." + safeName, safeName + "Program"));
+
+            if (!result.Success)
+            {
+                failures.Add($"SamplePrograms/{sampleName}: transpiler diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+                continue;
+            }
+
+            await File.WriteAllTextAsync(Path.Combine(projectDirectory, safeName + ".cs"), result.CSharpCode, Encoding.UTF8);
+            anyTranspiled = true;
+        }
+
+        if (!anyTranspiled)
+        {
+            return;
+        }
+
+        await File.WriteAllTextAsync(
+            Path.Combine(projectDirectory, "SamplePrograms.csproj"),
+            CreateProjectFile().Replace("<OutputType>Exe</OutputType>", "<OutputType>Library</OutputType>", StringComparison.Ordinal),
+            Encoding.UTF8);
+
+        ProcessResult build = await RunDotnetAsync(
+            "build \"" + Path.Combine(projectDirectory, "SamplePrograms.csproj") + "\" -nologo -v q -clp:NoSummary",
+            projectDirectory,
+            string.Empty);
+
+        if (build.ExitCode != 0)
+        {
+            string errors = string.Join(
+                "\n",
+                (build.StdOut + "\n" + build.StdErr)
+                    .Split('\n')
+                    .Where(line => line.Contains(" error ", StringComparison.Ordinal))
+                    .Distinct(StringComparer.Ordinal));
+            failures.Add($"SamplePrograms: generated C# failed to compile\n{errors}\n{build.StdErr}");
+        }
+    }
+
     private static string CreateProjectFile()
         => """
            <Project Sdk="Microsoft.NET.Sdk">
@@ -2434,6 +2652,8 @@ internal static class TestRunner
              </PropertyGroup>
            </Project>
            """;
+
+    private static readonly TimeSpan ProcessTimeout = TimeSpan.FromMinutes(3);
 
     private static async Task<ProcessResult> RunDotnetAsync(string arguments, string workingDirectory, string stdIn)
     {
@@ -2455,6 +2675,10 @@ internal static class TestRunner
         using Process process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Failed to start dotnet process.");
 
+        // Drain the output pipes before writing input so a chatty child cannot deadlock on a full pipe.
+        Task<string> stdOutTask = process.StandardOutput.ReadToEndAsync();
+        Task<string> stdErrTask = process.StandardError.ReadToEndAsync();
+
         if (!string.IsNullOrEmpty(stdIn))
         {
             await process.StandardInput.WriteAsync(stdIn);
@@ -2462,9 +2686,17 @@ internal static class TestRunner
 
         process.StandardInput.Close();
 
-        Task<string> stdOutTask = process.StandardOutput.ReadToEndAsync();
-        Task<string> stdErrTask = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
+        using CancellationTokenSource timeout = new(ProcessTimeout);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            return new ProcessResult(-1, await stdOutTask, $"Timed out after {ProcessTimeout.TotalSeconds:0}s: dotnet {arguments}\n{await stdErrTask}");
+        }
 
         return new ProcessResult(process.ExitCode, await stdOutTask, await stdErrTask);
     }

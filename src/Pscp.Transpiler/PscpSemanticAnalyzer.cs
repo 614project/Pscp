@@ -10,12 +10,18 @@ internal sealed class SemanticAnalysisResult
     public SemanticAnalysisResult(
         IReadOnlyList<Diagnostic> diagnostics,
         IReadOnlyDictionary<Expression, TypeSyntax?> expressionTypes,
-        IReadOnlySet<CallExpression> intrinsicCalls)
+        IReadOnlySet<CallExpression> intrinsicCalls,
+        IReadOnlySet<string>? reassignedImmutableNames = null)
     {
         Diagnostics = diagnostics;
         _expressionTypes = expressionTypes;
         _intrinsicCalls = intrinsicCalls;
+        ReassignedImmutableNames = reassignedImmutableNames ?? new HashSet<string>(StringComparer.Ordinal);
     }
+
+    // Names of immutable bindings that are nevertheless assigned, incremented, or passed by ref/out somewhere.
+    // Such bindings must not be lowered to C# `const`.
+    public IReadOnlySet<string> ReassignedImmutableNames { get; }
 
     public IReadOnlyList<Diagnostic> Diagnostics { get; }
 
@@ -33,7 +39,7 @@ internal static class PscpSemanticAnalyzer
         Analyzer analyzer = new(tokens);
         analyzer.Predeclare(program);
         analyzer.Analyze(program);
-        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls);
+        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls, analyzer.ReassignedImmutableNames);
     }
 
     private enum SymbolKind
@@ -100,6 +106,28 @@ internal static class PscpSemanticAnalyzer
 
         public TokenTracker(IReadOnlyList<Token> tokens) => _tokens = tokens;
 
+        // First `name++`, `++name`, `ref name` or `out name` occurrence in the source.
+        public TextSpan FindMutationSite(string name)
+        {
+            for (int i = 0; i < _tokens.Count; i++)
+            {
+                if (_tokens[i].Kind != TokenKind.Identifier || _tokens[i].Text != name)
+                {
+                    continue;
+                }
+
+                TokenKind previous = i > 0 ? _tokens[i - 1].Kind : TokenKind.EndOfFile;
+                TokenKind next = i + 1 < _tokens.Count ? _tokens[i + 1].Kind : TokenKind.EndOfFile;
+                if (next is TokenKind.PlusPlus or TokenKind.MinusMinus
+                    || previous is TokenKind.PlusPlus or TokenKind.MinusMinus or TokenKind.Ref or TokenKind.Out)
+                {
+                    return _tokens[i].Span;
+                }
+            }
+
+            return default;
+        }
+
         public TextSpan Take(string name)
         {
             name = PscpIntrinsicCatalog.StripGenericSuffix(name);
@@ -154,6 +182,8 @@ internal static class PscpSemanticAnalyzer
         public List<Diagnostic> Diagnostics { get; }
         public Dictionary<Expression, TypeSyntax?> ExpressionTypes { get; }
         public HashSet<CallExpression> IntrinsicCalls { get; }
+
+        public HashSet<string> ReassignedImmutableNames { get; } = new(StringComparer.Ordinal);
 
         public void Predeclare(PscpProgram program)
         {
@@ -455,6 +485,10 @@ internal static class PscpSemanticAnalyzer
         private void AnalyzeDeclaration(DeclarationStatement declaration, Scope scope)
         {
             ConsumeDeclarationSignature(declaration);
+
+            // A binding declared without a value (`string? line;`) is initialized later by assignment.
+            bool allowsReassignment = declaration.Mutability == MutabilityKind.Mutable
+                || (declaration.Initializer is null && !declaration.IsInputShorthand);
             if (declaration.Initializer is not null)
             {
                 AnalyzeExpression(declaration.Initializer, scope);
@@ -485,7 +519,7 @@ internal static class PscpSemanticAnalyzer
             TypeSyntax? inferred = Normalize(declaration.ExplicitType) ?? GetType(declaration.Initializer);
             if (declaration.Targets.Count == 1)
             {
-                DeclareBinding(declaration.Targets[0], inferred, scope, declaration.Mutability == MutabilityKind.Mutable);
+                DeclareBinding(declaration.Targets[0], inferred, scope, allowsReassignment);
                 return;
             }
 
@@ -493,7 +527,7 @@ internal static class PscpSemanticAnalyzer
             {
                 foreach (BindingTarget target in declaration.Targets)
                 {
-                    DeclareBinding(target, inferred, scope, declaration.Mutability == MutabilityKind.Mutable);
+                    DeclareBinding(target, inferred, scope, allowsReassignment);
                 }
 
                 return;
@@ -501,7 +535,7 @@ internal static class PscpSemanticAnalyzer
 
             for (int i = 0; i < declaration.Targets.Count; i++)
             {
-                DeclareBinding(declaration.Targets[i], TupleElement(inferred, i), scope, declaration.Mutability == MutabilityKind.Mutable);
+                DeclareBinding(declaration.Targets[i], TupleElement(inferred, i), scope, allowsReassignment);
             }
         }
 
@@ -515,6 +549,10 @@ internal static class PscpSemanticAnalyzer
                     if (!scope.TryResolveValue(identifier.Name, out Symbol? symbol) || symbol is null)
                     {
                         Error($"Undefined name `{identifier.Name}`.", span);
+                    }
+                    else if (!allowImmutableBindingTarget)
+                    {
+                        NoteImmutableMutation(identifier.Name, symbol, span);
                     }
                     break;
                 }
@@ -572,7 +610,7 @@ internal static class PscpSemanticAnalyzer
                 UnaryExpression unary => AnalyzeUnaryExpression(unary, scope),
                 AssignmentExpression assignment => AnalyzeAssignmentExpression(assignment, scope),
                 PrefixExpression prefix => AnalyzePrefixExpression(prefix, scope),
-                PostfixExpression postfix => AnalyzeExpression(postfix.Operand, scope),
+                PostfixExpression postfix => AnalyzePostfixExpression(postfix, scope),
                 BinaryExpression binary => AnalyzeBinary(binary, scope),
                 RangeExpression range => AnalyzeRange(range, scope),
                 IsPatternExpression isPattern => AnalyzeIsPattern(isPattern, scope),
@@ -685,9 +723,46 @@ internal static class PscpSemanticAnalyzer
             return type;
         }
 
+        private TypeSyntax? AnalyzePostfixExpression(PostfixExpression postfix, Scope scope)
+        {
+            TypeSyntax? operandType = AnalyzeExpression(postfix.Operand, scope);
+            NoteImmutableMutation(postfix.Operand, scope);
+            return operandType;
+        }
+
+        private void NoteImmutableMutation(Expression target, Scope scope)
+        {
+            if (target is IdentifierExpression identifier
+                && scope.TryResolveValue(identifier.Name, out Symbol? symbol)
+                && symbol is not null)
+            {
+                NoteImmutableMutation(identifier.Name, symbol, _tracker.FindMutationSite(identifier.Name));
+            }
+        }
+
+        private void NoteImmutableMutation(string name, Symbol symbol, TextSpan span)
+        {
+            if (symbol.Kind != SymbolKind.Local || symbol.IsMutable)
+            {
+                return;
+            }
+
+            if (ReassignedImmutableNames.Add(name))
+            {
+                Warning($"`{name}` is immutable but is modified here. Declare it with `mut` or `var` to make the mutation explicit.", span);
+            }
+        }
+
         private TypeSyntax? AnalyzePrefixExpression(PrefixExpression prefix, Scope scope)
         {
             TypeSyntax? operandType = AnalyzeExpression(prefix.Operand, scope);
+            bool isKnownPop = prefix.Operator == PostfixOperator.Decrement
+                && operandType is NamedTypeSyntax { Name: "Stack" or "System.Collections.Generic.Stack" or "Queue" or "System.Collections.Generic.Queue" or "PriorityQueue" or "System.Collections.Generic.PriorityQueue" };
+            if (!isKnownPop)
+            {
+                NoteImmutableMutation(prefix.Operand, scope);
+            }
+
             if (operandType is not NamedTypeSyntax named || prefix.Operator != PostfixOperator.Decrement)
             {
                 return operandType;
@@ -762,6 +837,14 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeCall(CallExpression call, Scope scope)
         {
+            foreach (ArgumentSyntax argument in call.Arguments)
+            {
+                if (argument is ExpressionArgumentSyntax { Modifier: ArgumentModifier.Ref or ArgumentModifier.Out } byReference)
+                {
+                    NoteImmutableMutation(byReference.Expression, scope);
+                }
+            }
+
             TypeSyntax? calleeType = AnalyzeExpression(call.Callee, scope);
             if (call.Callee is IdentifierExpression conversionIdentifier && IsConversionKeyword(conversionIdentifier.Name))
             {

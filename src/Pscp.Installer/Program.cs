@@ -22,6 +22,8 @@ internal static class PscpInstaller
     private const string DisplayName = "PSCP SDK";
     private const string PayloadResourceName = "PscpInstallerPayloadZip";
     private const string UninstallRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\Pscp";
+    private const string ManifestFileName = "install.json";
+    private const string InstalledFileListName = "install-files.txt";
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessVmRead = 0x0010;
@@ -166,6 +168,7 @@ internal static class PscpInstaller
             CopyUninstallerSupportFiles(currentExe, installDirectory);
 
             WriteInstallManifest(installDirectory);
+            WriteInstalledFileList(installDirectory, EnumerateInstalledRelativePaths(tempDirectory));
 
             bool pathUpdated = false;
             bool uninstallerRegistered = false;
@@ -202,6 +205,12 @@ internal static class PscpInstaller
         installDirectory = NormalizePath(installDirectory);
         sink.Info($"Preparing to remove {DisplayName}");
         sink.Info($"Install directory: {installDirectory}");
+
+        if (Directory.Exists(installDirectory) && !IsPscpInstallation(installDirectory))
+        {
+            sink.Error($"{installDirectory} does not contain a {DisplayName} installation ({ManifestFileName} is missing). Nothing was removed.");
+            return 1;
+        }
 
         bool pathRemoved = TryRunWindowsIntegration(sink, "remove PSCP from PATH", () => RemoveFromUserPath(installDirectory));
         bool registrationRemoved = TryRunWindowsIntegration(sink, "remove PSCP uninstall registration", DeleteUninstallRegistration);
@@ -249,13 +258,19 @@ internal static class PscpInstaller
             return 0;
         }
 
+        if (!IsPscpInstallation(installDirectory))
+        {
+            sink.Error($"{installDirectory} does not contain a {DisplayName} installation ({ManifestFileName} is missing). Nothing was removed.");
+            return 1;
+        }
+
         sink.Info("Stopping running PSCP processes...");
         await EnsureInstallDirectoryUnlockedAsync(installDirectory, sink, [Environment.ProcessId], throwOnFailure: false);
         sink.Info("Removing installed files...");
 
         for (int attempt = 1; attempt <= 80; attempt++)
         {
-            if (TryDeleteDirectory(installDirectory, attempts: 1, delayMilliseconds: 0))
+            if (TryRemoveInstallation(installDirectory))
             {
                 if (!string.IsNullOrWhiteSpace(stagingDirectory) && Directory.Exists(stagingDirectory))
                 {
@@ -686,6 +701,104 @@ internal static class PscpInstaller
         return normalizedPath.StartsWith(normalizedDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsPscpInstallation(string installDirectory)
+    {
+        string manifestPath = Path.Combine(installDirectory, ManifestFileName);
+        return File.Exists(manifestPath)
+            && File.ReadAllText(manifestPath).Contains($"\"name\": \"{DisplayName}\"", StringComparison.Ordinal);
+    }
+
+    // Relative paths of everything this installer places in the install directory.
+    private static IEnumerable<string> EnumerateInstalledRelativePaths(string payloadDirectory)
+    {
+        foreach (string file in Directory.GetFiles(payloadDirectory, "*", SearchOption.AllDirectories))
+        {
+            yield return Path.GetRelativePath(payloadDirectory, file);
+        }
+
+        yield return "uninstall.exe";
+        yield return "PscpSetup.dll";
+        yield return "PscpSetup.deps.json";
+        yield return "PscpSetup.runtimeconfig.json";
+        yield return ManifestFileName;
+        yield return InstalledFileListName;
+    }
+
+    // Merges with an existing list so files from an earlier version installed in place are still removed.
+    private static void WriteInstalledFileList(string installDirectory, IEnumerable<string> relativePaths)
+    {
+        string listPath = Path.Combine(installDirectory, InstalledFileListName);
+        SortedSet<string> entries = new(StringComparer.OrdinalIgnoreCase);
+        if (File.Exists(listPath))
+        {
+            entries.UnionWith(File.ReadAllLines(listPath).Where(line => !string.IsNullOrWhiteSpace(line)));
+        }
+
+        entries.UnionWith(relativePaths);
+        File.WriteAllLines(listPath, entries);
+    }
+
+    // Removes only the files this installer created. The directory itself is removed only once it is empty,
+    // so user files placed next to the installation (or a pre-existing directory chosen as the target) survive.
+    private static bool TryRemoveInstallation(string installDirectory)
+    {
+        string listPath = Path.Combine(installDirectory, InstalledFileListName);
+        if (!File.Exists(listPath))
+        {
+            // Installations made before the file list existed: the manifest check above proved ownership.
+            return TryDeleteDirectory(installDirectory, attempts: 1, delayMilliseconds: 0);
+        }
+
+        string normalizedDirectory = NormalizePath(installDirectory);
+        bool allRemoved = true;
+        foreach (string relativePath in File.ReadAllLines(listPath))
+        {
+            if (string.IsNullOrWhiteSpace(relativePath)
+                || string.Equals(relativePath, InstalledFileListName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string fullPath = Path.GetFullPath(Path.Combine(normalizedDirectory, relativePath));
+            if (!IsPathInsideDirectory(fullPath, normalizedDirectory) || !File.Exists(fullPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.SetAttributes(fullPath, FileAttributes.Normal);
+                File.Delete(fullPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                allRemoved = false;
+            }
+        }
+
+        if (!allRemoved)
+        {
+            return false;
+        }
+
+        File.Delete(listPath);
+        RemoveEmptyDirectories(normalizedDirectory);
+        return true;
+    }
+
+    private static void RemoveEmptyDirectories(string directory)
+    {
+        foreach (string child in Directory.GetDirectories(directory))
+        {
+            RemoveEmptyDirectories(child);
+        }
+
+        if (!Directory.EnumerateFileSystemEntries(directory).Any())
+        {
+            Directory.Delete(directory);
+        }
+    }
+
     private static void WriteInstallManifest(string installDirectory)
     {
         string version = GetDisplayVersion();
@@ -722,25 +835,59 @@ internal static class PscpInstaller
 
     private static void AddToUserPath(string installDirectory)
     {
-        string current = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? string.Empty;
+        (string current, RegistryValueKind kind) = ReadRawUserPath();
         List<string> entries = current.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
-        if (entries.Any(entry => string.Equals(NormalizePath(entry), NormalizePath(installDirectory), StringComparison.OrdinalIgnoreCase)))
+        if (entries.Any(entry => IsSamePathEntry(entry, installDirectory)))
         {
             return;
         }
 
         entries.Add(installDirectory);
-        Environment.SetEnvironmentVariable("Path", string.Join(';', entries), EnvironmentVariableTarget.User);
+        WriteRawUserPath(string.Join(';', entries), kind);
     }
 
     private static void RemoveFromUserPath(string installDirectory)
     {
-        string current = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? string.Empty;
-        List<string> entries = current
-            .Split(';', StringSplitOptions.RemoveEmptyEntries)
-            .Where(entry => !string.Equals(NormalizePath(entry), NormalizePath(installDirectory), StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        Environment.SetEnvironmentVariable("Path", string.Join(';', entries), EnvironmentVariableTarget.User);
+        (string current, RegistryValueKind kind) = ReadRawUserPath();
+        List<string> entries = current.Split(';', StringSplitOptions.RemoveEmptyEntries).ToList();
+        int removed = entries.RemoveAll(entry => IsSamePathEntry(entry, installDirectory));
+        if (removed > 0)
+        {
+            WriteRawUserPath(string.Join(';', entries), kind);
+        }
+    }
+
+    private static bool IsSamePathEntry(string entry, string directory)
+    {
+        try
+        {
+            return string.Equals(NormalizePath(entry), NormalizePath(directory), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    // Environment.Get/SetEnvironmentVariable(..., User) expands REG_EXPAND_SZ values and writes them back as
+    // REG_SZ, which permanently flattens entries such as %USERPROFILE%\bin. Read and write the raw value instead.
+    private static (string Value, RegistryValueKind Kind) ReadRawUserPath()
+    {
+        using RegistryKey? key = Registry.CurrentUser.OpenSubKey("Environment", writable: false);
+        if (key?.GetValue("Path", null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string value)
+        {
+            return (string.Empty, RegistryValueKind.ExpandString);
+        }
+
+        RegistryValueKind kind = key.GetValueKind("Path");
+        return (value, kind is RegistryValueKind.String or RegistryValueKind.ExpandString ? kind : RegistryValueKind.ExpandString);
+    }
+
+    private static void WriteRawUserPath(string value, RegistryValueKind kind)
+    {
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey("Environment", writable: true)
+            ?? throw new InvalidOperationException("Failed to open the user environment registry key.");
+        key.SetValue("Path", value, value.Contains('%') ? RegistryValueKind.ExpandString : kind);
     }
 
     private static void CopyDirectory(string sourceDirectory, string destinationDirectory)

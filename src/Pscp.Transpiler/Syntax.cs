@@ -38,6 +38,11 @@ public enum TokenKind
     SlashEqual,
     Percent,
     PercentEqual,
+    AmpEqual,
+    PipeEqual,
+    CaretEqual,
+    LessLessEqual,
+    GreaterGreaterEqual,
     Caret,
     Tilde,
     Amp,
@@ -155,6 +160,11 @@ public enum AssignmentOperator
     MultiplyAssign,
     DivideAssign,
     ModuloAssign,
+    BitwiseAndAssign,
+    BitwiseOrAssign,
+    BitwiseXorAssign,
+    ShiftLeftAssign,
+    ShiftRightAssign,
 }
 
 public enum OutputKind
@@ -510,9 +520,64 @@ public sealed record BuilderElement(
 
 public abstract record TypeSyntax;
 
-public sealed record NamedTypeSyntax(string Name, IReadOnlyList<TypeSyntax> TypeArguments) : TypeSyntax;
+// Type syntax nodes are compared structurally: the compiler-generated record equality would
+// compare the argument lists by reference, making `List<int>` differ from another `List<int>`.
+public sealed record NamedTypeSyntax(string Name, IReadOnlyList<TypeSyntax> TypeArguments) : TypeSyntax
+{
+    public bool Equals(NamedTypeSyntax? other)
+        => other is not null
+            && string.Equals(Name, other.Name, StringComparison.Ordinal)
+            && TypeTextEquality.SequenceEquals(TypeArguments, other.TypeArguments);
 
-public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax;
+    public override int GetHashCode()
+        => HashCode.Combine(Name, TypeTextEquality.SequenceHash(TypeArguments));
+}
+
+public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax
+{
+    public bool Equals(TupleTypeSyntax? other)
+        => other is not null && TypeTextEquality.SequenceEquals(Elements, other.Elements);
+
+    public override int GetHashCode()
+        => TypeTextEquality.SequenceHash(Elements);
+}
+
+internal static class TypeTextEquality
+{
+    public static bool SequenceEquals(IReadOnlyList<TypeSyntax> left, IReadOnlyList<TypeSyntax> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (!Equals(left[i], right[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public static int SequenceHash(IReadOnlyList<TypeSyntax> values)
+    {
+        HashCode hash = new();
+        foreach (TypeSyntax value in values)
+        {
+            hash.Add(value);
+        }
+
+        return hash.ToHashCode();
+    }
+}
 
 public sealed record ArrayTypeSyntax(TypeSyntax ElementType, int Depth) : TypeSyntax;
 

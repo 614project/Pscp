@@ -25,7 +25,7 @@
 3. VSIX에 포함된 bundled language server
 4. `pscp.sdkPath`
 5. 설치된 PSCP SDK (`%LOCALAPPDATA%\Programs\Pscp\pscp.exe` 등)
-6. PATH의 `pscp.exe`
+6. PATH의 `pscp` 또는 `pscp.exe`
 7. 저장소 개발 빌드 폴백
 
 ## VSIX 빌드

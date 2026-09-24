@@ -1,4 +1,4 @@
-﻿# PSCP 
+﻿# PSCP
 
 PSCP 언어를 제공하기 위한 도구들(트랜스파일러, 언어 서버, 확장 등)이 준비되어 있는 저장소입니다.
 
@@ -259,6 +259,38 @@ D:\Tools\Pscp\uninstall.exe --uninstall --install-dir D:\Tools\Pscp
 
 설치 후에는 새 터미널에서 바로 `pscp`를 사용할 수 있습니다.
 
+## Linux 배포 패키지
+
+Windows 설치기와 별도로 Linux용 self-contained SDK 배포본을 빌드할 수 있습니다. 현재 머신의 아키텍처를 자동 감지하며 `linux-x64`와 `linux-arm64`를 지원합니다. Native AOT를 우선 시도하고, 준비되지 않은 빌드 환경에서는 self-contained 단일 파일로 자동 전환합니다.
+
+```bash
+./installer/Build-Linux-Packages.sh
+```
+
+다른 아키텍처용 산출물은 해당 Linux 아키텍처 환경에서 다음처럼 빌드합니다.
+
+```bash
+./installer/Build-Linux-Packages.sh --runtime linux-x64
+# 또는
+./installer/Build-Linux-Packages.sh --runtime linux-arm64
+```
+
+빌드 결과는 다음 경로에 생성됩니다.
+
+```text
+artifacts/linux/<runtime>/pscp_<version>_<architecture>.deb
+artifacts/linux/<runtime>/pscp-sdk_<version>_<runtime>.tar.gz
+```
+
+Debian/Ubuntu 계열에서는 `.deb`를 설치합니다.
+
+```bash
+sudo apt install ./artifacts/linux/linux-x64/pscp_0.6.6_amd64.deb
+pscp version
+```
+
+다른 배포판 또는 관리자 권한이 없는 환경에서는 `.tar.gz`를 풀고 포함된 `bin` 디렉터리를 `PATH`에 추가하면 됩니다. 두 방식 모두 `pscp` CLI와 `pscp-lsp` 언어 서버 명령을 제공합니다.
+
 ## VS Code 확장
 
 VS Code 확장은 [vscode/pscp-vscode](./vscode/pscp-vscode)에 있습니다.
@@ -267,8 +299,8 @@ VS Code 확장은 [vscode/pscp-vscode](./vscode/pscp-vscode)에 있습니다.
 
 1. 설정된 `pscp.languageServerPath` 사용
 2. 설정된 `pscp.sdkPath` 사용
-3. 설치된 PSCP SDK (`%LOCALAPPDATA%\Programs\Pscp\pscp.exe` 등) 자동 탐색
-4. PATH의 `pscp.exe` 탐색
+3. 설치된 PSCP SDK 자동 탐색
+4. PATH의 `pscp`/`pscp.exe` 탐색
 5. 마지막으로 저장소 개발 빌드 폴백 사용
 
 개발 모드로 실행하려면:

@@ -166,7 +166,15 @@ public sealed class Lexer
         token = null;
         int start = _position;
 
-        if (Match("<=>"))
+        if (Match("<<="))
+        {
+            token = new Token(TokenKind.LessLessEqual, "<<=", start);
+        }
+        else if (Match(">>="))
+        {
+            token = new Token(TokenKind.GreaterGreaterEqual, ">>=", start);
+        }
+        else if (Match("<=>"))
         {
             token = new Token(TokenKind.Spaceship, "<=>", start);
         }
@@ -253,6 +261,18 @@ public sealed class Lexer
         else if (Match("%="))
         {
             token = new Token(TokenKind.PercentEqual, "%=", start);
+        }
+        else if (Match("&="))
+        {
+            token = new Token(TokenKind.AmpEqual, "&=", start);
+        }
+        else if (Match("|="))
+        {
+            token = new Token(TokenKind.PipeEqual, "|=", start);
+        }
+        else if (Match("^="))
+        {
+            token = new Token(TokenKind.CaretEqual, "^=", start);
         }
 
         return token is not null;

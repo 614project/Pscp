@@ -284,6 +284,7 @@ static class PscpCli
         string baseDirectory = AppContext.BaseDirectory;
         List<string> candidates =
         [
+            Path.Combine(baseDirectory, "Pscp.LanguageServer"),
             Path.Combine(baseDirectory, "Pscp.LanguageServer.exe"),
             Path.Combine(baseDirectory, "Pscp.LanguageServer.dll"),
         ];
@@ -293,8 +294,10 @@ static class PscpCli
         {
             candidates.AddRange(
             [
+                Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer"),
                 Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.exe"),
                 Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll"),
+                Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Release", "net10.0", "Pscp.LanguageServer"),
                 Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Release", "net10.0", "Pscp.LanguageServer.exe"),
                 Path.Combine(repositoryRoot, "src", "Pscp.LanguageServer", "bin", "Release", "net10.0", "Pscp.LanguageServer.dll"),
             ]);
@@ -307,7 +310,7 @@ static class PscpCli
                 continue;
             }
 
-            if (string.Equals(Path.GetExtension(candidate), ".exe", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(Path.GetExtension(candidate), ".dll", StringComparison.OrdinalIgnoreCase))
             {
                 return new ToolInvocation(candidate, string.Empty, Path.GetDirectoryName(candidate)!);
             }

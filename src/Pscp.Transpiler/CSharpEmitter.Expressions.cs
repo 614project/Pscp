@@ -4,6 +4,11 @@ internal sealed partial class CSharpEmitter
 {
 
     private string EmitExpression(Expression expression, TypeSyntax? targetTypeHint = null)
+        => _hoistedValues.TryGetValue(expression, out string? hoisted)
+            ? hoisted
+            : EmitExpressionCore(expression, targetTypeHint);
+
+    private string EmitExpressionCore(Expression expression, TypeSyntax? targetTypeHint)
         => expression switch
         {
             LiteralExpression literal => literal.RawText,
@@ -517,7 +522,7 @@ internal sealed partial class CSharpEmitter
         string lengthName = NextTemporary("length");
         string resultName = NextTemporary("result");
         string indexName = NextTemporary("i");
-        emitted = EmitEval($"int {lengthName} = {EmitExpression(lengthExpression)}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
+        emitted = EmitValueBlock($"int {lengthName} = {EmitExpression(lengthExpression)}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
         return true;
     }
 
@@ -544,7 +549,7 @@ internal sealed partial class CSharpEmitter
         string rowCountName = NextTemporary("rows");
         string resultName = NextTemporary("result");
         string indexName = NextTemporary("i");
-        emitted = EmitEval($"int {rowCountName} = {EmitExpression(rowCountExpression)}; {typeText}[][] {resultName} = new {typeText}[{rowCountName}][]; for (int {indexName} = 0; {indexName} < {rowCountName}; {indexName}++) {{ {resultName}[{indexName}] = {rowRead}; }} return {resultName};");
+        emitted = EmitValueBlock($"int {rowCountName} = {EmitExpression(rowCountExpression)}; {typeText}[][] {resultName} = new {typeText}[{rowCountName}][]; for (int {indexName} = 0; {indexName} < {rowCountName}; {indexName}++) {{ {resultName}[{indexName}] = {rowRead}; }} return {resultName};");
         return true;
     }
 
@@ -1022,6 +1027,19 @@ internal sealed partial class CSharpEmitter
 
     private string EmitInlineBlock(BlockStatement block, bool isVoidLike)
     {
+        _hoistSuppression++;
+        try
+        {
+            return EmitInlineBlockCore(block, isVoidLike);
+        }
+        finally
+        {
+            _hoistSuppression--;
+        }
+    }
+
+    private string EmitInlineBlockCore(BlockStatement block, bool isVoidLike)
+    {
         List<string> parts = [];
         Expression? implicitReturn = GetImplicitReturnExpression(block);
         int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
@@ -1052,7 +1070,9 @@ internal sealed partial class CSharpEmitter
             DeclarationStatement declaration => EmitInlineDeclaration(declaration),
             ExpressionStatement expressionStatement => expressionStatement.Expression is AssignmentExpression assignmentExpression
                 ? $"{EmitStatementAssignmentExpression(assignmentExpression)};"
-                : $"{EmitExpression(expressionStatement.Expression)};",
+                : expressionStatement.Expression is IfExpression ifExpression
+                    ? $"{EmitIfExpressionAsStatement(ifExpression)};"
+                    : $"{EmitExpression(expressionStatement.Expression)};",
             AssignmentStatement assignment => $"{EmitAssignmentTarget(assignment.Target)} {EmitAssignmentOperator(assignment.Operator)} {EmitExpression(assignment.Value)};",
             OutputStatement output => EmitOutputInvocation(output.Kind, output.Expression),
             IfStatement ifStatement => $"if ({EmitExpression(ifStatement.Condition)}) {EmitInlineEmbeddedStatement(ifStatement.ThenBranch)}{(ifStatement.ElseBranch is null ? string.Empty : $" else {EmitInlineEmbeddedStatement(ifStatement.ElseBranch)}")}",
@@ -1156,7 +1176,13 @@ internal sealed partial class CSharpEmitter
             AssignmentOperator.SubtractAssign => "-=",
             AssignmentOperator.MultiplyAssign => "*=",
             AssignmentOperator.DivideAssign => "/=",
-            _ => "%="
+            AssignmentOperator.ModuloAssign => "%=",
+            AssignmentOperator.BitwiseAndAssign => "&=",
+            AssignmentOperator.BitwiseOrAssign => "|=",
+            AssignmentOperator.BitwiseXorAssign => "^=",
+            AssignmentOperator.ShiftLeftAssign => "<<=",
+            AssignmentOperator.ShiftRightAssign => ">>=",
+            _ => throw new InvalidOperationException($"Unknown assignment operator {op}."),
         };
 
     private void EmitInputDeclaration(DeclarationStatement declaration)
@@ -1306,7 +1332,7 @@ internal sealed partial class CSharpEmitter
             string lengthName = NextTemporary("length");
             string resultName = NextTemporary("result");
             string indexName = NextTemporary("i");
-            return EmitEval($"int {lengthName} = {EmitExpression(sized.Dimensions[0])}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
+            return EmitValueBlock($"int {lengthName} = {EmitExpression(sized.Dimensions[0])}; {tupleTypeText}[] {resultName} = new {tupleTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {tupleRead}; }} return {resultName};");
         }
 
         if (sized.Dimensions.Count == 1)
@@ -1609,7 +1635,9 @@ internal sealed partial class CSharpEmitter
         }
 
         string value = EmitExpression(valueExpression);
-        return $"{target}.TryAdd(({value}).Item1, ({value}).Item2)";
+        return IsSideEffectFreeReceiver(valueExpression)
+            ? $"{target}.TryAdd({value}.Item1, {value}.Item2)"
+            : $"__PscpCollection.tryAdd({target}, {value})";
     }
 
     private string EmitPriorityQueueEnqueue(string target, Expression valueExpression)
@@ -1620,8 +1648,20 @@ internal sealed partial class CSharpEmitter
         }
 
         string value = EmitExpression(valueExpression);
-        return $"{target}.Enqueue(({value}).Item1, ({value}).Item2)";
+        return IsSideEffectFreeReceiver(valueExpression)
+            ? $"{target}.Enqueue({value}.Item1, {value}.Item2)"
+            : $"__PscpCollection.enqueue({target}, {value})";
     }
+
+    // Expressions that can be emitted more than once without changing program behavior.
+    private static bool IsSideEffectFreeReceiver(Expression expression)
+        => expression switch
+        {
+            IdentifierExpression => true,
+            MemberAccessExpression member => IsSideEffectFreeReceiver(member.Receiver),
+            TupleProjectionExpression projection => IsSideEffectFreeReceiver(projection.Receiver),
+            _ => false,
+        };
 
     private bool TryEmitKnownDataStructurePeek(Expression operand, out string? emitted)
     {
@@ -2001,7 +2041,7 @@ internal sealed partial class CSharpEmitter
         string resultName = NextTemporary("result");
         string indexName = NextTemporary("i");
         string elementTypeText = EmitType(elementType);
-        return EmitEval($"int {lengthName} = {EmitExpression(lengthExpression)}; {elementTypeText}[] {resultName} = new {elementTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = new {elementTypeText}(); }} return {resultName};");
+        return EmitValueBlock($"int {lengthName} = {EmitExpression(lengthExpression)}; {elementTypeText}[] {resultName} = new {elementTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = new {elementTypeText}(); }} return {resultName};");
     }
 
     private string EmitJaggedArrayAllocation(string elementType, IReadOnlyList<Expression> dimensions)
@@ -2012,7 +2052,7 @@ internal sealed partial class CSharpEmitter
             string innerLength = NextTemporary("innerLength");
             string resultName = NextTemporary("result");
             string indexName = NextTemporary("i");
-            return EmitEval($"int {outerLength} = {EmitExpression(dimensions[0])}; int {innerLength} = {EmitExpression(dimensions[1])}; {elementType}[][] {resultName} = new {elementType}[{outerLength}][]; for (int {indexName} = 0; {indexName} < {outerLength}; {indexName}++) {{ {resultName}[{indexName}] = new {elementType}[{innerLength}]; }} return {resultName};");
+            return EmitValueBlock($"int {outerLength} = {EmitExpression(dimensions[0])}; int {innerLength} = {EmitExpression(dimensions[1])}; {elementType}[][] {resultName} = new {elementType}[{outerLength}][]; for (int {indexName} = 0; {indexName} < {outerLength}; {indexName}++) {{ {resultName}[{indexName}] = new {elementType}[{innerLength}]; }} return {resultName};");
         }
 
         return $"__PscpArray.jagged<{elementType}>({string.Join(", ", dimensions.Select(dimension => EmitExpression(dimension)))})";
@@ -2092,12 +2132,12 @@ internal sealed partial class CSharpEmitter
                 string directLoop = indexName is null
                     ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++) {{ {resultName}[{slotName}] = {valueExpression}; }}"
                     : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++) {{ {resultName}[{indexName}] = {valueExpression}; }}";
-                return EmitEval($"{elementTypeText}[] {resultName} = new {elementTypeText}[{directCount}]; {directLoop} return {resultName};");
+                return EmitValueBlock($"{elementTypeText}[] {resultName} = new {elementTypeText}[{directCount}]; {directLoop} return {resultName};");
             }
 
             string countExpression = EmitDefaultRangeCountExpression(startName, endName, range.Kind);
             string loopUpdate = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
-            return EmitEval($"int {startName} = {EmitExpression(range.Start)}; int {endName} = {EmitExpression(range.End)}; int {countName} = {countExpression}; {elementTypeText}[] {resultName} = new {elementTypeText}[{countName}]; int {slotName} = 0; {indexInit}for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {loopUpdate}) {{ {resultName}[{slotName}++] = {valueExpression}; }} return {resultName};");
+            return EmitValueBlock($"int {startName} = {EmitExpression(range.Start)}; int {endName} = {EmitExpression(range.End)}; int {countName} = {countExpression}; {elementTypeText}[] {resultName} = new {elementTypeText}[{countName}]; int {slotName} = 0; {indexInit}for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {loopUpdate}) {{ {resultName}[{slotName}++] = {valueExpression}; }} return {resultName};");
         }
 
         string stepName = NextTemporary("step");
@@ -2110,7 +2150,7 @@ internal sealed partial class CSharpEmitter
             : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
         string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
         string loopUpdateWithStep = indexName is null ? $"{itemName} += {stepName}" : $"{itemName} += {stepName}, {indexName}++";
-        return EmitEval(
+        return EmitValueBlock(
             $$"""
             int {{startName}} = {{EmitExpression(range.Start)}};
             int {{endName}} = {{EmitExpression(range.End)}};
@@ -2192,7 +2232,7 @@ internal sealed partial class CSharpEmitter
         }
 
         parts.Add(returnList || returnLinkedList ? $"return {collectionName};" : $"return {collectionName}.ToArray();");
-        return EmitEval(string.Join(" ", parts));
+        return EmitValueBlock(string.Join(" ", parts));
     }
 
     private static bool IsArrayMaterializationTarget(TypeSyntax? targetTypeHint)
@@ -2399,7 +2439,7 @@ internal sealed partial class CSharpEmitter
             string itemName = NextTemporary("item");
             loop = EmitLoopOverSource(source!, itemName, $"{sumName} += {itemName};");
         }
-        emitted = EmitEval($"{sumType} {sumName} = default; {loop} return {sumName};");
+        emitted = EmitValueBlock($"{sumType} {sumName} = default; {loop} return {sumName};");
         return true;
     }
 
@@ -2422,7 +2462,7 @@ internal sealed partial class CSharpEmitter
         string itemName = ChooseBindingName(selector!.Parameters[0].Target, "item");
         string selectorExpression = EmitLambdaBodyExpression(selector.Body, null, null, selector.Parameters[0].Target, itemName);
         string loop = EmitLoopOverSource(source!, itemName, $"{sumName} += {selectorExpression};");
-        emitted = EmitEval($"{sumType} {sumName} = default; {loop} return {sumName};");
+        emitted = EmitValueBlock($"{sumType} {sumName} = default; {loop} return {sumName};");
         return true;
     }
 
@@ -2452,7 +2492,7 @@ internal sealed partial class CSharpEmitter
             GeneratorExpression generator => EmitGeneratedMinMaxLoop(generator, resultType, bestName, hasValueName, preferLower: name == "min"),
             _ => EmitMinMaxLoop(source!, resultType, bestName, hasValueName, preferLower: name == "min"),
         };
-        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
+        emitted = EmitValueBlock($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
         return true;
     }
 
@@ -2487,7 +2527,7 @@ internal sealed partial class CSharpEmitter
         string selectorExpression = EmitLambdaBodyExpression(selector.Body, null, null, selector.Parameters[0].Target, itemName);
         string comparison = EmitPreferredComparison(keyName, bestKeyName, keyType, preferLower: name == "minBy");
         string loop = EmitLoopOverSource(source!, itemName, $"var {keyName} = {selectorExpression}; if (!{hasValueName} || {comparison}) {{ {bestItemName} = {itemName}; {bestKeyName} = {keyName}; {hasValueName} = true; }}");
-        emitted = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestItemName} = default!; {EmitType(keyType)} {bestKeyName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestItemName};");
+        emitted = EmitValueBlock($"bool {hasValueName} = false; {EmitType(resultType)} {bestItemName} = default!; {EmitType(keyType)} {bestKeyName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestItemName};");
         return true;
     }
 
@@ -2630,19 +2670,23 @@ internal sealed partial class CSharpEmitter
             {
                 string countName = NextTemporary("count");
                 string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) {{ {countName}++; }}");
-                emitted = EmitEval($"int {countName} = 0; {loop} return {countName};");
+                emitted = EmitValueBlock($"int {countName} = 0; {loop} return {countName};");
                 return true;
             }
             case "any":
             {
-                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) return true;");
-                emitted = EmitEval($"{loop} return false;");
+                string resultName = NextTemporary("any");
+                string doneLabel = NextTemporary("done");
+                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) {{ {resultName} = true; goto {doneLabel}; }}");
+                emitted = EmitValueBlock($"bool {resultName} = false; {loop} {doneLabel}: ; return {resultName};");
                 return true;
             }
             case "all":
             {
-                string loop = EmitLoopOverSource(source!, itemName, $"if (!({predicateExpression})) return false;");
-                emitted = EmitEval($"{loop} return true;");
+                string resultName = NextTemporary("all");
+                string doneLabel = NextTemporary("done");
+                string loop = EmitLoopOverSource(source!, itemName, $"if (!({predicateExpression})) {{ {resultName} = false; goto {doneLabel}; }}");
+                emitted = EmitValueBlock($"bool {resultName} = true; {loop} {doneLabel}: ; return {resultName};");
                 return true;
             }
             case "find":
@@ -2653,15 +2697,19 @@ internal sealed partial class CSharpEmitter
                     return false;
                 }
 
-                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) return {itemName};");
-                emitted = EmitEval($"{loop} return default({EmitType(resultType)});");
+                string resultName = NextTemporary("found");
+                string doneLabel = NextTemporary("done");
+                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) {{ {resultName} = {itemName}; goto {doneLabel}; }}");
+                emitted = EmitValueBlock($"{EmitType(resultType)} {resultName} = default; {loop} {doneLabel}: ; return {resultName};");
                 return true;
             }
             case "findIndex":
             {
                 string indexName = NextTemporary("index");
-                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) return {indexName};", indexName);
-                emitted = EmitEval($"{loop} return -1;");
+                string resultName = NextTemporary("found");
+                string doneLabel = NextTemporary("done");
+                string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) {{ {resultName} = {indexName}; goto {doneLabel}; }}", indexName);
+                emitted = EmitValueBlock($"int {resultName} = -1; {loop} {doneLabel}: ; return {resultName};");
                 return true;
             }
             case "findLastIndex":
@@ -2669,7 +2717,7 @@ internal sealed partial class CSharpEmitter
                 string indexName = NextTemporary("index");
                 string foundName = NextTemporary("found");
                 string loop = EmitLoopOverSource(source!, itemName, $"if ({predicateExpression}) {{ {foundName} = {indexName}; }}", indexName);
-                emitted = EmitEval($"int {foundName} = -1; {loop} return {foundName};");
+                emitted = EmitValueBlock($"int {foundName} = -1; {loop} return {foundName};");
                 return true;
             }
         }
@@ -2697,10 +2745,10 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
+        // Passing the target by ref evaluates its receiver/index exactly once and avoids a closure,
+        // so this also works for ref parameters and inside struct members.
         string target = EmitExpression(targetArgument.Expression);
-        string valueName = NextTemporary("value");
-        string compare = EmitPreferredComparison(valueName, target, targetType, preferLower: name == "chmin");
-        emitted = EmitEval($"var {valueName} = {EmitExpression(valueArgument.Expression, targetType)}; if ({compare}) {{ {target} = {valueName}; return true; }} return false;");
+        emitted = $"__PscpSeq.{name}(ref {target}, {EmitExpression(valueArgument.Expression, targetType)})";
         return true;
     }
 
@@ -2769,14 +2817,14 @@ internal sealed partial class CSharpEmitter
 
                     string sumName = NextTemporary("sum");
                     string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}{sumName} += {EmitExpression(aggregation.Body)};", indexName);
-                    result = EmitEval($"{EmitType(resultType)} {sumName} = default; {loop} return {sumName};");
+                    result = EmitValueBlock($"{EmitType(resultType)} {sumName} = default; {loop} return {sumName};");
                     return true;
                 }
                 case "count":
                 {
                     string countName = NextTemporary("count");
                     string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}if ({EmitExpression(aggregation.Body)}) {{ {countName}++; }}", indexName);
-                    result = EmitEval($"int {countName} = 0; {loop} return {countName};");
+                    result = EmitValueBlock($"int {countName} = 0; {loop} return {countName};");
                     return true;
                 }
                 case "min":
@@ -2793,7 +2841,7 @@ internal sealed partial class CSharpEmitter
                     string valueName = NextTemporary("value");
                     string comparison = EmitPreferredComparison(valueName, bestName, resultType, preferLower: aggregation.AggregatorName == "min");
                     string loop = EmitLoopOverSource(aggregation.Source, itemName, $"{prefix}{wherePrefix}var {valueName} = {EmitExpression(aggregation.Body)}; if (!{hasValueName} || {comparison}) {{ {bestName} = {valueName}; {hasValueName} = true; }}", indexName);
-                    result = EmitEval($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
+                    result = EmitValueBlock($"bool {hasValueName} = false; {EmitType(resultType)} {bestName} = default!; {loop}{EmitDebugEmptySequenceCheckInline(hasValueName)}return {bestName};");
                     return true;
                 }
             }

@@ -29,25 +29,37 @@ public sealed partial class Parser
         "internal",
     ];
 
-    private bool TryReadAssignmentOperator(out AssignmentOperator assignmentOperator)
-    {
-        assignmentOperator = Current.Kind switch
+    private static AssignmentOperator ToAssignmentOperator(TokenKind kind)
+        => kind switch
         {
-            TokenKind.Equal => AssignmentOperator.Assign,
             TokenKind.PlusEqual => AssignmentOperator.AddAssign,
             TokenKind.MinusEqual => AssignmentOperator.SubtractAssign,
             TokenKind.StarEqual => AssignmentOperator.MultiplyAssign,
             TokenKind.SlashEqual => AssignmentOperator.DivideAssign,
             TokenKind.PercentEqual => AssignmentOperator.ModuloAssign,
+            TokenKind.AmpEqual => AssignmentOperator.BitwiseAndAssign,
+            TokenKind.PipeEqual => AssignmentOperator.BitwiseOrAssign,
+            TokenKind.CaretEqual => AssignmentOperator.BitwiseXorAssign,
+            TokenKind.LessLessEqual => AssignmentOperator.ShiftLeftAssign,
+            TokenKind.GreaterGreaterEqual => AssignmentOperator.ShiftRightAssign,
             _ => AssignmentOperator.Assign,
         };
+
+    private bool TryReadAssignmentOperator(out AssignmentOperator assignmentOperator)
+    {
+        assignmentOperator = ToAssignmentOperator(Current.Kind);
 
         if (Current.Kind is not TokenKind.Equal
             and not TokenKind.PlusEqual
             and not TokenKind.MinusEqual
             and not TokenKind.StarEqual
             and not TokenKind.SlashEqual
-            and not TokenKind.PercentEqual)
+            and not TokenKind.PercentEqual
+            and not TokenKind.AmpEqual
+            and not TokenKind.PipeEqual
+            and not TokenKind.CaretEqual
+            and not TokenKind.LessLessEqual
+            and not TokenKind.GreaterGreaterEqual)
         {
             return false;
         }

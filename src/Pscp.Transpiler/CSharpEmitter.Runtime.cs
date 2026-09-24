@@ -14,6 +14,17 @@ internal sealed partial class CSharpEmitter
             wroteBlock = true;
         }
 
+        if (verbose || programText.Contains("__PscpCollection.", StringComparison.Ordinal))
+        {
+            if (wroteBlock)
+            {
+                _writer.WriteLine();
+            }
+
+            EmitCollectionHelpers();
+            wroteBlock = true;
+        }
+
         if (verbose || programText.Contains("__PscpThunk.run(", StringComparison.Ordinal))
         {
             if (wroteBlock)
@@ -94,6 +105,18 @@ internal sealed partial class CSharpEmitter
 
                     return result;
                 }
+            }
+            """);
+    }
+
+    private void EmitCollectionHelpers()
+    {
+        WriteRuntimeBlock(
+            """
+            public static class __PscpCollection
+            {
+                public static void enqueue<TElement, TPriority>(PriorityQueue<TElement, TPriority> queue, (TElement, TPriority) entry) => queue.Enqueue(entry.Item1, entry.Item2);
+                public static bool tryAdd<TKey, TValue>(Dictionary<TKey, TValue> dictionary, (TKey, TValue) entry) where TKey : notnull => dictionary.TryAdd(entry.Item1, entry.Item2);
             }
             """);
     }
@@ -522,6 +545,15 @@ internal sealed partial class CSharpEmitter
                     return list.ToArray();
                 }
 
+                public static bool chmin(ref int target, int value) { if (value < target) { target = value; return true; } return false; }
+                public static bool chmin(ref long target, long value) { if (value < target) { target = value; return true; } return false; }
+                public static bool chmin(ref double target, double value) { if (value < target) { target = value; return true; } return false; }
+                public static bool chmin(ref char target, char value) { if (value < target) { target = value; return true; } return false; }
+                public static bool chmax(ref int target, int value) { if (value > target) { target = value; return true; } return false; }
+                public static bool chmax(ref long target, long value) { if (value > target) { target = value; return true; } return false; }
+                public static bool chmax(ref double target, double value) { if (value > target) { target = value; return true; } return false; }
+                public static bool chmax(ref char target, char value) { if (value > target) { target = value; return true; } return false; }
+
                 public static bool chmin<T>(ref T target, T value)
                 {
                     if (Comparer<T>.Default.Compare(value, target) < 0)
@@ -636,8 +668,8 @@ internal sealed partial class CSharpEmitter
 
                 bool expressionBodied = j == i
                     && depth == 1
-                    && current.Contains("=>", StringComparison.Ordinal)
-                    && current.TrimEnd().EndsWith(';');
+                    && ((current.Contains("=>", StringComparison.Ordinal) && current.TrimEnd().EndsWith(';'))
+                        || (current.Contains('{') && current.TrimEnd().EndsWith('}')));
 
                 j++;
                 if (expressionBodied || (j > i + 1 && depth == 1))
@@ -1440,6 +1472,17 @@ internal sealed partial class CSharpEmitter
                 }
 
                 public void join<T>(string separator, IEnumerable<T> values)
+                {
+                    bool first = true;
+                    foreach (T value in values)
+                    {
+                        if (!first) _writer.Write(separator);
+                        first = false;
+                        WriteValue(value);
+                    }
+                }
+
+                public void join<T>(char separator, IEnumerable<T> values)
                 {
                     bool first = true;
                     foreach (T value in values)
