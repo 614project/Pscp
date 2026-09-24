@@ -88,6 +88,11 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.SlashEqual:
                 case TokenKind.Percent:
                 case TokenKind.PercentEqual:
+                case TokenKind.AmpEqual:
+                case TokenKind.PipeEqual:
+                case TokenKind.CaretEqual:
+                case TokenKind.LessLessEqual:
+                case TokenKind.GreaterGreaterEqual:
                 case TokenKind.Caret:
                 case TokenKind.Tilde:
                 case TokenKind.Amp:
@@ -278,7 +283,12 @@ internal sealed partial class PscpAnalyzer
                 or TokenKind.MinusEqual
                 or TokenKind.StarEqual
                 or TokenKind.SlashEqual
-                or TokenKind.PercentEqual)
+                or TokenKind.PercentEqual
+                or TokenKind.AmpEqual
+                or TokenKind.PipeEqual
+                or TokenKind.CaretEqual
+                or TokenKind.LessLessEqual
+                or TokenKind.GreaterGreaterEqual)
             {
                 return i;
             }

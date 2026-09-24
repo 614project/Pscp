@@ -651,7 +651,10 @@ internal sealed partial class CSharpEmitter
         switch (property.Body)
         {
             case ExpressionMethodBody expressionBody:
-                _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike: false, isProperty: true))
+                {
+                    _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                }
                 break;
             case BlockMethodBody blockBody:
                 _writer.WriteLine(signature);
@@ -686,7 +689,10 @@ internal sealed partial class CSharpEmitter
         switch (body)
         {
             case ExpressionMethodBody expressionBody:
-                _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike, isProperty: false))
+                {
+                    _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                }
                 break;
             case BlockMethodBody blockBody:
                 _writer.WriteLine(signature);
@@ -889,7 +895,7 @@ internal sealed partial class CSharpEmitter
             }
             else
             {
-                _writer.WriteLine($"return {EmitExpression(implicitReturn)};");
+                EmitStatementWithHoisting(implicitReturn, null, () => _writer.WriteLine($"return {EmitExpression(implicitReturn)};"));
             }
         }
         else if (!isVoidLike && !ContainsExplicitReturn(block))
@@ -910,22 +916,32 @@ internal sealed partial class CSharpEmitter
                 _writer.WriteLine("}");
                 break;
             case DeclarationStatement declaration:
-                EmitDeclaration(declaration, isField: false, modifiers: null);
+                EmitStatementWithHoisting(
+                    declaration.IsInputShorthand || declaration.Targets.Count != 1 ? null : declaration.Initializer,
+                    declaration.ExplicitType,
+                    () => EmitDeclaration(declaration, isField: false, modifiers: null));
                 break;
             case ExpressionStatement expressionStatement:
-                _writer.WriteLine($"{EmitStatementExpression(expressionStatement.Expression)};");
+                (Expression? hoistRoot, TypeSyntax? hoistHint) = GetExpressionStatementHoistRoot(expressionStatement.Expression);
+                EmitStatementWithHoisting(
+                    hoistRoot,
+                    hoistHint,
+                    () => _writer.WriteLine($"{EmitStatementExpression(expressionStatement.Expression)};"));
                 break;
             case AssignmentStatement assignment:
                 EmitAssignment(assignment);
                 break;
             case OutputStatement output:
-                if (!TryEmitLoweredOutput(output))
+                EmitStatementWithHoisting(output.Expression, null, () =>
                 {
-                    _writer.WriteLine(EmitOutputInvocation(output.Kind, output.Expression));
-                }
+                    if (!TryEmitLoweredOutput(output))
+                    {
+                        _writer.WriteLine(EmitOutputInvocation(output.Kind, output.Expression));
+                    }
+                });
                 break;
             case IfStatement ifStatement:
-                EmitIfStatement(ifStatement);
+                EmitStatementWithHoisting(ifStatement.Condition, null, () => EmitIfStatement(ifStatement));
                 break;
             case WhileStatement whileStatement:
                 _writer.WriteLine($"while ({EmitExpression(whileStatement.Condition)})");
@@ -942,9 +958,9 @@ internal sealed partial class CSharpEmitter
                 EmitFastForStatement(fastFor);
                 break;
             case ReturnStatement returnStatement:
-                _writer.WriteLine(returnStatement.Expression is null
+                EmitStatementWithHoisting(returnStatement.Expression, null, () => _writer.WriteLine(returnStatement.Expression is null
                     ? "return;"
-                    : $"return {EmitExpression(returnStatement.Expression)};");
+                    : $"return {EmitExpression(returnStatement.Expression)};"));
                 break;
             case BreakStatement:
                 _writer.WriteLine("break;");
@@ -1057,7 +1073,8 @@ internal sealed partial class CSharpEmitter
         if (declaration.Mutability != MutabilityKind.Immutable
             || declaration.Initializer is null
             || declaration.Targets.Count != 1
-            || declaration.Targets[0] is not NameTarget)
+            || declaration.Targets[0] is not NameTarget nameTarget
+            || _semantic?.ReassignedImmutableNames.Contains(nameTarget.Name) == true)
         {
             return false;
         }
@@ -1438,10 +1455,31 @@ internal sealed partial class CSharpEmitter
             case PostfixExpression postfix:
                 emitted = EmitPostfixStatementExpression(postfix);
                 return true;
+            case IfExpression ifExpression:
+                // `if c then a() else b()` in statement position is control flow, not a value; a C# conditional
+                // expression would reject void branches and branches of unrelated types.
+                emitted = EmitIfExpressionAsStatement(ifExpression);
+                return true;
             default:
                 emitted = null;
                 return false;
         }
+    }
+
+    // Produces `if (c) a(); else b()` without the final semicolon, which the caller appends.
+    private string EmitIfExpressionAsStatement(IfExpression ifExpression)
+    {
+        string thenBranch = EmitStatementExpression(ifExpression.ThenExpression);
+        if (ifExpression.ThenExpression is IfExpression)
+        {
+            thenBranch = $"{{ {thenBranch}; }}";
+        }
+        else
+        {
+            thenBranch += ";";
+        }
+
+        return $"if ({EmitExpression(ifExpression.Condition)}) {thenBranch} else {EmitStatementExpression(ifExpression.ElseExpression)}";
     }
 
     private string EmitScalarPrefixStatementExpression(PrefixExpression prefix)

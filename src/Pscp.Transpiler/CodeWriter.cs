@@ -22,5 +22,11 @@ internal sealed class CodeWriter
         _builder.AppendLine();
     }
 
+    public int Length => _builder.Length;
+
+    public string TextFrom(int start) => _builder.ToString(start, _builder.Length - start);
+
+    public void Truncate(int length) => _builder.Length = length;
+
     public override string ToString() => _builder.ToString();
 }

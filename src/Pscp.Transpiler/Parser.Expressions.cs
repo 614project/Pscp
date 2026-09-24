@@ -14,6 +14,11 @@ public sealed partial class Parser
             and not TokenKind.StarEqual
             and not TokenKind.SlashEqual
             and not TokenKind.PercentEqual
+            and not TokenKind.AmpEqual
+            and not TokenKind.PipeEqual
+            and not TokenKind.CaretEqual
+            and not TokenKind.LessLessEqual
+            and not TokenKind.GreaterGreaterEqual
             and not TokenKind.ColonEqual)
         {
             return target;
@@ -22,15 +27,7 @@ public sealed partial class Parser
         TokenKind operatorKind = Next().Kind;
         SkipExpressionNewLines();
         Expression value = ParseAssignment();
-        AssignmentOperator op = operatorKind switch
-        {
-            TokenKind.PlusEqual => AssignmentOperator.AddAssign,
-            TokenKind.MinusEqual => AssignmentOperator.SubtractAssign,
-            TokenKind.StarEqual => AssignmentOperator.MultiplyAssign,
-            TokenKind.SlashEqual => AssignmentOperator.DivideAssign,
-            TokenKind.PercentEqual => AssignmentOperator.ModuloAssign,
-            _ => AssignmentOperator.Assign,
-        };
+        AssignmentOperator op = ToAssignmentOperator(operatorKind);
 
         return new AssignmentExpression(target, op, value, operatorKind == TokenKind.ColonEqual);
     }

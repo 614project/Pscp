@@ -23,7 +23,7 @@ for i in 0..<q {
 
 let xs = coords.sort().distinct()
 let index = xs.index()
-let n = xs.Count
+let n = xs.Length
 let INF = 4000000000000000000L
 long[] lm = new[n * 4 + 5]
 long[] lb = new[n * 4 + 5]

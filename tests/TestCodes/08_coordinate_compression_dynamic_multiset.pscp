@@ -47,7 +47,7 @@ void solve() {
     }
 
     int countLessOrEqual(int x) {
-        sumPrefix(coord[x])
+        return sumPrefix(coord[x])
     }
 
     0..<n -> i {
