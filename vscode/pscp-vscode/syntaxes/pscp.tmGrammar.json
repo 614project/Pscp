@@ -139,7 +139,7 @@
       "patterns": [
         {
           "name": "constant.numeric.pscp",
-          "match": "\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[mMlL]?\\b"
+          "match": "\\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|\\d[\\d_]*(?:\\.\\d[\\d_]*)?(?:[eE][+-]?\\d+)?)(?:[uU][lL]?|[lL][uU]?|[fFdDmM])?\\b"
         }
       ]
     },

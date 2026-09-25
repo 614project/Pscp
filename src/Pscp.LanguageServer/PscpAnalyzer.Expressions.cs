@@ -1090,8 +1090,8 @@ internal sealed partial class PscpAnalyzer
         Token token = state.Tokens[tokenIndex];
         return token.Kind switch
         {
-            TokenKind.IntegerLiteral => token.Text.EndsWith("L", StringComparison.OrdinalIgnoreCase) ? "long" : "int",
-            TokenKind.FloatLiteral => token.Text.EndsWith("m", StringComparison.OrdinalIgnoreCase) ? "decimal" : "double",
+            TokenKind.IntegerLiteral => PscpNumericLiterals.GetTypeName(token.Text, isFloat: false),
+            TokenKind.FloatLiteral => PscpNumericLiterals.GetTypeName(token.Text, isFloat: true),
             TokenKind.StringLiteral or TokenKind.InterpolatedStringLiteral => "string",
             TokenKind.CharLiteral => "char",
             TokenKind.True or TokenKind.False => "bool",

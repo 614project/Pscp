@@ -6,6 +6,8 @@ using Pscp.Transpiler;
 internal sealed record TestCase(string Name, string Source, string Input, string ExpectedOutput)
 {
     public IReadOnlyList<string> ExpectedWarnings { get; init; } = Array.Empty<string>();
+
+    public bool LargeStack { get; init; }
 }
 
 internal static class Program
@@ -907,16 +909,164 @@ internal static class TestRunner
                 """,
                 "",
                 "32\n0\n3,1\n"),
+            new(
+                "RangeBoundEvaluatedOnceInLevelOrderBfs",
+                """
+                Queue<int> q
+                q += 0
+                while q.Count > 0 {
+                    mut int width = 0
+                    0..<q.Count -> _ {
+                        let x = --q
+                        width += 1
+                        if 2 * x + 2 < 7 {
+                            q += 2 * x + 1
+                            q += 2 * x + 2
+                        }
+                    }
+                    += width
+                }
+                List<int> v = [1, 2]
+                for i in 0..<v.Count do v += i
+                += v.Count
+                """,
+                "",
+                "1\n2\n4\n4\n"),
+            new(
+                "LongRangeBoundsUseLongCounters",
+                """
+                long hi =
+                mut long c = 0
+                for i in 2147483646..hi {
+                    c += 1
+                    if c > 5 then break
+                }
+                += c
+                long big = 3000000000
+                += [big..big + 2]
+                long n = 3
+                += sum (0..<n -> i do i * 1000000000)
+                """,
+                "2147483648",
+                "3\n3000000000 3000000001 3000000002\n3000000000\n"),
+            new(
+                "RangesWithStartAfterEndAreEmpty",
+                """
+                int a =
+                int b =
+                int[] xs = [a..b]
+                += xs.Length
+                let ys = [a..<b -> i do i * 2]
+                += ys.Length
+                += [5..1].Length
+                """,
+                "5 1",
+                "0\n0\n0\n"),
+            new(
+                "SwitchArmsAndWithValuesArePscpExpressions",
+                """
+                record P(int A, int B)
+                let t = (5, 6)
+                let v = 3
+                let s = v switch {
+                    1 => 0
+                    3 when t.2 > 1 => t.1 + min v 10,
+                    int k when k > 100 => k,
+                    _ => -1
+                }
+                += s
+                let p = P(1, 2)
+                let q = p with { A = t.1 + 1 }
+                += q.A
+                """,
+                "",
+                "8\n6\n"),
+            new(
+                "PassThroughKeepsTokenSeparation",
+                """
+                int n = 5
+                mut int c = 0
+                for (int i = 0; i < n - -1; i++) { c += 1 }
+                += c
+                """,
+                "",
+                "6\n"),
+            new(
+                "NestedTupleProjectionAndNumericLiterals",
+                """
+                let p = ((1, 2), 3)
+                += p.1.2
+                += 0xFF + 0b101 + 1_000
+                += 3_000_000_000L
+                += 1.5f
+                += 2m
+                """,
+                "",
+                "2\n1260\n3000000000\n1.5\n2\n"),
+            new(
+                "PipeIntoIntrinsicsAndFunctions",
+                """
+                int[] arr = [3, 1, 2]
+                += arr |> sum
+                += arr |> max
+                int twice(int v) { v * 2 }
+                += 5 |> twice
+                += max 1 <| 9
+                """,
+                "",
+                "6\n3\n10\n9\n"),
+            new(
+                "ConsoleOutputStaysInOrderWithStdout",
+                """
+                Console.WriteLine("first")
+                += "second"
+                Console.Write("third")
+                Console.WriteLine()
+                += "fourth"
+                """,
+                "",
+                "first\nsecond\nthird\nfourth\n"),
+            new(
+                "GeneratedNamesAvoidUserDeclarations",
+                """
+                void Run() {
+                    += "user run"
+                }
+                int GeneratedNamesAvoidUserDeclarationsProgram(int x) { x + 1 }
+                Run()
+                += GeneratedNamesAvoidUserDeclarationsProgram(1)
+                """,
+                "",
+                "user run\n2\n"),
+            new(
+                "DeepRecursionRunsOnLargeStack",
+                """
+                int n =
+                List<int>[] g = new![n]
+                1..<n -> i { g[i - 1] += i }
+                rec int depth(int u) {
+                    mut int best = 0
+                    g[u] -> w { best = max(best, depth(w)) }
+                    best + 1
+                }
+                += depth(0)
+                """,
+                "200000",
+                "200000\n")
+            {
+                LargeStack = true,
+            },
         ];
 
         List<string> failures = [];
+        List<Func<Task<string?>>> runs = [];
 
         foreach (TestCase testCase in testCases)
         {
             string safeName = string.Concat(testCase.Name.Where(char.IsLetterOrDigit));
             TranspilationResult result = PscpTranspiler.Transpile(
                 NormalizeSource(testCase.Source),
-                new TranspilationOptions("Pscp.Generated", safeName + "Program"));
+                new TranspilationOptions("Pscp.Generated", safeName + "Program", LargeStack: testCase.LargeStack));
 
             IReadOnlyList<Diagnostic> errors = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
             IReadOnlyList<Diagnostic> warnings = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning).ToArray();
@@ -947,23 +1097,42 @@ internal static class TestRunner
             await File.WriteAllTextAsync(Path.Combine(caseDirectory, "Program.cs"), result.CSharpCode, Encoding.UTF8);
             await File.WriteAllTextAsync(Path.Combine(caseDirectory, $"{safeName}.csproj"), CreateProjectFile(), Encoding.UTF8);
 
-            ProcessResult runResult = await RunDotnetAsync(
-                "run --project \"" + Path.Combine(caseDirectory, $"{safeName}.csproj") + "\"",
-                caseDirectory,
-                testCase.Input);
-
-            if (runResult.ExitCode != 0)
+            runs.Add(async () =>
             {
-                failures.Add($"{testCase.Name}: generated program failed\nSTDOUT:\n{runResult.StdOut}\nSTDERR:\n{runResult.StdErr}\nGenerated:\n{result.CSharpCode}");
-                continue;
-            }
+                ProcessResult runResult = await RunDotnetAsync(
+                    "run --project \"" + Path.Combine(caseDirectory, $"{safeName}.csproj") + "\"",
+                    caseDirectory,
+                    testCase.Input);
 
-            string actual = NormalizeOutput(runResult.StdOut);
-            string expected = NormalizeOutput(testCase.ExpectedOutput);
-            if (!string.Equals(actual, expected, StringComparison.Ordinal))
+                if (runResult.ExitCode != 0)
+                {
+                    return $"{testCase.Name}: generated program failed\nSTDOUT:\n{runResult.StdOut}\nSTDERR:\n{runResult.StdErr}\nGenerated:\n{result.CSharpCode}";
+                }
+
+                string actual = NormalizeOutput(runResult.StdOut);
+                string expected = NormalizeOutput(testCase.ExpectedOutput);
+                return string.Equals(actual, expected, StringComparison.Ordinal)
+                    ? null
+                    : $"{testCase.Name}: output mismatch\nExpected: {Escape(expected)}\nActual:   {Escape(actual)}\nGenerated:\n{result.CSharpCode}";
+            });
+        }
+
+        // Each case is an independent project; building and running them concurrently cuts the suite's wall time.
+        using (SemaphoreSlim gate = new(Math.Clamp(Environment.ProcessorCount / 2, 1, 4)))
+        {
+            string?[] outcomes = await Task.WhenAll(runs.Select(async run =>
             {
-                failures.Add($"{testCase.Name}: output mismatch\nExpected: {Escape(expected)}\nActual:   {Escape(actual)}\nGenerated:\n{result.CSharpCode}");
-            }
+                await gate.WaitAsync();
+                try
+                {
+                    return await run();
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
+            failures.AddRange(outcomes.OfType<string>());
         }
 
         await VerifySampleProgramsBuildAsync(workspaceRoot, generatedRoot, failures);
@@ -1008,6 +1177,8 @@ internal static class TestRunner
         VerifyWarningDiagnostics(failures);
         VerifyRemovedGenericReadSurface(failures);
         VerifyHoistedValueBlocksAvoidThunks(failures);
+        VerifyCodeReviewRegressionShapes(failures);
+        VerifyIntrinsicCatalogsAgree(failures);
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
         await VerifyLanguageServerCollectionCompletionRenameAndFreshDiagnosticsAsync(failures);
@@ -1299,7 +1470,7 @@ internal static class TestRunner
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("Dish[] dishes = new Dish[n];", StringComparison.Ordinal)
+        if (!userCode.Contains("Dish[] dishes = new Dish[System.Math.Max(0, n)];", StringComparison.Ordinal)
             || !userCode.Contains("long result = default!;", StringComparison.Ordinal)
             || !userCode.Contains("foreach (var x in dishes)", StringComparison.Ordinal)
             || userCode.Contains("object result", StringComparison.Ordinal)
@@ -2190,7 +2361,8 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 int x = 2
-                let y = x switch { 1 => 10, 2 => 20, _ => 0 }
+                let p = (5, 6)
+                let y = x switch { 1 => 10, 2 when p.2 > 0 => p.1 + min x 3, _ => 0 }
                 += y
                 """),
             new TranspilationOptions("Pscp.Generated", "SwitchExpressionLoweringProgram"));
@@ -2203,10 +2375,11 @@ internal static class TestRunner
 
         string userCode = GetUserCodePortion(result.CSharpCode);
         if (!userCode.Contains("x switch", StringComparison.Ordinal)
-            || !userCode.Contains("1=>10", StringComparison.Ordinal)
-            || !userCode.Contains("_=>0", StringComparison.Ordinal))
+            || !userCode.Contains("1 => 10", StringComparison.Ordinal)
+            || !userCode.Contains("2 when (p.Item2 > 0) => (p.Item1 + System.Math.Min(x, 3))", StringComparison.Ordinal)
+            || !userCode.Contains("_ => 0", StringComparison.Ordinal))
         {
-            failures.Add($"SwitchExpressionLowering: expected pass-through switch expression not found\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"SwitchExpressionLowering: expected lowered switch expression arms not found\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -2228,6 +2401,7 @@ internal static class TestRunner
         string userCode = GetUserCodePortion(result.CSharpCode);
         if (!userCode.Contains("public static void Main()", StringComparison.Ordinal)
             || !userCode.Contains("Run();", StringComparison.Ordinal)
+            || userCode.Contains("System.Threading.Thread", StringComparison.Ordinal)
             || !userCode.Contains("stdout.flush();", StringComparison.Ordinal)
             || !userCode.Contains("private static void Run()", StringComparison.Ordinal)
             || userCode.Contains("finally", StringComparison.Ordinal))
@@ -2247,7 +2421,7 @@ internal static class TestRunner
         string normalized = NormalizeSource(source);
         TranspilationResult result = PscpTranspiler.Transpile(
             normalized,
-            new TranspilationOptions("Pscp.Generated", "ExplainHeaderProgram", HelperEmissionMode.Compact, Explain: true, Older: false, ExplainSource: normalized));
+            new TranspilationOptions("Pscp.Generated", "ExplainHeaderProgram", HelperEmissionMode.Compact, Explain: true, ExplainSource: normalized));
 
         if (result.Diagnostics.Count > 0)
         {
@@ -2511,6 +2685,114 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyCodeReviewRegressionShapes(List<string> failures)
+    {
+        string Emit(string name, string source)
+        {
+            TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source), new TranspilationOptions("Pscp.Generated", name));
+            if (result.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+            {
+                failures.Add($"{name}: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
+            }
+
+            return GetUserCodePortion(result.CSharpCode);
+        }
+
+        // Immutable bounds stay inline; a bound that can change inside the loop is captured once.
+        string loops = Emit(
+            "RangeBoundInliningProgram",
+            """
+            int n =
+            mut int m = 3
+            List<int> v = [1]
+            for i in 0..<n do += i
+            for i in 0..<m do m -= 1
+            for i in 0..<v.Count do v += i
+            """);
+        if (!loops.Contains("for (int i = 0; i < n; i++)", StringComparison.Ordinal)
+            || loops.Contains("i < m;", StringComparison.Ordinal)
+            || loops.Contains("i < v.Count;", StringComparison.Ordinal))
+        {
+            failures.Add($"RangeBoundInlining: expected invariant bounds inline and mutable bounds hoisted\nGenerated:\n{loops}");
+        }
+
+        string longRange = Emit(
+            "LongRangeCounterProgram",
+            """
+            long n =
+            for i in 0..<n do += i
+            """);
+        if (!longRange.Contains("for (long i = 0; i < n; i++)", StringComparison.Ordinal))
+        {
+            failures.Add($"LongRangeCounter: expected a long loop counter for a long bound\nGenerated:\n{longRange}");
+        }
+
+        string arrayLiteral = Emit(
+            "ArrayLiteralProgram",
+            """
+            int[] xs = [3, 1, 2]
+            += xs
+            """);
+        if (!arrayLiteral.Contains("int[] xs = new int[] { 3, 1, 2 };", StringComparison.Ordinal)
+            || arrayLiteral.Contains("ToArray()", StringComparison.Ordinal))
+        {
+            failures.Add($"ArrayLiteral: expected a direct array initializer\nGenerated:\n{arrayLiteral}");
+        }
+
+        // `--large-stack` is opt-in; by default Main calls Run() on the main thread.
+        string largeStack = GetUserCodePortion(
+            PscpTranspiler.Transpile(NormalizeSource("+= 1"), new TranspilationOptions("Pscp.Generated", "LargeStackProgram", LargeStack: true)).CSharpCode);
+        if (!largeStack.Contains("System.Threading.Thread __pscpThread = new(Run, 268435456);", StringComparison.Ordinal)
+            || !largeStack.Contains("__pscpThread.Join();", StringComparison.Ordinal))
+        {
+            failures.Add($"LargeStack: expected Run on a large-stack thread\nGenerated:\n{largeStack}");
+        }
+
+        string classCollision = Emit(
+            "main",
+            """
+            void main() {
+                += 1
+            }
+            main()
+            """);
+        if (!classCollision.Contains("public static class mainProgram", StringComparison.Ordinal))
+        {
+            failures.Add($"ClassNameCollision: expected the generated class to be renamed away from `main`\nGenerated:\n{classCollision}");
+        }
+
+        string keywordClass = Emit("int", "+= 1");
+        if (!keywordClass.Contains("public static class @int", StringComparison.Ordinal))
+        {
+            failures.Add($"KeywordClassName: expected a verbatim class name\nGenerated:\n{keywordClass}");
+        }
+
+        ExpectDiagnostic(failures, "ReservedMainFunction", "void Main() {\n    += 1\n}", "`Main()` is reserved");
+        ExpectDiagnostic(failures, "ZeroTupleProjection", "let p = (1, 2)\n+= p.0", "Tuple projection index must be a positive integer");
+
+        const string invalidSource = "+= undefinedThing";
+        IReadOnlyList<Diagnostic> checkDiagnostics = PscpTranspiler.Check(NormalizeSource(invalidSource));
+        IReadOnlyList<Diagnostic> transpileDiagnostics = PscpTranspiler.Transpile(NormalizeSource(invalidSource)).Diagnostics;
+        if (!checkDiagnostics.SequenceEqual(transpileDiagnostics))
+        {
+            failures.Add($"CheckMatchesTranspile: Check() and Transpile() disagree\nCheck:\n{FormatDiagnostics(checkDiagnostics)}\nTranspile:\n{FormatDiagnostics(transpileDiagnostics)}");
+        }
+    }
+
+    // The language server keeps its own documentation for intrinsics; every intrinsic the transpiler knows must
+    // have an entry there so completion and hover never miss one.
+    private static void VerifyIntrinsicCatalogsAgree(List<string> failures)
+    {
+        string[] missing = PscpIntrinsicCatalog.IntrinsicCallNames
+            .Where(name => !Pscp.LanguageServer.PscpIntrinsics.IntrinsicFunctions.ContainsKey(name))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            failures.Add($"IntrinsicCatalogsAgree: language server has no entry for {string.Join(", ", missing)}");
+        }
+    }
+
     private static void ExpectDiagnostic(List<string> failures, string name, string source, string expectedMessage)
     {
         TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
@@ -2621,7 +2903,10 @@ internal static class TestRunner
 
         await File.WriteAllTextAsync(
             Path.Combine(projectDirectory, "SamplePrograms.csproj"),
-            CreateProjectFile().Replace("<OutputType>Exe</OutputType>", "<OutputType>Library</OutputType>", StringComparison.Ordinal),
+            // LangVersion 10 keeps the generated code usable by `pscp build --older` (net6.0 / C# 10) projects.
+            CreateProjectFile()
+                .Replace("<OutputType>Exe</OutputType>", "<OutputType>Library</OutputType>", StringComparison.Ordinal)
+                .Replace("<Nullable>enable</Nullable>", "<Nullable>enable</Nullable>\n    <LangVersion>10.0</LangVersion>", StringComparison.Ordinal),
             Encoding.UTF8);
 
         ProcessResult build = await RunDotnetAsync(

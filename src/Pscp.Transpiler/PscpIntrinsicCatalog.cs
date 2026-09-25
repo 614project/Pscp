@@ -1,6 +1,7 @@
 namespace Pscp.Transpiler;
 
-internal static class PscpIntrinsicCatalog
+// Single source of truth for intrinsic and builtin names, shared by the transpiler and the language server.
+public static class PscpIntrinsicCatalog
 {
     public static readonly IReadOnlySet<string> IntrinsicCallNames = new HashSet<string>(StringComparer.Ordinal)
     {

@@ -95,21 +95,26 @@ static class PscpCli
     private static async Task<int> CheckAsync(string[] args)
     {
         SourceResolution source = ResolveSourceArgument(args, "pscp check [file.pscp]");
-        string text = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
-        TranspilationResult result = PscpTranspiler.Transpile(text);
+        if (args.Length > source.OptionStart)
+        {
+            throw new InvalidOperationException($"Unknown option: {args[source.OptionStart]}. Usage: pscp check [file.pscp]");
+        }
 
-        if (result.Diagnostics.Count == 0)
+        string text = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
+        IReadOnlyList<Diagnostic> diagnostics = PscpTranspiler.Check(text);
+
+        if (diagnostics.Count == 0)
         {
             Console.WriteLine("No diagnostics.");
             return 0;
         }
 
-        foreach (string line in FormatDiagnostics(result.Diagnostics, text))
+        foreach (string line in FormatDiagnostics(diagnostics, text))
         {
             Console.WriteLine(line);
         }
 
-        return HasErrors(result.Diagnostics) ? 1 : 0;
+        return HasErrors(diagnostics) ? 1 : 0;
     }
 
     private static async Task<int> TranspileAsync(string[] args)
@@ -504,14 +509,16 @@ static class PscpCli
         Console.WriteLine("Commands:");
         Console.WriteLine("  pscp init [directory] [--force]");
         Console.WriteLine("  pscp check [file.pscp]");
-        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
-        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
-        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
+        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack]");
+        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
+        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
         Console.WriteLine("  pscp lsp");
         Console.WriteLine("  pscp version");
         Console.WriteLine();
         Console.WriteLine("When `file.pscp` is omitted, `main.pscp` in the current directory is used if present.");
         Console.WriteLine("`--compact` is the default. Use `--verbose` to keep the full helper surface in generated C#.");
+        Console.WriteLine("`--large-stack` runs the program on a 256 MB stack thread (for deep recursion outside online judges).");
+        Console.WriteLine("`--older` makes the generated SDK project target net6.0 / C# 10. Transpiled C# is always C# 10 compatible.");
     }
 
     private sealed record SourceResolution(string SourcePath, int OptionStart);
@@ -527,7 +534,8 @@ static class PscpCli
         HelperEmissionMode HelperEmission,
         bool Explain,
         bool Older,
-        bool Pretty);
+        bool Pretty,
+        bool LargeStack);
 
     private static BackendOptions ParseBackendOptions(string[] args, int startIndex, bool allowOutput, bool allowStdinFile)
     {
@@ -541,6 +549,7 @@ static class PscpCli
         bool explain = false;
         bool older = false;
         bool pretty = false;
+        bool largeStack = false;
 
         for (int i = startIndex; i < args.Length; i++)
         {
@@ -553,7 +562,7 @@ static class PscpCli
                         throw new InvalidOperationException($"Unknown option: {args[i]}");
                     }
 
-                    outputPath = Path.GetFullPath(args[++i]);
+                    outputPath = Path.GetFullPath(ReadOptionValue(args, ref i));
                     break;
                 case "--print":
                     if (!allowOutput)
@@ -569,11 +578,11 @@ static class PscpCli
                         throw new InvalidOperationException($"Unknown option: {args[i]}");
                     }
 
-                    stdinFile = Path.GetFullPath(args[++i]);
+                    stdinFile = Path.GetFullPath(ReadOptionValue(args, ref i));
                     break;
                 case "-c":
                 case "--configuration":
-                    configuration = args[++i];
+                    configuration = NormalizeConfiguration(ReadOptionValue(args, ref i));
                     break;
                 case "--release":
                     configuration = "Release";
@@ -582,10 +591,10 @@ static class PscpCli
                     configuration = "Debug";
                     break;
                 case "--namespace":
-                    ns = args[++i];
+                    ns = ReadOptionValue(args, ref i);
                     break;
                 case "--class-name":
-                    className = args[++i];
+                    className = ReadOptionValue(args, ref i);
                     break;
                 case "--compact":
                     helperEmission = HelperEmissionMode.Compact;
@@ -602,13 +611,37 @@ static class PscpCli
                 case "--older":
                     older = true;
                     break;
+                case "--large-stack":
+                    largeStack = true;
+                    break;
                 default:
                     throw new InvalidOperationException($"Unknown option: {args[i]}");
             }
         }
 
-        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older, pretty);
+        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older, pretty, largeStack);
     }
+
+    private static string ReadOptionValue(string[] args, ref int index)
+    {
+        string option = args[index];
+        if (index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Option {option} requires a value.");
+        }
+
+        return args[++index];
+    }
+
+    // The generated SDK project only defines the standard configurations; the value is also passed to `dotnet`
+    // on its command line, so it is restricted to those names.
+    private static string NormalizeConfiguration(string value)
+        => value.ToLowerInvariant() switch
+        {
+            "debug" => "Debug",
+            "release" => "Release",
+            _ => throw new InvalidOperationException($"Unknown configuration '{value}'. Use Debug or Release."),
+        };
 
     private static TranspilationOptions CreateTranspilationOptions(string sourcePath, string sourceText, BackendOptions options, string? suffix)
         => new(
@@ -616,9 +649,9 @@ static class PscpCli
             (options.ClassName ?? MakeSafeClassName(Path.GetFileNameWithoutExtension(sourcePath))) + (suffix ?? string.Empty),
             options.HelperEmission,
             options.Explain,
-            options.Older,
             options.Explain ? sourceText : null,
-            options.Pretty);
+            options.Pretty,
+            options.LargeStack);
 
     private static bool HasErrors(IReadOnlyList<Diagnostic> diagnostics)
         => diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);

@@ -1,3 +1,5 @@
+using Pscp.Transpiler;
+
 namespace Pscp.LanguageServer;
 
 internal static class PscpIntrinsics
@@ -226,12 +228,7 @@ internal static class PscpIntrinsics
         "operator", "switch",
     };
 
-    public static readonly IReadOnlySet<string> BuiltinTypes = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "int", "long", "double", "decimal", "bool", "char", "string", "void", "List", "LinkedList",
-        "Queue", "Stack", "HashSet", "Dictionary", "PriorityQueue", "SortedSet",
-        "IEnumerable", "IComparable", "Comparer", "Array",
-    };
+    public static readonly IReadOnlySet<string> BuiltinTypes = PscpIntrinsicCatalog.BuiltinTypes;
 
     public static readonly IReadOnlyDictionary<string, string> TypeCompletionDetails =
         BuiltinTypes.ToDictionary(

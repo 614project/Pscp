@@ -65,13 +65,28 @@ public sealed partial class Parser
             TokenKind kind = Next().Kind;
             SkipExpressionNewLines();
             Expression right = ParseOr();
-            expression = new BinaryExpression(
-                expression,
-                kind == TokenKind.PipeGreater ? BinaryOperator.PipeRight : BinaryOperator.PipeLeft,
-                right);
+            expression = kind == TokenKind.PipeGreater
+                ? DesugarPipe(target: right, pipedValue: expression, append: false) ?? new BinaryExpression(expression, BinaryOperator.PipeRight, right)
+                : DesugarPipe(target: expression, pipedValue: right, append: true) ?? new BinaryExpression(expression, BinaryOperator.PipeLeft, right);
         }
 
         return expression;
+    }
+
+    // `lhs |> head a b` is `head lhs a b` and `head a b <| rhs` is `head a b rhs` (spec 13.3). Rewriting the pipe
+    // into the call it stands for lets intrinsics (`xs |> sum`), conversions (`x |> long`), and ordinary
+    // functions go through the same semantic analysis and lowering as a direct call. Other callable targets
+    // (parenthesized lambdas, ...) stay a pipe node.
+    private static Expression? DesugarPipe(Expression target, Expression pipedValue, bool append)
+    {
+        ArgumentSyntax piped = new ExpressionArgumentSyntax(null, ArgumentModifier.None, pipedValue);
+        return target switch
+        {
+            CallExpression call when append => new CallExpression(call.Callee, [.. call.Arguments, piped], call.IsSpaceSeparated),
+            CallExpression call => new CallExpression(call.Callee, [piped, .. call.Arguments], call.IsSpaceSeparated),
+            IdentifierExpression or MemberAccessExpression => new CallExpression(target, [piped], false),
+            _ => null,
+        };
     }
 
     private Expression ParseOr()
@@ -391,7 +406,12 @@ public sealed partial class Parser
             {
                 if (Current.Kind == TokenKind.IntegerLiteral)
                 {
-                    int position = int.TryParse(Current.Text.TrimEnd('L', 'l'), out int value) ? value : 1;
+                    if (!int.TryParse(Current.Text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int position) || position < 1)
+                    {
+                        _diagnostics.Add(new Diagnostic("Tuple projection index must be a positive integer (`.1`, `.2`, ...).", Current.Span));
+                        position = 1;
+                    }
+
                     Next();
                     expression = new TupleProjectionExpression(expression, position);
                 }
@@ -441,52 +461,151 @@ public sealed partial class Parser
         return expression;
     }
 
+    // `receiver with { Member = value, ... }`: member names are C#, values are ordinary PSCP expressions.
     private Expression ParseWithExpression(Expression receiver)
     {
         Expect(TokenKind.Identifier, "Expected 'with'.");
         SkipSeparators();
-        int start = _position;
         Expect(TokenKind.OpenBrace, "Expected '{' after 'with'.");
-        int braceDepth = 1;
-        while (braceDepth > 0 && Current.Kind != TokenKind.EndOfFile)
+        List<WithAssignment> assignments = [];
+        SkipSeparators();
+        while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
         {
-            if (Current.Kind == TokenKind.OpenBrace)
+            string memberName = Expect(TokenKind.Identifier, "Expected a member name in 'with' initializer.").Text;
+            Expect(TokenKind.Equal, "Expected '=' after member name in 'with' initializer.");
+            SkipSeparators();
+            assignments.Add(new WithAssignment(memberName, ParseExpression()));
+            SkipSeparators();
+            if (!Match(TokenKind.Comma))
             {
-                braceDepth++;
-            }
-            else if (Current.Kind == TokenKind.CloseBrace)
-            {
-                braceDepth--;
+                break;
             }
 
-            Next();
+            SkipSeparators();
         }
 
-        return new WithExpression(receiver, TokensToText(start, _position));
+        Expect(TokenKind.CloseBrace, "Expected '}' to close the 'with' initializer.");
+        return new WithExpression(receiver, assignments);
     }
 
+    // `receiver switch { pattern [when guard] => result, ... }`: patterns are passed through as C# text, while
+    // guards and results are ordinary PSCP expressions and are lowered like any other expression.
     private Expression ParseSwitchExpression(Expression receiver)
     {
-        int start = _position;
         Expect(TokenKind.Identifier, "Expected 'switch'.");
         SkipSeparators();
         Expect(TokenKind.OpenBrace, "Expected '{' after 'switch'.");
-        int braceDepth = 1;
-        while (braceDepth > 0 && Current.Kind != TokenKind.EndOfFile)
+        List<SwitchArm> arms = [];
+        SkipSeparators();
+        while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
         {
-            if (Current.Kind == TokenKind.OpenBrace)
+            int patternStart = _position;
+            int depth = 0;
+            while (Current.Kind != TokenKind.EndOfFile)
             {
-                braceDepth++;
-            }
-            else if (Current.Kind == TokenKind.CloseBrace)
-            {
-                braceDepth--;
+                if (depth == 0
+                    && (Current.Kind is TokenKind.FatArrow or TokenKind.CloseBrace or TokenKind.Comma
+                        || (Current.Kind == TokenKind.Identifier && Current.Text == "when")))
+                {
+                    break;
+                }
+
+                if (Current.Kind is TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace)
+                {
+                    depth++;
+                }
+                else if (Current.Kind is TokenKind.CloseParen or TokenKind.CloseBracket or TokenKind.CloseBrace)
+                {
+                    depth--;
+                }
+
+                Next();
             }
 
-            Next();
+            int patternEnd = _position;
+            if (patternEnd == patternStart)
+            {
+                _diagnostics.Add(new Diagnostic("Expected a pattern in switch expression arm.", Current.Span));
+            }
+
+            Expression? guard = null;
+            if (Current.Kind == TokenKind.Identifier && Current.Text == "when")
+            {
+                Next();
+                SkipSeparators();
+                guard = ParseExpression();
+                SkipSeparators();
+            }
+
+            Expect(TokenKind.FatArrow, "Expected '=>' in switch expression arm.");
+            SkipSeparators();
+            Expression result = ParseExpression();
+            arms.Add(new SwitchArm(TokensToText(patternStart, patternEnd), CollectPatternDesignations(patternStart, patternEnd), guard, result));
+            // Arms are separated by `,` as in C#, or simply by a line break.
+            bool lineBreak = Current.Kind == TokenKind.NewLine;
+            SkipSeparators();
+            if (!Match(TokenKind.Comma) && !lineBreak)
+            {
+                break;
+            }
+
+            SkipSeparators();
         }
 
-        return new SwitchExpression(receiver, TokensToText(start, _position));
+        Expect(TokenKind.CloseBrace, "Expected '}' to close the switch expression.");
+        return new SwitchExpression(receiver, arms);
+    }
+
+    // Names declared by a C# pattern: an identifier that directly follows a type or `var` and ends the
+    // sub-pattern (`int x`, `var (a, b)`, `{ Length: var n }`, `Point p when ...`).
+    private IReadOnlyList<string> CollectPatternDesignations(int start, int endExclusive)
+    {
+        List<string> names = [];
+        for (int i = start; i < endExclusive; i++)
+        {
+            Token token = _tokens[i];
+            if (token.Kind != TokenKind.Identifier || token.Text is "_" or "and" or "or" or "not" || i == start)
+            {
+                continue;
+            }
+
+            Token previous = _tokens[i - 1];
+            bool followsType = previous.Kind is TokenKind.Identifier or TokenKind.Var or TokenKind.GreaterThan or TokenKind.CloseBracket or TokenKind.Question
+                && previous.Text is not "and" and not "or" and not "not" and not "is";
+            bool followsVarTuple = IsInsideVarTuple(start, i);
+            TokenKind next = i + 1 < endExclusive ? _tokens[i + 1].Kind : TokenKind.FatArrow;
+            bool endsSubpattern = next is TokenKind.Comma or TokenKind.CloseParen or TokenKind.CloseBrace or TokenKind.CloseBracket or TokenKind.FatArrow;
+            if ((followsType || followsVarTuple) && endsSubpattern)
+            {
+                names.Add(token.Text);
+            }
+        }
+
+        return names;
+    }
+
+    private bool IsInsideVarTuple(int start, int index)
+    {
+        int depth = 0;
+        for (int i = index - 1; i >= start; i--)
+        {
+            TokenKind kind = _tokens[i].Kind;
+            if (kind == TokenKind.CloseParen)
+            {
+                depth++;
+            }
+            else if (kind == TokenKind.OpenParen)
+            {
+                if (depth == 0)
+                {
+                    return i > start && _tokens[i - 1].Kind == TokenKind.Var;
+                }
+
+                depth--;
+            }
+        }
+
+        return false;
     }
 
     private Expression ParsePrimary()

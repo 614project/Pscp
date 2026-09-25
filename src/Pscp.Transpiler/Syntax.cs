@@ -128,14 +128,16 @@ public static class PscpVersionInfo
 
 public sealed record Diagnostic(string Message, TextSpan Span, DiagnosticSeverity Severity = DiagnosticSeverity.Error);
 
+// Generated C# always stays within C# 10 / .NET 6 APIs, so it compiles for both the default SDK project and the
+// `pscp build --older` (net6.0, LangVersion 10) project; there is no separate "older" emission mode.
 public sealed record TranspilationOptions(
     string Namespace = "Pscp.Generated",
     string ClassName = "GeneratedProgram",
     HelperEmissionMode HelperEmission = HelperEmissionMode.Compact,
     bool Explain = false,
-    bool Older = false,
     string? ExplainSource = null,
-    bool Pretty = false);
+    bool Pretty = false,
+    bool LargeStack = false);
 
 public sealed record TranspilationResult(
     string Source,
@@ -455,9 +457,15 @@ public sealed record MemberAccessExpression(Expression Receiver, string MemberNa
 
 public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expression> Arguments) : Expression;
 
-public sealed record WithExpression(Expression Receiver, string InitializerText) : Expression;
+public sealed record WithExpression(Expression Receiver, IReadOnlyList<WithAssignment> Assignments) : Expression;
 
-public sealed record SwitchExpression(Expression Receiver, string SwitchText) : Expression;
+public sealed record WithAssignment(string MemberName, Expression Value);
+
+public sealed record SwitchExpression(Expression Receiver, IReadOnlyList<SwitchArm> Arms) : Expression;
+
+// Patterns are C# pass-through text; `Designations` are the names the pattern declares (`int x`, `var (a, b)`),
+// which are in scope for the guard and the result.
+public sealed record SwitchArm(string PatternText, IReadOnlyList<string> Designations, Expression? Guard, Expression Result);
 
 public sealed record FromEndExpression(Expression Operand) : Expression;
 

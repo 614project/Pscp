@@ -366,11 +366,18 @@ public sealed partial class Parser
         return builder.ToString();
     }
 
+    // Pass-through text keeps the source's token separation: tokens that were apart in the source stay apart,
+    // so `n - -1` does not collapse into `n--1` and `a + +b` does not become `a++b`.
     private static bool NeedsSpace(Token previous, Token current)
     {
         if (previous.Text.Length == 0 || current.Text.Length == 0)
         {
             return false;
+        }
+
+        if (previous.Position + previous.Text.Length != current.Position)
+        {
+            return true;
         }
 
         char left = previous.Text[^1];

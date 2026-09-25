@@ -47,8 +47,9 @@ let best = min (0..<n -> i do arr[i])    // 중간 배열 생성 없이 바로 �
 ### 3. 자료구조 특화 연산자 (Operator Rewrites)
 .NET의 기본 자료구조들을 더 짧고 직관적으로 다룰 수 있도록 트랜스파일러 수준에서 특별한 연산자를 지원합니다.
 
-- List : `list += x` (요소 추가), `list -= x` (요소 제거)
-- HashSet: `visited += x` (요소 추가 및 `bool` 반환), `visited -= x` (요소 제거)
+- List / LinkedList: `list += x` (요소 추가)
+- HashSet / SortedSet: `visited += x` (요소 추가 및 `bool` 반환), `visited -= x` (요소 제거 및 `bool` 반환)
+- Dictionary: `dict += (key, value)` (`TryAdd`), `dict -= key` (`Remove`)
 - Stack / Queue: `+= x` (Push/Enqueue), `~s` (Peek), `--s` (Pop/Dequeue)
 - PriorityQueue: `pq += (item, priority)` (튜플 형태 추가)
 
@@ -64,7 +65,7 @@ List<int>[] graph = new![n]
 
 Queue<int> queue
 queue += 0
-HashSet<bool> visited
+HashSet<int> visited
 
 while queue.Count > 0 {
     let me = --queue
@@ -202,12 +203,14 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- run .\sample\main.pscp --st
 ```text
 pscp init [directory] [--force]
 pscp check [file.pscp]
-pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty]
-pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
-pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
+pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--large-stack]
+pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
+pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
 pscp lsp
 pscp version
 ```
+
+기본적으로 생성된 `Main`은 `Run()`을 메인 스레드에서 바로 호출합니다. 대부분의 온라인 저지는 메인 스레드에 넉넉한 스택을 주기 때문입니다. 로컬 환경(Windows 기본 1MB 등)에서 깊은 재귀가 필요하면 `--large-stack`을 붙이세요. 그러면 프로그램 본문이 256MB 스택 스레드에서 실행됩니다.
 
 ## Native AOT
 

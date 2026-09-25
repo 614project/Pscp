@@ -344,7 +344,12 @@ public sealed partial class Parser
             {
                 if (Current.Kind == TokenKind.IntegerLiteral)
                 {
-                    int position = int.TryParse(Current.Text.TrimEnd('L', 'l'), out int value) ? value : 1;
+                    if (!int.TryParse(Current.Text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int position) || position < 1)
+                    {
+                        _diagnostics.Add(new Diagnostic("Tuple projection index must be a positive integer (`.1`, `.2`, ...).", Current.Span));
+                        position = 1;
+                    }
+
                     Next();
                     expression = new TupleProjectionExpression(expression, position);
                 }

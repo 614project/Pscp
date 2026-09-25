@@ -1301,6 +1301,9 @@ internal sealed partial class CSharpEmitter
             {
                 private readonly StreamWriter _writer = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };
 
+                // Route Console.Write* through the same buffer so pass-through Console output stays in order.
+                public __PscpStdout() => Console.SetOut(_writer);
+
                 public void flush() => _writer.Flush();
 
                 public void write(int value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
@@ -1540,6 +1543,9 @@ internal sealed partial class CSharpEmitter
         builder.AppendLine("public sealed class __PscpStdout");
         builder.AppendLine("{");
         builder.AppendLine("    private readonly StreamWriter _writer = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };");
+        builder.AppendLine();
+        // Route Console.Write* through the same buffer so pass-through Console output stays in order.
+        builder.AppendLine("    public __PscpStdout() => Console.SetOut(_writer);");
         builder.AppendLine();
         builder.AppendLine("    public void flush() => _writer.Flush();");
         builder.AppendLine();
@@ -1898,11 +1904,29 @@ internal sealed partial class CSharpEmitter
                         string text => text,
                         bool boolean => boolean ? "True" : "False",
                         char ch => ch.ToString(),
+                        IEnumerable<int> ints => JoinFormattable(ints),
+                        IEnumerable<long> longs => JoinFormattable(longs),
+                        IEnumerable<double> doubles => JoinFormattable(doubles),
                         System.Runtime.CompilerServices.ITuple tuple => FormatTuple(tuple),
                         System.Collections.IEnumerable enumerable when value is not string => FormatEnumerable(enumerable),
                         IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
                         _ => value?.ToString() ?? string.Empty,
                     };
+                }
+
+                // Typed fast path for the common numeric collections (including rows of jagged grids): no per-element boxing.
+                private static string JoinFormattable<TItem>(IEnumerable<TItem> items) where TItem : IFormattable
+                {
+                    StringBuilder builder = new();
+                    bool first = true;
+                    foreach (TItem item in items)
+                    {
+                        if (!first) builder.Append(' ');
+                        first = false;
+                        builder.Append(item.ToString(null, CultureInfo.InvariantCulture));
+                    }
+
+                    return builder.ToString();
                 }
 
                 private static string FormatTuple(System.Runtime.CompilerServices.ITuple tuple)
