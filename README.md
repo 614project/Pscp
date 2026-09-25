@@ -294,6 +294,22 @@ pscp version
 
 다른 배포판 또는 관리자 권한이 없는 환경에서는 `.tar.gz`를 풀고 포함된 `bin` 디렉터리를 `PATH`에 추가하면 됩니다. 두 방식 모두 `pscp` CLI와 `pscp-lsp` 언어 서버 명령을 제공합니다.
 
+## 릴리즈
+
+`.github/workflows/release.yml`이 전체 CI(테스트, Windows 설치기 프로젝트 빌드)를 먼저 실행하고, 모두 통과하면 다음 파일을 빌드해 GitHub Release에 올립니다.
+
+- `pscp-setup_<version>_win-x64.exe`: Windows 설치기 (`installer/Build-Installer.ps1`, 설치 검증 포함)
+- `pscp_<version>_amd64.deb`, `pscp-sdk_<version>_linux-x64.tar.gz`
+- `pscp_<version>_arm64.deb`, `pscp-sdk_<version>_linux-arm64.tar.gz`
+- `SHA256SUMS.txt`
+
+릴리즈 방법:
+
+1. `src/Pscp.Transpiler/Syntax.cs`의 `ToolVersion`을 올리고 main에 병합합니다.
+2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.6.7 && git push origin v0.6.7`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
+
+태그와 `ToolVersion`이 다르면 릴리즈는 실패합니다. 이미 다른 커밋을 가리키는 태그로 수동 실행해도 실패합니다. `-`가 들어간 버전(예: `0.7.0-beta.1`)은 pre-release로 올라가고, 같은 태그로 다시 실행하면 기존 릴리즈의 파일을 교체합니다.
+
 ## VS Code 확장
 
 VS Code 확장은 [vscode/pscp-vscode](./vscode/pscp-vscode)에 있습니다.

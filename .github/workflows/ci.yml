@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Release runs the same checks before building packages.
+  workflow_call:
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"

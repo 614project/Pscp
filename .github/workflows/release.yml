@@ -1,0 +1,167 @@
+name: Release
+
+# Publishes a GitHub release with the Windows installer and the Linux packages.
+#
+# - Push a tag `v<ToolVersion>` (for example `v0.6.6`), or
+# - run this workflow manually; the tag `v<ToolVersion>` is then created on the selected commit.
+#
+# `ToolVersion` comes from src/Pscp.Transpiler/Syntax.cs. The full CI suite (ci.yml) must pass before any
+# package is built, and nothing is published unless every package builds.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Read ToolVersion and validate the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/.*ToolVersion = "([^"]+)".*/\1/p' src/Pscp.Transpiler/Syntax.cs | head -n 1)
+          if [[ -z "$version" ]]; then
+            echo "::error::Could not read ToolVersion from src/Pscp.Transpiler/Syntax.cs."
+            exit 1
+          fi
+
+          tag="v$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match ToolVersion $version. Push $tag instead, or bump ToolVersion."
+            exit 1
+          fi
+
+          # A manual run must not attach packages built from this commit to a tag that points somewhere else.
+          existing=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{ print $1 }' | tail -n 1)
+          if [[ -n "$existing" && "$existing" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $tag already points to $existing, not $GITHUB_SHA. Bump ToolVersion for a new release."
+            exit 1
+          fi
+
+          prerelease=false
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing PSCP $version as $tag (prerelease: $prerelease)."
+
+  test:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  windows-installer:
+    name: Windows installer
+    needs: [version, test]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Build and verify setup.exe
+        shell: pwsh
+        run: ./installer/Build-Installer.ps1
+      - name: Stage release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item artifacts/installer/setup/setup.exe "release/pscp-setup_${{ needs.version.outputs.version }}_win-x64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: release/*
+          if-no-files-found: error
+
+  linux-packages:
+    name: Linux packages (${{ matrix.runtime }})
+    needs: [version, test]
+    strategy:
+      matrix:
+        include:
+          - runtime: linux-x64
+            os: ubuntu-latest
+          - runtime: linux-arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Install Native AOT prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+      - name: Build and verify .deb and portable archive
+        run: bash installer/Build-Linux-Packages.sh --runtime ${{ matrix.runtime }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.runtime }}
+          path: |
+            artifacts/linux/${{ matrix.runtime }}/*.deb
+            artifacts/linux/${{ matrix.runtime }}/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [version, windows-installer, linux-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Write checksums
+        working-directory: release
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Re-running the workflow refreshes the assets of an existing release.
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            args=(--repo "$GITHUB_REPOSITORY" --title "PSCP $VERSION" --generate-notes --target "$GITHUB_SHA")
+            if [[ "$PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$TAG" release/* "${args[@]}"
+          fi
