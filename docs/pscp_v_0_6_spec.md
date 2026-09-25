@@ -154,7 +154,7 @@ PSCP가 가능한 한 C# 의미를 그대로 유지하는 표면.
 - `is`, `is not`
 - ordinary .NET member access
 - ordinary access modifiers
-- inline switch-expression surface
+- inline switch-expression surface (패턴만 C# 그대로 전달한다. `when` guard, arm 결과, `with { Member = value }`의 값은 일반 PSCP 식으로 lowering한다. arm은 `,` 또는 줄바꿈으로 구분한다.)
 
 ## 4.2 PSCP-owned surface
 
@@ -292,6 +292,10 @@ ordinary C# modifier만 남는다.
 - `bool`
 - `char`
 - `string`
+
+숫자 리터럴은 C# 표기를 따른다: `0x` 16진수, `0b` 2진수, `_` 자릿수 구분자(`1_000_000`), 정수 접미사 `u`/`l`/`ul`, 실수 접미사 `f`/`d`/`m`. 접미사 없는 정수 리터럴의 타입도 C#과 같다(`int`에 들어가지 않으면 `uint`/`long`/`ulong`).
+
+튜플 projection 바로 뒤의 숫자는 정수로만 읽는다. 따라서 `p.1.2`는 `(p.1).2`다.
 
 ## 7.2 튜플 타입
 
@@ -909,29 +913,41 @@ if ok then 1 else 2
 4. additive
    - `+`, `-`
 
-5. range
+5. shift
+   - `<<`, `>>`
+
+6. range
    - `..`, `..<`, `..=`
    - explicit stepped range `a..step..b`
 
-6. comparison
+7. comparison
    - `<`, `<=`, `>`, `>=`, `<=>`, `is`, `is not`
 
-7. equality
+8. equality
    - `==`, `!=`
 
-8. logical and
-   - `&&`, `and`
+9. bitwise and
+   - `&`
 
-9. xor
+10. xor
    - `^`, `xor`
 
-10. logical or
+11. bitwise or
+   - `|`
+
+12. logical and
+   - `&&`, `and`
+
+13. logical or
    - `||`, `or`
 
-11. pipe
+14. pipe
    - `|>`, `<|`
 
-12. assignment family
+15. conditional
+   - `c ? a : b`
+
+16. assignment family
    - `=`
    - `:=`
    - `+=`
@@ -951,6 +967,8 @@ assignment-family operators의 정확한 의미는 우선순위 표가 아니라
 ## 13.3 `|>` / `<|` 와 application chain
 
 파이프는 단순 우선순위만으로 설명하면 헷갈리기 쉽다. `v0.6`에서는 다음 rewrite 규칙을 canonical semantics로 둔다.
+
+파서는 target이 이름, member access, 호출일 때 파이프를 해당 호출식으로 바로 바꾼다. 그래서 `xs |> sum`, `x |> long`처럼 intrinsic이나 conversion keyword도 직접 호출과 똑같이 분석되고 lowering된다.
 
 ### pipeline target 제한
 
@@ -1063,6 +1081,10 @@ head(arg1, arg2, rhs)
 
 즉 descending이 필요하면 반드시 explicit step을 적어야 한다.
 
+- 시작이 끝보다 뒤에 있는 기본 range(`5..1`, `a..<b` with `a >= b`)는 **빈 range**다. 오류가 아니다.
+- range의 bound와 step은 순회 시작 전에 **정확히 한 번** 평가된다. 루프 본문이 `q.Count` 같은 bound를 바꿔도 반복 횟수는 바뀌지 않는다.
+- bound나 step 중 하나라도 `long`(또는 `int`를 넘는 리터럴)이면 range 원소 타입은 `long`이다.
+
 ---
 
 ## 14.2 lowering contract
@@ -1084,6 +1106,8 @@ for (int i = 0; i < n; i++)
 for (int i = 1; i <= n; i++)
 for (int i = m - 1; i >= 0; i--)
 ```
+
+bound를 `for` 조건식에 그대로 두는 것은 재평가해도 값이 같을 때(리터럴, 재대입되지 않는 이름)뿐이다. 그 밖의 bound(`q.Count`, `a[i]`, 호출, 재대입되는 변수)는 루프 전에 임시 변수로 한 번 읽는다. `long` range는 `long` 카운터를 쓴다. materialized range의 길이는 음수가 되지 않도록 `0`으로 clamp한다.
 
 ### 금지 방향
 

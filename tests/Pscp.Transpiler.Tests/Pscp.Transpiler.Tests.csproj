@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pscp.Transpiler\Pscp.Transpiler.csproj" />
+    <ProjectReference Include="..\..\src\Pscp.LanguageServer\Pscp.LanguageServer.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

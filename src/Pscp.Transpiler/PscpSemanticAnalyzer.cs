@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 
 namespace Pscp.Transpiler;
 
@@ -11,17 +11,23 @@ internal sealed class SemanticAnalysisResult
         IReadOnlyList<Diagnostic> diagnostics,
         IReadOnlyDictionary<Expression, TypeSyntax?> expressionTypes,
         IReadOnlySet<CallExpression> intrinsicCalls,
-        IReadOnlySet<string>? reassignedImmutableNames = null)
+        IReadOnlySet<string>? reassignedImmutableNames = null,
+        IReadOnlySet<string>? mutatedNames = null)
     {
         Diagnostics = diagnostics;
         _expressionTypes = expressionTypes;
         _intrinsicCalls = intrinsicCalls;
         ReassignedImmutableNames = reassignedImmutableNames ?? new HashSet<string>(StringComparer.Ordinal);
+        MutatedNames = mutatedNames ?? new HashSet<string>(StringComparer.Ordinal);
     }
 
     // Names of immutable bindings that are nevertheless assigned, incremented, or passed by ref/out somewhere.
     // Such bindings must not be lowered to C# `const`.
     public IReadOnlySet<string> ReassignedImmutableNames { get; }
+
+    // Names of any bindings (mutable or not) that are assigned, incremented, or passed by ref/out after their
+    // declaration. Values read through such names cannot be assumed loop-invariant.
+    public IReadOnlySet<string> MutatedNames { get; }
 
     public IReadOnlyList<Diagnostic> Diagnostics { get; }
 
@@ -39,7 +45,7 @@ internal static class PscpSemanticAnalyzer
         Analyzer analyzer = new(tokens);
         analyzer.Predeclare(program);
         analyzer.Analyze(program);
-        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls, analyzer.ReassignedImmutableNames);
+        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls, analyzer.ReassignedImmutableNames, analyzer.MutatedNames);
     }
 
     private enum SymbolKind
@@ -185,6 +191,8 @@ internal static class PscpSemanticAnalyzer
 
         public HashSet<string> ReassignedImmutableNames { get; } = new(StringComparer.Ordinal);
 
+        public HashSet<string> MutatedNames { get; } = new(StringComparer.Ordinal);
+
         public void Predeclare(PscpProgram program)
         {
             foreach (TypeDeclaration type in program.Types) CollectType(type, null);
@@ -291,6 +299,11 @@ internal static class PscpSemanticAnalyzer
             ConsumeType(function.ReturnType);
             TextSpan functionSpan = _tracker.Take(function.Name);
             WarnOnDeclarationName(function.Name, functionSpan, "function");
+            if (ReferenceEquals(parent, _global) && function.Name == "Main" && function.Parameters.Count == 0)
+            {
+                Error("`Main()` is reserved for the generated program entry point. Rename the function.", functionSpan);
+            }
+
             Scope scope = new(parent);
             foreach (ParameterSyntax parameter in function.Parameters)
             {
@@ -742,6 +755,7 @@ internal static class PscpSemanticAnalyzer
 
         private void NoteImmutableMutation(string name, Symbol symbol, TextSpan span)
         {
+            MutatedNames.Add(name);
             if (symbol.Kind != SymbolKind.Local || symbol.IsMutable)
             {
                 return;
@@ -823,9 +837,10 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax AnalyzeRange(RangeExpression range, Scope scope)
         {
             TypeSyntax? start = AnalyzeExpression(range.Start, scope);
-            AnalyzeExpression(range.End, scope);
-            if (range.Step is not null) AnalyzeExpression(range.Step, scope);
-            return new NamedTypeSyntax("IEnumerable", Immutable.List(IsNamed(start, "long") ? TypeName("long") : TypeName("int")));
+            TypeSyntax? end = AnalyzeExpression(range.End, scope);
+            TypeSyntax? step = range.Step is null ? null : AnalyzeExpression(range.Step, scope);
+            bool isLong = IsNamed(start, "long") || IsNamed(end, "long") || IsNamed(step, "long");
+            return new NamedTypeSyntax("IEnumerable", Immutable.List(isLong ? TypeName("long") : TypeName("int")));
         }
 
         private TypeSyntax AnalyzeIsPattern(IsPatternExpression expression, Scope scope)
@@ -1443,10 +1458,38 @@ internal static class PscpSemanticAnalyzer
         }
 
         private TypeSyntax? AnalyzeWithExpression(WithExpression withExpression, Scope scope)
-            => AnalyzeExpression(withExpression.Receiver, scope);
+        {
+            TypeSyntax? receiverType = AnalyzeExpression(withExpression.Receiver, scope);
+            foreach (WithAssignment assignment in withExpression.Assignments)
+            {
+                AnalyzeExpression(assignment.Value, scope);
+            }
+
+            return receiverType;
+        }
 
         private TypeSyntax? AnalyzeSwitchExpression(SwitchExpression switchExpression, Scope scope)
-            => AnalyzeExpression(switchExpression.Receiver, scope);
+        {
+            AnalyzeExpression(switchExpression.Receiver, scope);
+            TypeSyntax? resultType = null;
+            foreach (SwitchArm arm in switchExpression.Arms)
+            {
+                Scope armScope = new(scope);
+                foreach (string designation in arm.Designations)
+                {
+                    armScope.DeclareValue(designation, new Symbol(SymbolKind.Local, null, false));
+                }
+
+                if (arm.Guard is not null)
+                {
+                    AnalyzeExpression(arm.Guard, armScope);
+                }
+
+                resultType = Merge(resultType, AnalyzeExpression(arm.Result, armScope));
+            }
+
+            return resultType;
+        }
 
         private TypeSyntax AnalyzeFromEnd(FromEndExpression fromEnd, Scope scope)
         {
@@ -1819,7 +1862,10 @@ internal static class PscpSemanticAnalyzer
                 IsPatternExpression isPattern => ContainsSelfCall(isPattern.Left, functionName) || (isPattern.Pattern is ConstantPatternSyntax constantPattern && ContainsSelfCall(constantPattern.Expression, functionName)),
                 MemberAccessExpression member => ContainsSelfCall(member.Receiver, functionName),
                 IndexExpression index => ContainsSelfCall(index.Receiver, functionName) || index.Arguments.Any(argument => ContainsSelfCall(argument, functionName)),
-                SwitchExpression @switch => ContainsSelfCall(@switch.Receiver, functionName),
+                SwitchExpression @switch => ContainsSelfCall(@switch.Receiver, functionName)
+                    || @switch.Arms.Any(arm => ContainsSelfCall(arm.Guard, functionName) || ContainsSelfCall(arm.Result, functionName)),
+                WithExpression @with => ContainsSelfCall(@with.Receiver, functionName)
+                    || @with.Assignments.Any(assignment => ContainsSelfCall(assignment.Value, functionName)),
                 FromEndExpression fromEnd => ContainsSelfCall(fromEnd.Operand, functionName),
                 SliceExpression slice => ContainsSelfCall(slice.Start, functionName) || ContainsSelfCall(slice.End, functionName),
                 TupleProjectionExpression projection => ContainsSelfCall(projection.Receiver, functionName),
@@ -2037,8 +2083,8 @@ internal static class PscpSemanticAnalyzer
         private static bool IsNamed(TypeSyntax? type, string name) => type is NamedTypeSyntax named && named.Name == name;
         private static TypeSyntax LiteralType(LiteralExpression literal) => literal.Kind switch
         {
-            LiteralKind.Integer => literal.RawText.EndsWith("L", StringComparison.OrdinalIgnoreCase) ? TypeName("long") : TypeName("int"),
-            LiteralKind.Float => literal.RawText.EndsWith("m", StringComparison.OrdinalIgnoreCase) ? TypeName("decimal") : TypeName("double"),
+            LiteralKind.Integer => TypeName(PscpNumericLiterals.GetTypeName(literal.RawText, isFloat: false)),
+            LiteralKind.Float => TypeName(PscpNumericLiterals.GetTypeName(literal.RawText, isFloat: true)),
             LiteralKind.String => TypeName("string"),
             LiteralKind.Char => TypeName("char"),
             LiteralKind.True or LiteralKind.False => TypeName("bool"),

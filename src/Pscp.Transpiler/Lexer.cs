@@ -11,6 +11,7 @@ public sealed class Lexer
     private int _parenDepth;
     private int _bracketDepth;
     private int _braceDepth;
+    private TokenKind _previousKind = TokenKind.NewLine;
 
     public Lexer(string text)
     {
@@ -27,6 +28,7 @@ public sealed class Lexer
         {
             Token token = NextToken();
             tokens.Add(token);
+            _previousKind = token.Kind;
             if (token.Kind == TokenKind.EndOfFile)
             {
                 break;
@@ -278,48 +280,105 @@ public sealed class Lexer
         return token is not null;
     }
 
+    // Numeric literals follow C#: decimal, `0x` hex and `0b` binary integers, `_` digit separators, fractions and
+    // exponents, and the `u`/`l`/`ul` (integer) and `f`/`d`/`m` (real) suffixes. Right after a `.` member access
+    // only plain digits are read, so the tuple projection `p.1.2` is `p.1` then `.2`, not `p` then `1.2`.
     private Token ReadNumber()
     {
         int start = _position;
         bool isFloat = false;
 
-        while (!IsEnd && char.IsDigit(Current))
+        if (_previousKind == TokenKind.Dot)
         {
-            _position++;
+            ReadDigits(char.IsAsciiDigit);
+            return new Token(TokenKind.IntegerLiteral, _text[start.._position], start);
         }
 
-        if (!IsEnd && Current == '.' && Peek(1) != '.' && char.IsDigit(Peek(1)))
+        if (Current == '0' && (Peek(1) is 'x' or 'X' or 'b' or 'B'))
+        {
+            bool hex = Peek(1) is 'x' or 'X';
+            _position += 2;
+            if (!ReadDigits(hex ? char.IsAsciiHexDigit : static ch => ch is '0' or '1'))
+            {
+                _diagnostics.Add(new Diagnostic(hex ? "Hexadecimal literal requires at least one digit." : "Binary literal requires at least one digit.", new TextSpan(start, _position - start)));
+            }
+
+            ReadIntegerSuffix();
+            return new Token(TokenKind.IntegerLiteral, _text[start.._position], start);
+        }
+
+        ReadDigits(char.IsAsciiDigit);
+
+        if (!IsEnd && Current == '.' && char.IsAsciiDigit(Peek(1)))
         {
             isFloat = true;
             _position++;
-            while (!IsEnd && char.IsDigit(Current))
-            {
-                _position++;
-            }
+            ReadDigits(char.IsAsciiDigit);
         }
 
-        if (!IsEnd && (Current == 'e' || Current == 'E'))
+        if (!IsEnd && (Current == 'e' || Current == 'E')
+            && (char.IsAsciiDigit(Peek(1)) || (Peek(1) is '+' or '-' && char.IsAsciiDigit(Peek(2)))))
         {
             isFloat = true;
             _position++;
-            if (!IsEnd && (Current == '+' || Current == '-'))
+            if (Current is '+' or '-')
             {
                 _position++;
             }
 
-            while (!IsEnd && char.IsDigit(Current))
-            {
-                _position++;
-            }
+            ReadDigits(char.IsAsciiDigit);
         }
 
-        if (!IsEnd && (Current == 'L' || Current == 'l'))
+        if (!IsEnd && Current is 'f' or 'F' or 'd' or 'D' or 'm' or 'M' && !IsIdentifierPart(Peek(1)))
         {
+            isFloat = true;
             _position++;
+        }
+        else if (!isFloat)
+        {
+            ReadIntegerSuffix();
         }
 
         string text = _text[start.._position];
         return new Token(isFloat ? TokenKind.FloatLiteral : TokenKind.IntegerLiteral, text, start);
+    }
+
+    // Reads digits with `_` separators allowed between them; returns false when no digit was read.
+    private bool ReadDigits(Func<char, bool> isDigit)
+    {
+        bool any = false;
+        while (!IsEnd && (isDigit(Current) || (Current == '_' && any && Peek(1) is var next && (next == '_' || isDigit(next)))))
+        {
+            any |= Current != '_';
+            _position++;
+        }
+
+        return any;
+    }
+
+    private void ReadIntegerSuffix()
+    {
+        if (IsEnd)
+        {
+            return;
+        }
+
+        if (Current is 'u' or 'U')
+        {
+            _position++;
+            if (!IsEnd && Current is 'l' or 'L')
+            {
+                _position++;
+            }
+        }
+        else if (Current is 'l' or 'L')
+        {
+            _position++;
+            if (!IsEnd && Current is 'u' or 'U')
+            {
+                _position++;
+            }
+        }
     }
 
     private Token ReadString()

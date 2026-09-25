@@ -341,10 +341,17 @@ internal static class PscpInstaller
             return;
         }
 
-        sink.Info($"Stopping {running.Count} running PSCP process(es)...");
-        foreach (ManagedProcessInfo process in running)
+        // Only PSCP's own processes (executables inside the install directory, or `dotnet` hosting them) are
+        // stopped. Anything else holding a file there (Explorer, an editor, antivirus, ...) is never killed;
+        // the user is asked to close it instead.
+        List<ManagedProcessInfo> owned = running.Where(process => process.IsPscpOwned).ToList();
+        if (owned.Count > 0)
         {
-            await TryStopProcessAsync(process, sink);
+            sink.Info($"Stopping {owned.Count} running PSCP process(es)...");
+            foreach (ManagedProcessInfo process in owned)
+            {
+                await TryStopProcessAsync(process, sink);
+            }
         }
 
         List<ManagedProcessInfo> remaining = CollectLockingProcesses(installDirectory, ignoredPids);
@@ -353,8 +360,22 @@ internal static class PscpInstaller
             return;
         }
 
-        string message = "Could not stop these PSCP processes: "
-            + string.Join(", ", remaining.Select(process => $"{process.FileName} (PID {process.ProcessId})"));
+        List<ManagedProcessInfo> remainingOwned = remaining.Where(process => process.IsPscpOwned).ToList();
+        List<ManagedProcessInfo> foreign = remaining.Where(process => !process.IsPscpOwned).ToList();
+        List<string> parts = [];
+        if (remainingOwned.Count > 0)
+        {
+            parts.Add("Could not stop these PSCP processes: "
+                + string.Join(", ", remainingOwned.Select(process => $"{process.FileName} (PID {process.ProcessId})")));
+        }
+
+        if (foreign.Count > 0)
+        {
+            parts.Add($"Close these programs, which are using files in {installDirectory}, and try again: "
+                + string.Join(", ", foreign.Select(process => $"{process.FileName} (PID {process.ProcessId})")));
+        }
+
+        string message = string.Join(" ", parts);
         if (throwOnFailure)
         {
             throw new InvalidOperationException(message);
@@ -374,7 +395,8 @@ internal static class PscpInstaller
 
         foreach (ManagedProcessInfo process in FindRestartManagerProcesses(installDirectory, ignoredPids))
         {
-            processes[process.ProcessId] = process;
+            // Keep an earlier "owned" classification: Restart Manager cannot always read the process path.
+            processes.TryAdd(process.ProcessId, process);
         }
 
         foreach (ManagedProcessInfo process in FindHostedDotnetProcesses(installDirectory, ignoredPids))
@@ -437,7 +459,7 @@ internal static class PscpInstaller
 
                 string? commandLine = TryGetProcessCommandLine(process);
                 if (string.IsNullOrWhiteSpace(commandLine)
-                    || commandLine.IndexOf(normalizedInstallDirectory, StringComparison.OrdinalIgnoreCase) < 0)
+                    || !CommandLineReferencesDirectory(commandLine, normalizedInstallDirectory))
                 {
                     continue;
                 }
@@ -449,6 +471,25 @@ internal static class PscpInstaller
         }
 
         return processes;
+    }
+
+    // True when the command line mentions a path inside `directory` (the directory followed by a separator or a
+    // closing quote), so `C:\...\PSCP` does not match an unrelated `C:\...\PSCP-work\app.dll`.
+    private static bool CommandLineReferencesDirectory(string commandLine, string directory)
+    {
+        int index = 0;
+        while ((index = commandLine.IndexOf(directory, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            int after = index + directory.Length;
+            if (after >= commandLine.Length || commandLine[after] is '\\' or '/' or '"' or ' ')
+            {
+                return true;
+            }
+
+            index = after;
+        }
+
+        return false;
     }
 
     private static IReadOnlyList<ManagedProcessInfo> FindRestartManagerProcesses(string installDirectory, IReadOnlyCollection<int> ignoredPids)
@@ -524,7 +565,8 @@ internal static class PscpInstaller
                 string fileName = string.IsNullOrWhiteSpace(processPath)
                     ? (string.IsNullOrWhiteSpace(processInfos[i].strAppName) ? $"PID {processId}" : processInfos[i].strAppName)
                     : Path.GetFileName(processPath);
-                processes.Add(new ManagedProcessInfo(processId, fileName, displayPath));
+                bool isPscpOwned = !string.IsNullOrWhiteSpace(processPath) && IsPathInsideDirectory(processPath, installDirectory);
+                processes.Add(new ManagedProcessInfo(processId, fileName, displayPath, isPscpOwned));
             }
 
             return processes;
@@ -1230,7 +1272,7 @@ internal static class PscpInstaller
         string? StagingDirectory,
         int WaitForPid);
 
-    private sealed record ManagedProcessInfo(int ProcessId, string FileName, string FullPath);
+    private sealed record ManagedProcessInfo(int ProcessId, string FileName, string FullPath, bool IsPscpOwned = true);
 }
 
 

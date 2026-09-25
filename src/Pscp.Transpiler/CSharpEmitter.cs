@@ -19,6 +19,8 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<string> _stdoutDirectNullableScalarWritelnKinds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _stdoutDirectArrayWriteKinds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _stdoutDirectArrayWritelnKinds = new(StringComparer.Ordinal);
+    private string _className = string.Empty;
+    private string _runMethodName = "Run";
     private bool _emitStdin;
     private bool _emitStdout;
     private bool _stdoutNeedsBlankLine;
@@ -48,6 +50,7 @@ internal sealed partial class CSharpEmitter
         CollectDeclaredValueNames(program);
         CollectDeclaredTypeShapes(program.Types, null);
         CollectHoistedGlobalDeclarations(program);
+        ChooseGeneratedMemberNames();
 
         foreach (string usingLine in CollectUsings(program))
         {
@@ -72,7 +75,7 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine();
         }
 
-        _writer.WriteLine($"public static class {_options.ClassName}");
+        _writer.WriteLine($"public static class {_className}");
         _writer.WriteLine("{");
         _writer.Indent();
         if (_emitStdin)
@@ -465,9 +468,15 @@ internal sealed partial class CSharpEmitter
                 break;
             case WithExpression @with:
                 CollectReferencedNames(@with.Receiver, names);
+                foreach (WithAssignment assignment in @with.Assignments) CollectReferencedNames(assignment.Value, names);
                 break;
             case SwitchExpression @switch:
                 CollectReferencedNames(@switch.Receiver, names);
+                foreach (SwitchArm arm in @switch.Arms)
+                {
+                    if (arm.Guard is not null) CollectReferencedNames(arm.Guard, names);
+                    CollectReferencedNames(arm.Result, names);
+                }
                 break;
             case FromEndExpression fromEnd:
                 CollectReferencedNames(fromEnd.Operand, names);
@@ -833,12 +842,40 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("}");
     }
 
+    // The generated class and its `Run` body must not clash with names the program declares: a member named like
+    // its enclosing class is CS0542 (e.g. `void main()` in `main.pscp`), and a user `Run()` would be CS0111.
+    private void ChooseGeneratedMemberNames()
+    {
+        bool IsTaken(string name)
+            => _declaredValueNames.Contains(name) || _declaredTypeNames.Contains(name);
+
+        string className = _options.ClassName;
+        while (IsTaken(className) || className is "Main" or "stdin" or "stdout")
+        {
+            className += "Program";
+        }
+
+        _className = PscpIntrinsicCatalog.CSharpReservedKeywords.Contains(className) ? "@" + className : className;
+
+        _runMethodName = "Run";
+        while (IsTaken(_runMethodName) || _runMethodName == className)
+        {
+            _runMethodName = "__Pscp" + _runMethodName;
+        }
+    }
+
+    // Recursion depth in contest solutions (DFS over 10^5..10^6 nodes) easily exceeds the 1 MB (Windows) or
+    // 8 MB (Linux) main-thread stack, so the program body runs on a thread with a large stack.
+    private const int ProgramThreadStackSize = 256 * 1024 * 1024;
+
     private void EmitMain(IReadOnlyList<Statement> statements)
     {
         _writer.WriteLine("public static void Main()");
         _writer.WriteLine("{");
         _writer.Indent();
-        _writer.WriteLine("Run();");
+        _writer.WriteLine($"System.Threading.Thread __pscpThread = new({_runMethodName}, {ProgramThreadStackSize});");
+        _writer.WriteLine("__pscpThread.Start();");
+        _writer.WriteLine("__pscpThread.Join();");
         if (_emitStdout)
         {
             _writer.WriteLine("stdout.flush();");
@@ -846,7 +883,7 @@ internal sealed partial class CSharpEmitter
         _writer.Unindent();
         _writer.WriteLine("}");
         _writer.WriteLine();
-        _writer.WriteLine("private static void Run()");
+        _writer.WriteLine($"private static void {_runMethodName}()");
         _writer.WriteLine("{");
         _writer.Indent();
         EmitTopLevelBlockContents(new BlockStatement(statements));
@@ -1124,8 +1161,8 @@ internal sealed partial class CSharpEmitter
     {
         literalType = literal.Kind switch
         {
-            LiteralKind.Integer => literal.RawText.EndsWith("L", StringComparison.OrdinalIgnoreCase) ? "long" : "int",
-            LiteralKind.Float => literal.RawText.EndsWith("m", StringComparison.OrdinalIgnoreCase) ? "decimal" : "double",
+            LiteralKind.Integer => PscpNumericLiterals.GetTypeName(literal.RawText, isFloat: false),
+            LiteralKind.Float => PscpNumericLiterals.GetTypeName(literal.RawText, isFloat: true),
             LiteralKind.String => "string",
             LiteralKind.Char => "char",
             LiteralKind.True or LiteralKind.False => "bool",
@@ -1723,6 +1760,13 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
+        if (declaredType is ArrayTypeSyntax && collection.Elements.Count > 0 && collection.Elements.All(element => element is ExpressionElement))
+        {
+            string values = string.Join(", ", collection.Elements.Cast<ExpressionElement>().Select(element => EmitExpression(element.Expression, elementType)));
+            _writer.WriteLine($"{name} = new {EmitType(elementType)}[] {{ {values} }};");
+            return true;
+        }
+
         if (declaredType is not ArrayTypeSyntax || collection.Elements.Count != 1)
         {
             return false;
@@ -1780,6 +1824,14 @@ internal sealed partial class CSharpEmitter
         if (elementType is null)
         {
             return false;
+        }
+
+        // `int[] xs = [3, 1, 2]` is a plain array initializer; no intermediate List + ToArray().
+        if (declaredType is ArrayTypeSyntax && collection.Elements.All(element => element is ExpressionElement))
+        {
+            string values = string.Join(", ", collection.Elements.Cast<ExpressionElement>().Select(element => EmitExpression(element.Expression, elementType)));
+            _writer.WriteLine($"{typeText} {name} = new {EmitType(elementType)}[] {{ {values} }};");
+            return true;
         }
 
         if (declaredType is ArrayTypeSyntax
@@ -2742,9 +2794,22 @@ PSCP source:"
                 break;
             case WithExpression @with:
                 AnalyzeRuntimeUsage(@with.Receiver, ref needsStdin, ref needsStdout);
+                foreach (WithAssignment assignment in @with.Assignments)
+                {
+                    AnalyzeRuntimeUsage(assignment.Value, ref needsStdin, ref needsStdout);
+                }
                 break;
             case SwitchExpression @switch:
                 AnalyzeRuntimeUsage(@switch.Receiver, ref needsStdin, ref needsStdout);
+                foreach (SwitchArm arm in @switch.Arms)
+                {
+                    if (arm.Guard is not null)
+                    {
+                        AnalyzeRuntimeUsage(arm.Guard, ref needsStdin, ref needsStdout);
+                    }
+
+                    AnalyzeRuntimeUsage(arm.Result, ref needsStdin, ref needsStdout);
+                }
                 break;
             case FromEndExpression fromEnd:
                 AnalyzeRuntimeUsage(fromEnd.Operand, ref needsStdin, ref needsStdout);
@@ -2880,9 +2945,8 @@ PSCP source:"
         string iterator = EmitLoopBindingPattern(iteratorTarget, "iter");
         string iteratorType = IsLongRange(range, null) ? "long" : "int";
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-        if (range.Step is null
-            && CanInlineDirectRangeExpression(range.Start)
-            && CanInlineDirectRangeExpression(range.End))
+        // The start is only read by the loop initializer; the end is re-read by every condition check.
+        if (range.Step is null && CanInlineDirectRangeExpression(range.End))
         {
             _writer.WriteLine($"for ({iteratorType} {iterator} = {EmitExpression(range.Start)}; {iterator} {comparison} {EmitExpression(range.End)}; {iterator}++)");
             EmitWithBindingAliases(null, null, iteratorTarget, iterator, () =>
@@ -2969,9 +3033,8 @@ PSCP source:"
         string iteratorType = useLong ? "long" : "int";
         string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
 
-        if (range.Step is null
-            && CanInlineDirectRangeExpression(range.Start)
-            && CanInlineDirectRangeExpression(range.End))
+        // The start is only read by the loop initializer; the end is re-read by every condition check.
+        if (range.Step is null && CanInlineDirectRangeExpression(range.End))
         {
             string directHeader = indexName is null
                 ? $"for ({iteratorType} {itemName} = {EmitExpression(range.Start)}; {itemName} {comparison} {EmitExpression(range.End)}; {itemName}++)"

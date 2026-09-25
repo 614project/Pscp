@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Pscp.Transpiler\Pscp.Transpiler.csproj" />
+    <InternalsVisibleTo Include="Pscp.Transpiler.Tests" />
   </ItemGroup>
 
   <PropertyGroup>

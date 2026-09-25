@@ -2,7 +2,7 @@
   "name": "pscp-vscode",
   "displayName": "PSCP",
   "description": "VS Code support for the PSCP programming language.",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -73,17 +73,20 @@
         "pscp.sdkPath": {
           "type": "string",
           "default": "",
-          "description": "Path to an installed `pscp.exe` or to the PSCP installation directory. Kept for compatibility; prefer `pscp.server.path` for the language server."
+          "description": "Path to an installed `pscp.exe` or to the PSCP installation directory. Kept for compatibility; prefer `pscp.server.path` for the language server. User or machine settings only: a workspace cannot point PSCP at an executable.",
+          "scope": "machine"
         },
         "pscp.languageServerPath": {
           "type": "string",
           "default": "",
-          "description": "Optional direct path to `Pscp.LanguageServer.exe` or `Pscp.LanguageServer.dll`. Kept for compatibility; prefer `pscp.server.path`."
+          "description": "Optional direct path to `Pscp.LanguageServer.exe` or `Pscp.LanguageServer.dll`. Kept for compatibility; prefer `pscp.server.path`. User or machine settings only: a workspace cannot point PSCP at an executable.",
+          "scope": "machine"
         },
         "pscp.server.path": {
           "type": "string",
           "default": "",
-          "description": "Optional direct path to `Pscp.LanguageServer.exe`, `Pscp.LanguageServer.dll`, an installed `pscp.exe`, or the PSCP installation directory."
+          "description": "Optional direct path to `Pscp.LanguageServer.exe`, `Pscp.LanguageServer.dll`, an installed `pscp.exe`, or the PSCP installation directory. User or machine settings only: a workspace cannot point PSCP at an executable.",
+          "scope": "machine"
         },
         "pscp.server.args": {
           "type": "array",
@@ -107,7 +110,8 @@
         "pscp.transpiler.path": {
           "type": "string",
           "default": "",
-          "description": "Optional direct path to `pscp.exe` for transpile/run commands."
+          "description": "Optional direct path to `pscp.exe` for transpile/run commands. User or machine settings only: a workspace cannot point PSCP at an executable.",
+          "scope": "machine"
         },
         "pscp.transpiler.args": {
           "type": "array",
@@ -118,6 +122,20 @@
           "description": "Extra arguments appended to PSCP transpile/run commands."
         }
       }
-    }
+    },
+    "taskDefinitions": [
+      {
+        "type": "pscp",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The pscp subcommand to run (for example `run` or `transpile`)."
+          }
+        }
+      }
+    ]
   }
 }

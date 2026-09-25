@@ -636,6 +636,10 @@ internal sealed class AnalyzerState
     public void AddDiagnostic(string code, string message, TextSpan span, ServerDiagnosticSeverity severity, string? relatedSymbolId = null)
         => _diagnostics.Add(new PscpServerDiagnostic(code, message, span, severity, relatedSymbolId));
 
+    public bool HasDiagnosticOverlapping(TextSpan span)
+        => _diagnostics.Any(existing => existing.Span.Start < Math.Max(span.End, span.Start + 1)
+            && span.Start < Math.Max(existing.Span.End, existing.Span.Start + 1));
+
     public PscpServerSymbol AddSyntheticSymbol(
         Scope scope,
         string name,

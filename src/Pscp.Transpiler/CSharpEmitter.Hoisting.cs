@@ -194,6 +194,10 @@ internal sealed partial class CSharpEmitter
                 return true;
             case IsPatternExpression isPattern:
                 return HoistWalk(isPattern.Left, null, isRoot: false, hoisted);
+            case SwitchExpression @switch:
+                // Only the receiver is unconditionally evaluated; arms are evaluated conditionally.
+                HoistWalk(@switch.Receiver, null, isRoot: false, hoisted);
+                return true;
             default:
                 return true;
         }

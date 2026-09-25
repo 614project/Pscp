@@ -12,7 +12,7 @@ internal sealed partial class PscpAnalyzer
         Lexer lexer = new(snapshot.Text);
         IReadOnlyList<Token> tokens = lexer.Lex();
         Parser parser = new(tokens);
-        _ = parser.ParseProgram();
+        PscpProgram program = parser.ParseProgram();
 
         AnalyzerState state = new(snapshot, tokens);
         foreach (Diagnostic diagnostic in lexer.Diagnostics)
@@ -31,29 +31,37 @@ internal sealed partial class PscpAnalyzer
         if (!lexer.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
             && !parser.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
         {
-            AddTranspilerWarnings(state, snapshot.Text);
+            AddTranspilerDiagnostics(state, tokens, program);
         }
 
         AddDefaultTokenClassifications(state);
         return state.Build();
     }
 
-    private static void AddTranspilerWarnings(AnalyzerState state, string text)
+    // Reuses the already parsed program for the transpiler's semantic pass (no C# emission on every edit).
+    // Transpiler errors are reported unless the editor analysis already flagged that range, so `pscp check`
+    // and the editor agree on what fails to compile.
+    private static void AddTranspilerDiagnostics(AnalyzerState state, IReadOnlyList<Token> tokens, PscpProgram program)
     {
-        TranspilationResult result;
+        IReadOnlyList<Diagnostic> diagnostics;
         try
         {
-            result = PscpTranspiler.Transpile(text);
+            diagnostics = PscpTranspiler.AnalyzeSemantics(tokens, program);
         }
         catch
         {
             return;
         }
 
-        foreach (Diagnostic diagnostic in result.Diagnostics)
+        foreach (Diagnostic diagnostic in diagnostics)
         {
             if (diagnostic.Severity == DiagnosticSeverity.Error)
             {
+                if (!state.HasDiagnosticOverlapping(diagnostic.Span))
+                {
+                    state.AddDiagnostic("PSCP3002", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Error);
+                }
+
                 continue;
             }
 

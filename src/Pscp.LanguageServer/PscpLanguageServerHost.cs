@@ -78,7 +78,31 @@ public static class PscpLanguageServerHost
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                JsonDocument? message = await ReadMessageAsync(_input, cancellationToken);
+                JsonDocument? message;
+                try
+                {
+                    message = await ReadMessageAsync(_input, cancellationToken);
+                }
+                catch (JsonException ex)
+                {
+                    // The whole body was consumed, so the stream is still in sync: report and keep serving.
+                    await _log.WriteLineAsync($"Malformed JSON-RPC message: {ex.Message}");
+                    await WriteMessageAsync(
+                        _output,
+                        new JsonObject
+                        {
+                            ["jsonrpc"] = "2.0",
+                            ["id"] = null,
+                            ["error"] = new JsonObject
+                            {
+                                ["code"] = -32700,
+                                ["message"] = "Parse error.",
+                            },
+                        },
+                        cancellationToken);
+                    continue;
+                }
+
                 if (message is null)
                 {
                     break;

@@ -47,8 +47,9 @@ let best = min (0..<n -> i do arr[i])    // 중간 배열 생성 없이 바로 �
 ### 3. 자료구조 특화 연산자 (Operator Rewrites)
 .NET의 기본 자료구조들을 더 짧고 직관적으로 다룰 수 있도록 트랜스파일러 수준에서 특별한 연산자를 지원합니다.
 
-- List : `list += x` (요소 추가), `list -= x` (요소 제거)
-- HashSet: `visited += x` (요소 추가 및 `bool` 반환), `visited -= x` (요소 제거)
+- List / LinkedList: `list += x` (요소 추가)
+- HashSet / SortedSet: `visited += x` (요소 추가 및 `bool` 반환), `visited -= x` (요소 제거 및 `bool` 반환)
+- Dictionary: `dict += (key, value)` (`TryAdd`), `dict -= key` (`Remove`)
 - Stack / Queue: `+= x` (Push/Enqueue), `~s` (Peek), `--s` (Pop/Dequeue)
 - PriorityQueue: `pq += (item, priority)` (튜플 형태 추가)
 
@@ -64,7 +65,7 @@ List<int>[] graph = new![n]
 
 Queue<int> queue
 queue += 0
-HashSet<bool> visited
+HashSet<int> visited
 
 while queue.Count > 0 {
     let me = --queue

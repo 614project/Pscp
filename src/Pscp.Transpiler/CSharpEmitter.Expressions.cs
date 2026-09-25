@@ -29,8 +29,8 @@ internal sealed partial class CSharpEmitter
             CallExpression call => EmitCallExpression(call, targetTypeHint),
             MemberAccessExpression member => EmitMemberAccessExpression(member),
             IndexExpression index => EmitIndexExpression(index),
-            WithExpression @with => $"{EmitExpression(@with.Receiver)} with {@with.InitializerText}",
-            SwitchExpression @switch => $"{EmitExpression(@switch.Receiver)} {@switch.SwitchText}",
+            WithExpression @with => EmitWithExpression(@with),
+            SwitchExpression @switch => EmitSwitchExpression(@switch),
             FromEndExpression fromEnd => $"^{EmitExpression(fromEnd.Operand)}",
             SliceExpression slice => EmitSliceExpression(slice),
             TupleProjectionExpression projection => $"{EmitExpression(projection.Receiver)}.Item{projection.Position}",
@@ -1653,6 +1653,29 @@ internal sealed partial class CSharpEmitter
             : $"__PscpCollection.enqueue({target}, {value})";
     }
 
+    private string EmitWithExpression(WithExpression withExpression)
+    {
+        string receiver = EmitExpression(withExpression.Receiver);
+        if (withExpression.Assignments.Count == 0)
+        {
+            return $"{receiver} with {{ }}";
+        }
+
+        string assignments = string.Join(", ", withExpression.Assignments.Select(assignment => $"{assignment.MemberName} = {EmitExpression(assignment.Value)}"));
+        return $"{receiver} with {{ {assignments} }}";
+    }
+
+    private string EmitSwitchExpression(SwitchExpression switchExpression)
+    {
+        string receiver = EmitExpression(switchExpression.Receiver);
+        IEnumerable<string> arms = switchExpression.Arms.Select(arm =>
+        {
+            string guard = arm.Guard is null ? string.Empty : $" when {EmitExpression(arm.Guard)}";
+            return $"{arm.PatternText}{guard} => {EmitExpression(arm.Result)}";
+        });
+        return $"{receiver} switch {{ {string.Join(", ", arms)} }}";
+    }
+
     // Expressions that can be emitted more than once without changing program behavior.
     private static bool IsSideEffectFreeReceiver(Expression expression)
         => expression switch
@@ -1787,18 +1810,39 @@ internal sealed partial class CSharpEmitter
     private static TypeSyntax? UnwrapNullableType(TypeSyntax? type)
         => type is NullableTypeSyntax nullable ? nullable.InnerType : type;
 
-    private static bool IsLongRange(RangeExpression range, TypeSyntax? targetTypeHint)
+    private bool IsLongRange(RangeExpression range, TypeSyntax? targetTypeHint)
     {
-        if (GetCollectionElementType(targetTypeHint ?? new NamedTypeSyntax("object", Immutable.List<TypeSyntax>())) is NamedTypeSyntax { Name: "long" })
+        TypeSyntax? targetElement = GetCollectionElementType(targetTypeHint ?? new NamedTypeSyntax("object", Immutable.List<TypeSyntax>()));
+        if (targetElement is NamedTypeSyntax { Name: "long" })
         {
             return true;
+        }
+
+        // An explicit `int` element type (`int[] xs = [0..<n]`) keeps `int` elements even for `long` bounds.
+        if (targetElement is NamedTypeSyntax { Name: "int" })
+        {
+            return false;
         }
 
         return IsLongExpression(range.Start) || IsLongExpression(range.End) || (range.Step is not null && IsLongExpression(range.Step));
     }
 
-    private static bool IsLongExpression(Expression expression)
-        => expression is LiteralExpression { RawText: var text } && text.EndsWith("L", StringComparison.OrdinalIgnoreCase);
+    // A range iterates with a `long` counter when any bound or the step is statically wider than `int`. Using the
+    // semantic type (not just an `L` suffix) keeps `for i in 0..<n` with `long n` from overflowing an `int` counter.
+    private bool IsLongExpression(Expression expression)
+    {
+        if (expression is LiteralExpression { Kind: LiteralKind.Integer, RawText: var text })
+        {
+            return PscpNumericLiterals.IsWiderThanInt(text, isFloat: false);
+        }
+
+        if (expression is UnaryExpression { Operator: UnaryOperator.Negate or UnaryOperator.Plus } unary)
+        {
+            return IsLongExpression(unary.Operand);
+        }
+
+        return _semantic?.GetExpressionType(expression) is NamedTypeSyntax { Name: "long" or "Int64" or "System.Int64" or "uint" or "UInt32" or "System.UInt32" };
+    }
 
     private string EmitInlineBlockWithBindings(BlockStatement block, (BindingTarget? Target, string? Name) indexBinding, (BindingTarget Target, string Name) itemBinding, bool isVoidLike)
     {
@@ -1971,12 +2015,17 @@ internal sealed partial class CSharpEmitter
         return useLong ? "1L" : "1";
     }
 
-    private static bool CanInlineDirectRangeExpression(Expression expression)
-        => expression is IdentifierExpression
-            or LiteralExpression
-            or MemberAccessExpression
-            or IndexExpression
-            or TupleProjectionExpression;
+    // A range bound is evaluated once, before the first iteration. It may only be repeated inside the generated
+    // `for` condition when re-evaluating it cannot observe a different value: literals, and names that are never
+    // reassigned. Member accesses such as `q.Count` and indexers can change while the loop body runs, so they
+    // are captured in a temporary first.
+    private bool CanInlineDirectRangeExpression(Expression expression)
+        => expression switch
+        {
+            LiteralExpression => true,
+            IdentifierExpression identifier => _semantic is not null && !_semantic.MutatedNames.Contains(identifier.Name),
+            _ => false,
+        };
 
     private string EmitLoopOverSource(Expression source, string itemName, string bodyStatements, string? indexName = null)
     {
@@ -1998,11 +2047,18 @@ internal sealed partial class CSharpEmitter
                     return $"{{ {directHeader} {{ {bodyStatements} }} }}";
                 }
 
-                string rangeStartName = NextTemporary("start");
+                // The start is read once by the loop initializer anyway; only the end needs a temporary.
+                string rangeStart = EmitExpression(range.Start);
                 string rangeEndName = NextTemporary("end");
                 string rangeIndexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
                 string update = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
-                return $"{{ {numericType} {rangeStartName} = {EmitExpression(range.Start)}; {numericType} {rangeEndName} = {EmitExpression(range.End)}; {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStartName}; {itemName} {comparison} {rangeEndName}; {update}) {{ {bodyStatements} }} }}";
+                if (CanInlineDirectRangeExpression(range.End))
+                {
+                    return $"{{ {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStart}; {itemName} {comparison} {EmitExpression(range.End)}; {update}) {{ {bodyStatements} }} }}";
+                }
+
+                string rangeStartName = NextTemporary("start");
+                return $"{{ {numericType} {rangeStartName} = {rangeStart}; {numericType} {rangeEndName} = {EmitExpression(range.End)}; {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStartName}; {itemName} {comparison} {rangeEndName}; {update}) {{ {bodyStatements} }} }}";
             }
 
             string steppedStartName = NextTemporary("start");
@@ -2172,12 +2228,30 @@ internal sealed partial class CSharpEmitter
 
     private static string EmitDefaultRangeCountExpression(string start, string end, RangeKind kind)
     {
-        if (kind == RangeKind.RightExclusive)
+        // `a..b` with `a > b` is an empty range (no implicit descending step), so the count never goes negative.
+        // Literal bounds are checked here instead of at run time.
+        if (PscpNumericLiterals.TryGetInt32Value(start, out int startValue) && PscpNumericLiterals.TryGetInt32Value(end, out int endValue))
         {
-            return IsZeroExpressionText(start) ? end : $"{end} - {start}";
+            long count = (long)endValue - startValue + (kind == RangeKind.RightExclusive ? 0 : 1);
+            if (count <= 0)
+            {
+                return "0";
+            }
+
+            if (kind == RangeKind.RightExclusive)
+            {
+                return startValue == 0 ? end : $"{end} - {start}";
+            }
+
+            return startValue == 0 ? $"{end} + 1" : $"({end} - {start}) + 1";
         }
 
-        return IsZeroExpressionText(start) ? $"{end} + 1" : $"({end} - {start}) + 1";
+        if (kind == RangeKind.RightExclusive)
+        {
+            return IsZeroExpressionText(start) ? $"System.Math.Max(0, {end})" : $"System.Math.Max(0, {end} - {start})";
+        }
+
+        return IsZeroExpressionText(start) ? $"System.Math.Max(0, {end} + 1)" : $"System.Math.Max(0, ({end} - {start}) + 1)";
     }
 
     private static bool IsZeroExpressionText(string text)

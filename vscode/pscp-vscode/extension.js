@@ -921,16 +921,56 @@ async function runPscpToolCommand(context, output, subcommand) {
 
   const config = vscode.workspace.getConfiguration('pscp');
   const extraArgs = getConfiguredStringArray(config.get('transpiler.args'));
-  const terminal = vscode.window.createTerminal(`PSCP ${subcommand}`);
-  const command = [
-    quoteShell(executable),
-    subcommand,
-    quoteShell(editor.document.uri.fsPath),
-    ...extraArgs.map(quoteShell)
-  ].join(' ');
-  output.appendLine(`Running: ${command}`);
-  terminal.sendText(command);
+  const toolArgs = [subcommand, editor.document.uri.fsPath, ...extraArgs];
+  const isDll = executable.toLowerCase().endsWith('.dll');
+  const processPath = isDll ? 'dotnet' : executable;
+  const processArgs = isDll ? [executable, ...toolArgs] : toolArgs;
+  const cwd = path.dirname(editor.document.uri.fsPath);
+  output.appendLine(`Running: ${[processPath, ...processArgs].map((value) => JSON.stringify(value)).join(' ')}`);
+
+  // Run pscp as a process task rather than typing a command line into the user's shell: arguments are passed
+  // verbatim (no shell quoting rules; PowerShell cannot invoke a quoted path without `&`), file names such as
+  // `$(cmd).pscp` are never interpreted by a shell, and the task terminal stays open with the program output.
+  const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  if (folder) {
+    const task = new vscode.Task(
+      { type: 'pscp', command: subcommand },
+      folder,
+      `PSCP ${subcommand}`,
+      'pscp',
+      new vscode.ProcessExecution(processPath, processArgs, { cwd }));
+    task.presentationOptions = {
+      reveal: vscode.TaskRevealKind.Always,
+      focus: true,
+      panel: vscode.TaskPanelKind.Dedicated,
+      clear: true
+    };
+    await vscode.tasks.executeTask(task);
+    return;
+  }
+
+  // Files opened outside a workspace cannot host a task; fall back to the integrated terminal with quoting
+  // that matches the user's default shell.
+  const terminal = vscode.window.createTerminal({ name: `PSCP ${subcommand}`, cwd });
+  terminal.sendText(buildShellCommandLine(vscode.env.shell, processPath, processArgs));
   terminal.show();
+}
+
+function buildShellCommandLine(shell, command, args) {
+  const shellName = (String(shell || '').split(/[\\/]/).pop() || '').toLowerCase();
+  if (shellName.includes('pwsh') || shellName.includes('powershell')) {
+    const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+    return ['&', quote(command), ...args.map(quote)].join(' ');
+  }
+
+  if (shellName === 'cmd.exe' || shellName === 'cmd') {
+    // cmd has no escape for `%` inside quotes; `"` cannot appear in Windows file names.
+    const quote = (value) => `"${String(value).replace(/%/g, '"%"')}"`;
+    return [quote(command), ...args.map(quote)].join(' ');
+  }
+
+  const quote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+  return [quote(command), ...args.map(quote)].join(' ');
 }
 
 function resolvePscpExecutable(context) {
@@ -975,10 +1015,6 @@ function resolvePscpExecutable(context) {
   }
 
   return null;
-}
-
-function quoteShell(value) {
-  return `"${String(value).replace(/"/g, '\\"')}"`;
 }
 
 function toTextDocument(document) {
