@@ -6,6 +6,8 @@ using Pscp.Transpiler;
 internal sealed record TestCase(string Name, string Source, string Input, string ExpectedOutput)
 {
     public IReadOnlyList<string> ExpectedWarnings { get; init; } = Array.Empty<string>();
+
+    public bool LargeStack { get; init; }
 }
 
 internal static class Program
@@ -1050,7 +1052,10 @@ internal static class TestRunner
                 += depth(0)
                 """,
                 "200000",
-                "200000\n"),
+                "200000\n")
+            {
+                LargeStack = true,
+            },
         ];
 
         List<string> failures = [];
@@ -1061,7 +1066,7 @@ internal static class TestRunner
             string safeName = string.Concat(testCase.Name.Where(char.IsLetterOrDigit));
             TranspilationResult result = PscpTranspiler.Transpile(
                 NormalizeSource(testCase.Source),
-                new TranspilationOptions("Pscp.Generated", safeName + "Program"));
+                new TranspilationOptions("Pscp.Generated", safeName + "Program", LargeStack: testCase.LargeStack));
 
             IReadOnlyList<Diagnostic> errors = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
             IReadOnlyList<Diagnostic> warnings = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning).ToArray();
@@ -2395,8 +2400,8 @@ internal static class TestRunner
 
         string userCode = GetUserCodePortion(result.CSharpCode);
         if (!userCode.Contains("public static void Main()", StringComparison.Ordinal)
-            || !userCode.Contains("new(Run, 268435456);", StringComparison.Ordinal)
-            || !userCode.Contains("__pscpThread.Join();", StringComparison.Ordinal)
+            || !userCode.Contains("Run();", StringComparison.Ordinal)
+            || userCode.Contains("System.Threading.Thread", StringComparison.Ordinal)
             || !userCode.Contains("stdout.flush();", StringComparison.Ordinal)
             || !userCode.Contains("private static void Run()", StringComparison.Ordinal)
             || userCode.Contains("finally", StringComparison.Ordinal))
@@ -2734,8 +2739,11 @@ internal static class TestRunner
             failures.Add($"ArrayLiteral: expected a direct array initializer\nGenerated:\n{arrayLiteral}");
         }
 
-        string largeStack = Emit("LargeStackProgram", "+= 1");
-        if (!largeStack.Contains("new(Run, 268435456)", StringComparison.Ordinal))
+        // `--large-stack` is opt-in; by default Main calls Run() on the main thread.
+        string largeStack = GetUserCodePortion(
+            PscpTranspiler.Transpile(NormalizeSource("+= 1"), new TranspilationOptions("Pscp.Generated", "LargeStackProgram", LargeStack: true)).CSharpCode);
+        if (!largeStack.Contains("System.Threading.Thread __pscpThread = new(Run, 268435456);", StringComparison.Ordinal)
+            || !largeStack.Contains("__pscpThread.Join();", StringComparison.Ordinal))
         {
             failures.Add($"LargeStack: expected Run on a large-stack thread\nGenerated:\n{largeStack}");
         }

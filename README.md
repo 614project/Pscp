@@ -203,12 +203,14 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- run .\sample\main.pscp --st
 ```text
 pscp init [directory] [--force]
 pscp check [file.pscp]
-pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty]
-pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
-pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty]
+pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--large-stack]
+pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
+pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
 pscp lsp
 pscp version
 ```
+
+기본적으로 생성된 `Main`은 `Run()`을 메인 스레드에서 바로 호출합니다. 대부분의 온라인 저지는 메인 스레드에 넉넉한 스택을 주기 때문입니다. 로컬 환경(Windows 기본 1MB 등)에서 깊은 재귀가 필요하면 `--large-stack`을 붙이세요. 그러면 프로그램 본문이 256MB 스택 스레드에서 실행됩니다.
 
 ## Native AOT
 

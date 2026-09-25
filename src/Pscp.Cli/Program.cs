@@ -509,14 +509,15 @@ static class PscpCli
         Console.WriteLine("Commands:");
         Console.WriteLine("  pscp init [directory] [--force]");
         Console.WriteLine("  pscp check [file.pscp]");
-        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain]");
-        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
-        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--older]");
+        Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack]");
+        Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
+        Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
         Console.WriteLine("  pscp lsp");
         Console.WriteLine("  pscp version");
         Console.WriteLine();
         Console.WriteLine("When `file.pscp` is omitted, `main.pscp` in the current directory is used if present.");
         Console.WriteLine("`--compact` is the default. Use `--verbose` to keep the full helper surface in generated C#.");
+        Console.WriteLine("`--large-stack` runs the program on a 256 MB stack thread (for deep recursion outside online judges).");
         Console.WriteLine("`--older` makes the generated SDK project target net6.0 / C# 10. Transpiled C# is always C# 10 compatible.");
     }
 
@@ -533,7 +534,8 @@ static class PscpCli
         HelperEmissionMode HelperEmission,
         bool Explain,
         bool Older,
-        bool Pretty);
+        bool Pretty,
+        bool LargeStack);
 
     private static BackendOptions ParseBackendOptions(string[] args, int startIndex, bool allowOutput, bool allowStdinFile)
     {
@@ -547,6 +549,7 @@ static class PscpCli
         bool explain = false;
         bool older = false;
         bool pretty = false;
+        bool largeStack = false;
 
         for (int i = startIndex; i < args.Length; i++)
         {
@@ -608,12 +611,15 @@ static class PscpCli
                 case "--older":
                     older = true;
                     break;
+                case "--large-stack":
+                    largeStack = true;
+                    break;
                 default:
                     throw new InvalidOperationException($"Unknown option: {args[i]}");
             }
         }
 
-        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older, pretty);
+        return new BackendOptions(outputPath, print, ns, className, configuration, stdinFile, helperEmission, explain, older, pretty, largeStack);
     }
 
     private static string ReadOptionValue(string[] args, ref int index)
@@ -644,7 +650,8 @@ static class PscpCli
             options.HelperEmission,
             options.Explain,
             options.Explain ? sourceText : null,
-            options.Pretty);
+            options.Pretty,
+            options.LargeStack);
 
     private static bool HasErrors(IReadOnlyList<Diagnostic> diagnostics)
         => diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);

@@ -136,7 +136,8 @@ public sealed record TranspilationOptions(
     HelperEmissionMode HelperEmission = HelperEmissionMode.Compact,
     bool Explain = false,
     string? ExplainSource = null,
-    bool Pretty = false);
+    bool Pretty = false,
+    bool LargeStack = false);
 
 public sealed record TranspilationResult(
     string Source,

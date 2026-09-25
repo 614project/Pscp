@@ -864,8 +864,9 @@ internal sealed partial class CSharpEmitter
         }
     }
 
-    // Recursion depth in contest solutions (DFS over 10^5..10^6 nodes) easily exceeds the 1 MB (Windows) or
-    // 8 MB (Linux) main-thread stack, so the program body runs on a thread with a large stack.
+    // Most online judges already give the main thread a generous stack, so `Run()` is called directly. With
+    // `LargeStack` (`--large-stack`) the body runs on a 256 MB thread instead, for environments with the default
+    // 1 MB (Windows) / 8 MB (Linux) main-thread stack and deep recursion.
     private const int ProgramThreadStackSize = 256 * 1024 * 1024;
 
     private void EmitMain(IReadOnlyList<Statement> statements)
@@ -873,9 +874,17 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("public static void Main()");
         _writer.WriteLine("{");
         _writer.Indent();
-        _writer.WriteLine($"System.Threading.Thread __pscpThread = new({_runMethodName}, {ProgramThreadStackSize});");
-        _writer.WriteLine("__pscpThread.Start();");
-        _writer.WriteLine("__pscpThread.Join();");
+        if (_options.LargeStack)
+        {
+            _writer.WriteLine($"System.Threading.Thread __pscpThread = new({_runMethodName}, {ProgramThreadStackSize});");
+            _writer.WriteLine("__pscpThread.Start();");
+            _writer.WriteLine("__pscpThread.Join();");
+        }
+        else
+        {
+            _writer.WriteLine($"{_runMethodName}();");
+        }
+
         if (_emitStdout)
         {
             _writer.WriteLine("stdout.flush();");
