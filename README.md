@@ -288,7 +288,7 @@ artifacts/linux/<runtime>/pscp-sdk_<version>_<runtime>.tar.gz
 Debian/Ubuntu 계열에서는 `.deb`를 설치합니다.
 
 ```bash
-sudo apt install ./artifacts/linux/linux-x64/pscp_0.6.6_amd64.deb
+sudo apt install ./artifacts/linux/linux-x64/pscp_0.6.7_amd64.deb
 pscp version
 ```
 
@@ -306,7 +306,7 @@ pscp version
 릴리즈 방법:
 
 1. `src/Pscp.Transpiler/Syntax.cs`의 `ToolVersion`을 올리고 main에 병합합니다.
-2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.6.7 && git push origin v0.6.7`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
+2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.6.8 && git push origin v0.6.8`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
 
 태그와 `ToolVersion`이 다르면 릴리즈는 실패합니다. 이미 다른 커밋을 가리키는 태그로 수동 실행해도 실패합니다. `-`가 들어간 버전(예: `0.7.0-beta.1`)은 pre-release로 올라가고, 같은 태그로 다시 실행하면 기존 릴리즈의 파일을 교체합니다.
 
@@ -339,13 +339,13 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.5.vsix
+artifacts\vscode\local.pscp-vscode-0.6.7.vsix
 ```
 
 설치 방법:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.5.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.7.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.

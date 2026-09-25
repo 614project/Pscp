@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.6.vsix
+artifacts\vscode\local.pscp-vscode-0.6.7.vsix
 ```
 
 ## 설치
@@ -55,5 +55,5 @@ artifacts\vscode\local.pscp-vscode-0.6.6.vsix
 2. 터미널에서:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.6.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.7.vsix
 ```

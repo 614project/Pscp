@@ -2,7 +2,7 @@ name: Release
 
 # Publishes a GitHub release with the Windows installer and the Linux packages.
 #
-# - Push a tag `v<ToolVersion>` (for example `v0.6.6`), or
+# - Push a tag `v<ToolVersion>` (for example `v0.6.7`), or
 # - run this workflow manually; the tag `v<ToolVersion>` is then created on the selected commit.
 #
 # `ToolVersion` comes from src/Pscp.Transpiler/Syntax.cs. The full CI suite (ci.yml) must pass before any
