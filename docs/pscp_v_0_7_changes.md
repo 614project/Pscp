@@ -1413,7 +1413,7 @@ v0.7 초안을 트랜스파일러와 언어 서버에 반영할 때의 작업을
 **언어 서버 / VS Code 확장**
 
 - 새 API와 폐기 이름의 완성·hover, 새 진단 표시
-- `pscp_v_0_6_language_server_and_vscode_extension_guide.md`는 v0.7 기준으로 별도 갱신이 필요하다.
+- 언어 서버와 확장의 동작 계약, 진단 코드 표, 작업 순서는 `pscp_v_0_7_language_server_and_vscode_extension_guide.md`에 있다(이전 가이드는 `deprecated/`로 옮겼다).
 
 ---
 
