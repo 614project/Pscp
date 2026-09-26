@@ -28,22 +28,26 @@ public sealed partial class Parser
             return ParseTupleBindingTarget();
         }
 
+        int start = _position;
         Token token = Expect(TokenKind.Identifier, "Expected identifier or discard target.");
-        return token.Text == "_" ? new DiscardTarget() : new NameTarget(token.Text);
+        return token.Text == "_" ? Mark(new DiscardTarget(), start) : Mark(new NameTarget(token.Text), start);
     }
 
     private TupleTarget ParseTupleBindingTarget()
     {
+        int start = _position;
         Expect(TokenKind.OpenParen, "Expected '(' to start tuple binding target.");
         List<BindingTarget> elements = [];
         do
         {
+            SkipSeparators();
             elements.Add(ParseBindingTarget());
+            SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 
         Expect(TokenKind.CloseParen, "Expected ')' after tuple binding target.");
-        return new TupleTarget(elements);
+        return Mark(new TupleTarget(elements), start);
     }
 
     private TypeSyntax ParseTypeSyntax(bool allowSizedArrays)

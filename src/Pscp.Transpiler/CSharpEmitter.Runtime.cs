@@ -1,2223 +1,394 @@
+using System.Text.RegularExpressions;
+
 namespace Pscp.Transpiler;
 
+// Runtime helpers appended to the generated program. Each helper class is a template whose members are kept
+// only when the program, or another kept member, refers to them by name (spec §31).
 internal sealed partial class CSharpEmitter
 {
+    private static readonly Regex RuntimeIdentifierPattern = new(@"[A-Za-z_][A-Za-z0-9_]*", RegexOptions.CultureInvariant);
+
     partial void EmitRuntimeHelpers()
     {
         string programText = _writer.ToString();
         bool verbose = _options.HelperEmission == HelperEmissionMode.Verbose;
-        bool wroteBlock = false;
+        List<string> blocks = [];
+        string usedText = programText;
+
+        void Add(string block)
+        {
+            blocks.Add(block);
+            usedText += "\n" + block;
+        }
 
         if (verbose || programText.Contains("__PscpArray.", StringComparison.Ordinal))
         {
-            EmitArrayHelpers();
-            wroteBlock = true;
+            Add(PruneRuntimeClass(ArrayHelpersTemplate, name => verbose || programText.Contains("__PscpArray." + name, StringComparison.Ordinal)));
         }
 
         if (verbose || programText.Contains("__PscpCollection.", StringComparison.Ordinal))
         {
-            if (wroteBlock)
-            {
-                _writer.WriteLine();
-            }
-
-            EmitCollectionHelpers();
-            wroteBlock = true;
+            Add(CollectionHelpersTemplate);
         }
 
         if (verbose || programText.Contains("__PscpThunk.run(", StringComparison.Ordinal))
         {
-            if (wroteBlock)
+            Add(ThunkHelpersTemplate);
+        }
+
+        if (_emitStdin || verbose)
+        {
+            Add(PruneRuntimeClass(StdinTemplate, name => verbose || programText.Contains($"{PscpBinder.StdinName}.{name}(", StringComparison.Ordinal)));
+        }
+
+        if (_emitStdout || verbose)
+        {
+            Add(PruneRuntimeClass(StdoutTemplate, name => verbose || programText.Contains($"{PscpBinder.StdoutName}.{name}(", StringComparison.Ordinal)));
+        }
+
+        // The sequence helpers are extension methods, so a member call such as `xs.sort()` also uses them.
+        string sequenceText = usedText;
+        HashSet<string> sequenceHelpers = GetRuntimeClassMemberNames(SequenceHelpersTemplate);
+        if (verbose || sequenceHelpers.Any(name => UsesSequenceHelper(sequenceText, name)))
+        {
+            Add(PruneRuntimeClass(SequenceHelpersTemplate, name => verbose || UsesSequenceHelper(sequenceText, name)));
+        }
+
+        string renderText = usedText;
+        if (verbose || renderText.Contains("__PscpRender.", StringComparison.Ordinal))
+        {
+            Add(PruneRuntimeClass(RenderTemplate, name => verbose || renderText.Contains("__PscpRender." + name, StringComparison.Ordinal)));
+        }
+
+        if (verbose || usedText.Contains("__PscpOrder", StringComparison.Ordinal))
+        {
+            Add(OrderTemplate);
+        }
+
+        for (int i = 0; i < blocks.Count; i++)
+        {
+            if (i > 0)
             {
                 _writer.WriteLine();
             }
 
-            EmitThunkHelpers();
-            wroteBlock = true;
-        }
-
-        if (verbose || NeedsSequenceHelpers(programText))
-        {
-            if (wroteBlock)
-            {
-                _writer.WriteLine();
-            }
-
-            EmitSequenceHelpers(programText, verbose);
-            wroteBlock = true;
-        }
-
-        if (verbose || _emitStdin)
-        {
-            if (wroteBlock)
-            {
-                _writer.WriteLine();
-            }
-
-            EmitStdinHelpers(programText, verbose);
-            wroteBlock = true;
-        }
-
-        if (verbose || _emitStdout)
-        {
-            if (wroteBlock)
-            {
-                _writer.WriteLine();
-            }
-
-            EmitStdoutHelpers(programText, verbose);
-            wroteBlock = true;
-        }
-
-        if (verbose || _stdoutNeedsFallbackHelpers)
-        {
-            _writer.WriteLine();
-            EmitRenderHelpers();
+            WriteRuntimeBlock(blocks[i]);
         }
     }
 
-    private void EmitArrayHelpers()
+    private static bool UsesSequenceHelper(string text, string name)
+        => text.Contains("__PscpSeq." + name + "(", StringComparison.Ordinal)
+            || text.Contains("." + name + "(", StringComparison.Ordinal);
+
+    // The class header, the kept members and the closing brace. Members are separated at brace depth 1; a member
+    // is kept when `isRoot` accepts its name or a kept member refers to it (constructors and fields included).
+    private static string PruneRuntimeClass(string template, Func<string, bool> isRoot)
     {
-        WriteRuntimeBlock(
-            """
-            public static class __PscpArray
-            {
-                public static T[] zero<T>(int n) => new T[n];
-
-                public static T[] fillNew<T>(int n) where T : new()
-                {
-                    T[] result = new T[n];
-                    for (int i = 0; i < n; i++)
-                    {
-                        result[i] = new T();
-                    }
-
-                    return result;
-                }
-
-                public static T[][] jagged<T>(int n, int m)
-                {
-                    T[][] result = new T[n][];
-                    for (int i = 0; i < n; i++)
-                    {
-                        result[i] = new T[m];
-                    }
-
-                    return result;
-                }
-            }
-            """);
-    }
-
-    private void EmitCollectionHelpers()
-    {
-        WriteRuntimeBlock(
-            """
-            public static class __PscpCollection
-            {
-                public static void enqueue<TElement, TPriority>(PriorityQueue<TElement, TPriority> queue, (TElement, TPriority) entry) => queue.Enqueue(entry.Item1, entry.Item2);
-                public static bool tryAdd<TKey, TValue>(Dictionary<TKey, TValue> dictionary, (TKey, TValue) entry) where TKey : notnull => dictionary.TryAdd(entry.Item1, entry.Item2);
-            }
-            """);
-    }
-
-    private void EmitThunkHelpers()
-    {
-        WriteRuntimeBlock(
-            """
-            public static class __PscpThunk
-            {
-                public static T run<T>(Func<T> thunk) => thunk();
-            }
-            """);
-    }
-
-    private void EmitSequenceHelpers(string programText, bool verbose)
-    {
-        string template =
-            """
-            public static class __PscpSeq
-            {
-                public static T[] arrayOf<T>(params T[] items) => items;
-                public static IEnumerable<T> one<T>(T value) => new[] { value };
-                public static IEnumerable<T> concat<T>(params IEnumerable<T>[] sequences) => sequences.SelectMany(static sequence => sequence);
-                public static T[] toArray<T>(IEnumerable<T> sequence) => sequence as T[] ?? sequence.ToArray();
-                public static List<T> toList<T>(IEnumerable<T> sequence) => sequence.ToList();
-                public static LinkedList<T> toLinkedList<T>(IEnumerable<T> sequence) => new(sequence);
-                public static int compare<T>(T left, T right) => Comparer<T>.Default.Compare(left, right);
-                public static int gcd(int left, int right)
-                {
-                    uint a = left >= 0 ? (uint)left : (uint)(-(long)left);
-                    uint b = right >= 0 ? (uint)right : (uint)(-(long)right);
-                    while (b != 0)
-                    {
-                        uint next = a % b;
-                        a = b;
-                        b = next;
-                    }
-
-                    return unchecked((int)a);
-                }
-
-                public static long gcd(long left, long right)
-                {
-                    ulong a = left >= 0 ? (ulong)left : (ulong)(-(left + 1)) + 1UL;
-                    ulong b = right >= 0 ? (ulong)right : (ulong)(-(right + 1)) + 1UL;
-                    while (b != 0)
-                    {
-                        ulong next = a % b;
-                        a = b;
-                        b = next;
-                    }
-
-                    return unchecked((long)a);
-                }
-
-                public static int lcm(int left, int right) => left == 0 || right == 0 ? 0 : (int)Math.Abs((long)left / gcd(left, right) * right);
-                public static long lcm(long left, long right) => left == 0 || right == 0 ? 0L : Math.Abs((left / gcd(left, right)) * right);
-                public static int popcount(int value) => System.Numerics.BitOperations.PopCount(unchecked((uint)value));
-                public static int popcount(long value) => System.Numerics.BitOperations.PopCount(unchecked((ulong)value));
-                public static int bitLength(int value)
-                {
-                    uint magnitude = value >= 0 ? (uint)value : (uint)(-(long)value);
-                    return magnitude == 0 ? 0 : 32 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
-                }
-
-                public static int bitLength(long value)
-                {
-                    ulong magnitude = value >= 0 ? (ulong)value : (ulong)(-(value + 1)) + 1UL;
-                    return magnitude == 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount(magnitude);
-                }
-
-                public static IEnumerable<int> rangeInt(int start, int end, bool inclusive)
-                    => rangeInt(start, end, 1, inclusive);
-
-                public static IEnumerable<int> rangeInt(int start, int end, int step, bool inclusive)
-                {
-                #if DEBUG
-                    if (step == 0) throw new InvalidOperationException("Range step cannot be zero.");
-                #else
-                    if (step == 0) yield break;
-                #endif
-                    if (step > 0)
-                    {
-                        for (int i = start; inclusive ? i <= end : i < end; i += step)
-                        {
-                            yield return i;
-                        }
-
-                        yield break;
-                    }
-
-                    for (int i = start; inclusive ? i >= end : i > end; i += step)
-                    {
-                        yield return i;
-                    }
-                }
-
-                public static IEnumerable<long> rangeLong(long start, long end, bool inclusive)
-                    => rangeLong(start, end, 1L, inclusive);
-
-                public static IEnumerable<long> rangeLong(long start, long end, long step, bool inclusive)
-                {
-                #if DEBUG
-                    if (step == 0) throw new InvalidOperationException("Range step cannot be zero.");
-                #else
-                    if (step == 0) yield break;
-                #endif
-                    if (step > 0)
-                    {
-                        for (long i = start; inclusive ? i <= end : i < end; i += step)
-                        {
-                            yield return i;
-                        }
-
-                        yield break;
-                    }
-
-                    for (long i = start; inclusive ? i >= end : i > end; i += step)
-                    {
-                        yield return i;
-                    }
-                }
-
-                public static TResult[] map<T, TResult>(this IEnumerable<T> source, Func<T, TResult> selector)
-                {
-                    List<TResult> result = new();
-                    foreach (T item in source)
-                    {
-                        result.Add(selector(item));
-                    }
-
-                    return result.ToArray();
-                }
-
-                public static T[] filter<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    List<T> result = new();
-                    foreach (T item in source)
-                    {
-                        if (predicate(item))
-                        {
-                            result.Add(item);
-                        }
-                    }
-
-                    return result.ToArray();
-                }
-
-                public static TState fold<T, TState>(this IEnumerable<T> source, TState seed, Func<TState, T, TState> folder)
-                {
-                    TState state = seed;
-                    foreach (T item in source)
-                    {
-                        state = folder(state, item);
-                    }
-
-                    return state;
-                }
-
-                public static TState[] scan<T, TState>(this IEnumerable<T> source, TState seed, Func<TState, T, TState> folder)
-                {
-                    List<TState> values = new();
-                    TState state = seed;
-                    foreach (T item in source)
-                    {
-                        state = folder(state, item);
-                        values.Add(state);
-                    }
-
-                    return values.ToArray();
-                }
-
-                public static (TResult[] mapped, TState state) mapFold<T, TResult, TState>(this IEnumerable<T> source, TState seed, Func<TState, T, (TResult mapped, TState state)> folder)
-                {
-                    List<TResult> values = new();
-                    TState state = seed;
-                    foreach (T item in source)
-                    {
-                        (TResult mapped, TState next) = folder(state, item);
-                        values.Add(mapped);
-                        state = next;
-                    }
-
-                    return (values.ToArray(), state);
-                }
-
-                public static int sum(this IEnumerable<int> source)
-                {
-                    int total = 0;
-                    foreach (int item in source) total += item;
-                    return total;
-                }
-
-                public static long sum(this IEnumerable<long> source)
-                {
-                    long total = 0;
-                    foreach (long item in source) total += item;
-                    return total;
-                }
-
-                public static double sum(this IEnumerable<double> source)
-                {
-                    double total = 0d;
-                    foreach (double item in source) total += item;
-                    return total;
-                }
-
-                public static decimal sum(this IEnumerable<decimal> source)
-                {
-                    decimal total = 0m;
-                    foreach (decimal item in source) total += item;
-                    return total;
-                }
-
-                public static int sumBy<T>(this IEnumerable<T> source, Func<T, int> selector)
-                {
-                    int total = 0;
-                    foreach (T item in source) total += selector(item);
-                    return total;
-                }
-
-                public static long sumBy<T>(this IEnumerable<T> source, Func<T, long> selector)
-                {
-                    long total = 0;
-                    foreach (T item in source) total += selector(item);
-                    return total;
-                }
-
-                public static double sumBy<T>(this IEnumerable<T> source, Func<T, double> selector)
-                {
-                    double total = 0d;
-                    foreach (T item in source) total += selector(item);
-                    return total;
-                }
-
-                public static decimal sumBy<T>(this IEnumerable<T> source, Func<T, decimal> selector)
-                {
-                    decimal total = 0m;
-                    foreach (T item in source) total += selector(item);
-                    return total;
-                }
-
-                public static T min<T>(T left, T right) => Comparer<T>.Default.Compare(left, right) <= 0 ? left : right;
-                public static T max<T>(T left, T right) => Comparer<T>.Default.Compare(left, right) >= 0 ? left : right;
-
-                public static T min<T>(this IEnumerable<T> source)
-                {
-                    using IEnumerator<T> enumerator = source.GetEnumerator();
-                #if DEBUG
-                    if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
-                #else
-                    enumerator.MoveNext();
-                #endif
-                    T best = enumerator.Current;
-                    while (enumerator.MoveNext())
-                    {
-                        if (Comparer<T>.Default.Compare(enumerator.Current, best) < 0)
-                        {
-                            best = enumerator.Current;
-                        }
-                    }
-
-                    return best;
-                }
-
-                public static T max<T>(this IEnumerable<T> source)
-                {
-                    using IEnumerator<T> enumerator = source.GetEnumerator();
-                #if DEBUG
-                    if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
-                #else
-                    enumerator.MoveNext();
-                #endif
-                    T best = enumerator.Current;
-                    while (enumerator.MoveNext())
-                    {
-                        if (Comparer<T>.Default.Compare(enumerator.Current, best) > 0)
-                        {
-                            best = enumerator.Current;
-                        }
-                    }
-
-                    return best;
-                }
-
-                public static T minBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> selector)
-                {
-                    using IEnumerator<T> enumerator = source.GetEnumerator();
-                #if DEBUG
-                    if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
-                #else
-                    enumerator.MoveNext();
-                #endif
-                    T bestItem = enumerator.Current;
-                    TKey bestKey = selector(bestItem);
-                    while (enumerator.MoveNext())
-                    {
-                        T item = enumerator.Current;
-                        TKey key = selector(item);
-                        if (Comparer<TKey>.Default.Compare(key, bestKey) < 0)
-                        {
-                            bestItem = item;
-                            bestKey = key;
-                        }
-                    }
-
-                    return bestItem;
-                }
-
-                public static T maxBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> selector)
-                {
-                    using IEnumerator<T> enumerator = source.GetEnumerator();
-                #if DEBUG
-                    if (!enumerator.MoveNext()) throw new InvalidOperationException("Sequence contains no elements.");
-                #else
-                    enumerator.MoveNext();
-                #endif
-                    T bestItem = enumerator.Current;
-                    TKey bestKey = selector(bestItem);
-                    while (enumerator.MoveNext())
-                    {
-                        T item = enumerator.Current;
-                        TKey key = selector(item);
-                        if (Comparer<TKey>.Default.Compare(key, bestKey) > 0)
-                        {
-                            bestItem = item;
-                            bestKey = key;
-                        }
-                    }
-
-                    return bestItem;
-                }
-
-                public static int count<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    int total = 0;
-                    foreach (T item in source)
-                    {
-                        if (predicate(item)) total++;
-                    }
-
-                    return total;
-                }
-
-                public static bool any<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    foreach (T item in source)
-                    {
-                        if (predicate(item)) return true;
-                    }
-
-                    return false;
-                }
-
-                public static bool all<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    foreach (T item in source)
-                    {
-                        if (!predicate(item)) return false;
-                    }
-
-                    return true;
-                }
-
-                public static T? find<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    foreach (T item in source)
-                    {
-                        if (predicate(item)) return item;
-                    }
-
-                    return default;
-                }
-
-                public static int findIndex<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    int index = 0;
-                    foreach (T item in source)
-                    {
-                        if (predicate(item)) return index;
-                        index++;
-                    }
-
-                    return -1;
-                }
-
-                public static int findLastIndex<T>(this IEnumerable<T> source, Func<T, bool> predicate)
-                {
-                    int found = -1;
-                    int index = 0;
-                    foreach (T item in source)
-                    {
-                        if (predicate(item)) found = index;
-                        index++;
-                    }
-
-                    return found;
-                }
-
-                public static T[] sort<T>(this IEnumerable<T> source)
-                {
-                    List<T> list = source.ToList();
-                    list.Sort();
-                    return list.ToArray();
-                }
-
-                public static T[] sortBy<T, TKey>(this IEnumerable<T> source, Func<T, TKey> selector)
-                {
-                    List<T> list = source.ToList();
-                    list.Sort((left, right) => Comparer<TKey>.Default.Compare(selector(left), selector(right)));
-                    return list.ToArray();
-                }
-
-                public static T[] sortWith<T>(this IEnumerable<T> source, Func<T, T, int> comparer)
-                {
-                    List<T> list = source.ToList();
-                    list.Sort((left, right) => comparer(left, right));
-                    return list.ToArray();
-                }
-
-                public static T[] sortWith<T>(this IEnumerable<T> source, IComparer<T> comparer)
-                {
-                    List<T> list = source.ToList();
-                    list.Sort(comparer);
-                    return list.ToArray();
-                }
-
-                public static bool chmin(ref int target, int value) { if (value < target) { target = value; return true; } return false; }
-                public static bool chmin(ref long target, long value) { if (value < target) { target = value; return true; } return false; }
-                public static bool chmin(ref double target, double value) { if (value < target) { target = value; return true; } return false; }
-                public static bool chmin(ref char target, char value) { if (value < target) { target = value; return true; } return false; }
-                public static bool chmax(ref int target, int value) { if (value > target) { target = value; return true; } return false; }
-                public static bool chmax(ref long target, long value) { if (value > target) { target = value; return true; } return false; }
-                public static bool chmax(ref double target, double value) { if (value > target) { target = value; return true; } return false; }
-                public static bool chmax(ref char target, char value) { if (value > target) { target = value; return true; } return false; }
-
-                public static bool chmin<T>(ref T target, T value)
-                {
-                    if (Comparer<T>.Default.Compare(value, target) < 0)
-                    {
-                        target = value;
-                        return true;
-                    }
-
-                    return false;
-                }
-
-                public static bool chmax<T>(ref T target, T value)
-                {
-                    if (Comparer<T>.Default.Compare(value, target) > 0)
-                    {
-                        target = value;
-                        return true;
-                    }
-
-                    return false;
-                }
-
-                public static T[] distinct<T>(this IEnumerable<T> source) => source.Distinct().ToArray();
-                public static T[] reverse<T>(this IEnumerable<T> source) => source.Reverse().ToArray();
-                public static T[] copy<T>(this IEnumerable<T> source) => source.ToArray();
-
-                public static Dictionary<T, int> groupCount<T>(this IEnumerable<T> source) where T : notnull
-                {
-                    Dictionary<T, int> result = new();
-                    foreach (T item in source)
-                    {
-                        result[item] = result.TryGetValue(item, out int count) ? count + 1 : 1;
-                    }
-
-                    return result;
-                }
-
-                public static Dictionary<T, int> freq<T>(this IEnumerable<T> source) where T : notnull
-                    => source.groupCount();
-
-                public static Dictionary<T, int> index<T>(this IEnumerable<T> source) where T : notnull
-                {
-                    Dictionary<T, int> result = new();
-                    int index = 0;
-                    foreach (T item in source)
-                    {
-                        if (!result.ContainsKey(item)) result[item] = index;
-                        index++;
-                    }
-
-                    return result;
-                }
-            }
-            """;
-
-        WriteRuntimeBlock(verbose ? template : PruneSequenceHelperMembers(template, programText));
-    }
-
-    private static string PruneSequenceHelperMembers(string template, string programText)
-    {
-        HashSet<string> required = GetRequiredSequenceHelperNames(programText);
-        if (required.Contains("freq"))
+        (string header, List<(string Name, string Text)> members, string footer) = SplitRuntimeClass(template);
+        HashSet<string> names = members.Select(member => member.Name).Where(name => name.Length > 0).ToHashSet(StringComparer.Ordinal);
+        string className = Regex.Match(header, @"(?:class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)").Groups[1].Value;
+        HashSet<string> kept = new(StringComparer.Ordinal);
+        Queue<string> pending = new();
+        foreach (string name in names)
         {
-            required.Add("groupCount");
+            if (name == className || isRoot(name))
+            {
+                kept.Add(name);
+                pending.Enqueue(name);
+            }
         }
 
-        string[] lines = template.Replace("\r", string.Empty).Split('\n');
+        while (pending.Count > 0)
+        {
+            string current = pending.Dequeue();
+            foreach ((string name, string text) in members)
+            {
+                if (name != current)
+                {
+                    continue;
+                }
+
+                foreach (Match identifier in RuntimeIdentifierPattern.Matches(StripRuntimeLiterals(text)))
+                {
+                    if (names.Contains(identifier.Value) && kept.Add(identifier.Value))
+                    {
+                        pending.Enqueue(identifier.Value);
+                    }
+                }
+            }
+        }
+
         System.Text.StringBuilder builder = new();
-        bool insideClass = false;
-
-        for (int i = 0; i < lines.Length;)
+        builder.Append(header);
+        foreach ((string name, string text) in members)
         {
-            string line = lines[i];
-            string trimmed = line.TrimStart();
-
-            if (!insideClass)
+            if (name.Length == 0 || kept.Contains(name))
             {
-                builder.AppendLine(line);
-                if (trimmed == "{")
-                {
-                    insideClass = true;
-                }
+                builder.Append(text);
+            }
+        }
 
-                i++;
+        builder.Append(footer);
+        return builder.ToString();
+    }
+
+    private static HashSet<string> GetRuntimeClassMemberNames(string template)
+        => SplitRuntimeClass(template).Members.Select(member => member.Name).Where(name => name.Length > 0).ToHashSet(StringComparer.Ordinal);
+
+    private static (string Header, List<(string Name, string Text)> Members, string Footer) SplitRuntimeClass(string template)
+    {
+        string[] lines = template.Replace("\r", string.Empty).Split('\n');
+        System.Text.StringBuilder header = new();
+        int index = 0;
+        for (; index < lines.Length; index++)
+        {
+            header.Append(lines[index]).Append('\n');
+            if (lines[index].Trim() == "{")
+            {
+                index++;
+                break;
+            }
+        }
+
+        List<(string Name, string Text)> members = [];
+        System.Text.StringBuilder footer = new();
+        while (index < lines.Length)
+        {
+            string trimmed = lines[index].Trim();
+            if (trimmed.Length == 0)
+            {
+                index++;
                 continue;
             }
 
             if (trimmed == "}")
             {
-                builder.AppendLine(line);
+                for (; index < lines.Length; index++)
+                {
+                    footer.Append(lines[index]).Append('\n');
+                }
+
                 break;
             }
 
-            if (!trimmed.StartsWith("public static ", StringComparison.Ordinal))
+            System.Text.StringBuilder member = new();
+            int depth = 0;
+            bool opened = false;
+            int start = index;
+            while (index < lines.Length)
             {
-                builder.AppendLine(line);
-                i++;
-                continue;
-            }
-
-            string memberName = GetSequenceHelperMemberName(trimmed);
-            List<string> memberLines = [];
-            int depth = 1;
-            int j = i;
-
-            while (j < lines.Length)
-            {
-                string current = lines[j];
-                memberLines.Add(current);
-                depth += CountOccurrences(current, '{');
-                depth -= CountOccurrences(current, '}');
-
-                bool expressionBodied = j == i
-                    && depth == 1
-                    && ((current.Contains("=>", StringComparison.Ordinal) && current.TrimEnd().EndsWith(';'))
-                        || (current.Contains('{') && current.TrimEnd().EndsWith('}')));
-
-                j++;
-                if (expressionBodied || (j > i + 1 && depth == 1))
+                string line = lines[index];
+                member.Append(line).Append('\n');
+                string code = line.TrimStart().StartsWith("#", StringComparison.Ordinal) ? string.Empty : StripRuntimeLiterals(line);
+                foreach (char ch in code)
                 {
-                    if (j < lines.Length && string.IsNullOrWhiteSpace(lines[j]))
+                    if (ch == '{')
                     {
-                        memberLines.Add(lines[j]);
-                        j++;
+                        depth++;
+                        opened = true;
                     }
+                    else if (ch == '}')
+                    {
+                        depth--;
+                    }
+                }
 
+                index++;
+                string lineTrimmed = StripRuntimeLiterals(line).TrimEnd();
+                if (depth == 0 && (opened ? lineTrimmed.EndsWith('}') || lineTrimmed.EndsWith(';') : lineTrimmed.EndsWith(';')))
+                {
                     break;
                 }
             }
 
-            if (required.Contains(memberName))
+            // Leading comments belong to the member that follows them.
+            int signature = start;
+            while (signature < index - 1 && lines[signature].TrimStart().StartsWith("//", StringComparison.Ordinal))
             {
-                foreach (string memberLine in memberLines)
-                {
-                    builder.AppendLine(memberLine);
-                }
+                signature++;
             }
 
-            i = j;
+            members.Add((GetRuntimeMemberName(lines[signature].Trim()), member.ToString()));
         }
 
-        return builder.ToString().TrimEnd('\n');
+        return (header.ToString(), members, footer.ToString());
     }
 
-    private static HashSet<string> GetRequiredSequenceHelperNames(string programText)
-    {
-        HashSet<string> required = [];
-        string[] helperNames =
-        [
-            "arrayOf", "one", "concat", "toArray", "toList", "toLinkedList", "compare",
-            "gcd", "lcm", "popcount", "bitLength",
-            "rangeInt", "rangeLong",
-            "map", "filter", "fold", "scan", "mapFold",
-            "sum", "sumBy", "min", "max", "minBy", "maxBy",
-            "count", "any", "all", "find", "findIndex", "findLastIndex",
-            "sort", "sortBy", "sortWith",
-            "distinct", "reverse", "copy",
-            "groupCount", "freq", "index",
-            "chmin", "chmax",
-        ];
-
-        foreach (string helperName in helperNames)
-        {
-            if (programText.Contains("__PscpSeq." + helperName + "(", StringComparison.Ordinal)
-                || programText.Contains("." + helperName + "(", StringComparison.Ordinal))
-            {
-                required.Add(helperName);
-            }
-        }
-
-        return required;
-    }
-
-    private static string GetSequenceHelperMemberName(string signature)
-    {
-        int openParen = signature.IndexOf('(');
-        if (openParen < 0)
-        {
-            return string.Empty;
-        }
-
-        int start = openParen - 1;
-        int genericDepth = 0;
-        while (start >= 0)
-        {
-            char current = signature[start];
-            if (current == '>')
-            {
-                genericDepth++;
-                start--;
-                continue;
-            }
-
-            if (current == '<')
-            {
-                genericDepth--;
-                start--;
-                continue;
-            }
-
-            if (genericDepth == 0 && char.IsWhiteSpace(current))
-            {
-                break;
-            }
-
-            start--;
-        }
-
-        string token = signature[(start + 1)..openParen];
-        int genericIndex = token.IndexOf('<');
-        return genericIndex >= 0 ? token[..genericIndex] : token;
-    }
-
-    private static int CountOccurrences(string text, char value)
-    {
-        int count = 0;
-        foreach (char current in text)
-        {
-            if (current == value)
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
-    private void EmitStdinHelpers(string programText, bool verbose)
-    {
-        static bool Contains(string text, string value)
-            => text.Contains(value, StringComparison.Ordinal);
-
-        bool needInt = verbose || Contains(programText, "stdin.readInt(") || Contains(programText, "stdin.readArrayInt(") || Contains(programText, "stdin.readGridInt(");
-        bool needLong = verbose || Contains(programText, "stdin.readLong(") || Contains(programText, "stdin.readArrayLong(") || Contains(programText, "stdin.readGridLong(");
-        bool needDouble = verbose || Contains(programText, "stdin.readDouble(") || Contains(programText, "stdin.readArrayDouble(");
-        bool needDecimal = verbose || Contains(programText, "stdin.readDecimal(") || Contains(programText, "stdin.readArrayDecimal(");
-        bool needBool = verbose || Contains(programText, "stdin.readBool(") || Contains(programText, "stdin.readArrayBool(");
-        bool needChar = verbose || Contains(programText, "stdin.readChar(") || Contains(programText, "stdin.readArrayChar(");
-        bool needString = verbose || Contains(programText, "stdin.readString(") || Contains(programText, "stdin.readArrayString(");
-        bool needLine = verbose || Contains(programText, "stdin.readLine(") || Contains(programText, "stdin.readLines(") || Contains(programText, "stdin.readWords(") || Contains(programText, "stdin.readChars(") || Contains(programText, "stdin.readCharGrid(") || Contains(programText, "stdin.readWordGrid(") || Contains(programText, "stdin.readRestOfLine(");
-        bool needLines = verbose || Contains(programText, "stdin.readLines(");
-        bool needWords = verbose || Contains(programText, "stdin.readWords(") || Contains(programText, "stdin.readWordGrid(");
-        bool needChars = verbose || Contains(programText, "stdin.readChars(") || Contains(programText, "stdin.readCharGrid(");
-        bool needArrayInt = verbose || Contains(programText, "stdin.readArrayInt(");
-        bool needArrayLong = verbose || Contains(programText, "stdin.readArrayLong(");
-        bool needArrayDouble = verbose || Contains(programText, "stdin.readArrayDouble(");
-        bool needArrayDecimal = verbose || Contains(programText, "stdin.readArrayDecimal(");
-        bool needArrayBool = verbose || Contains(programText, "stdin.readArrayBool(");
-        bool needArrayChar = verbose || Contains(programText, "stdin.readArrayChar(");
-        bool needArrayString = verbose || Contains(programText, "stdin.readArrayString(");
-        bool needGridInt = verbose || Contains(programText, "stdin.readGridInt(");
-        bool needGridLong = verbose || Contains(programText, "stdin.readGridLong(");
-        bool needCharGrid = verbose || Contains(programText, "stdin.readCharGrid(");
-        bool needWordGrid = verbose || Contains(programText, "stdin.readWordGrid(");
-
-        needArrayInt |= needGridInt;
-        needArrayLong |= needGridLong;
-
-        bool needNextToken = verbose || needDouble || needDecimal || needBool || needChar || needString;
-        bool needReadInt = verbose || needInt || needArrayInt || needGridInt;
-        bool needReadLong = verbose || needLong || needArrayLong || needGridLong;
-        bool needParseBool = verbose || needBool;
-        bool needScannerCore = verbose || needNextToken || needReadInt || needReadLong;
-        bool needLineAlignment = needLine && needScannerCore;
-
-        System.Text.StringBuilder builder = new();
-        builder.AppendLine("public sealed class __PscpStdin");
-        builder.AppendLine("{");
-        builder.AppendLine("    private readonly StreamReader _reader = new(Console.OpenStandardInput(), Encoding.UTF8, false, 1 << 16);");
-        if (needLineAlignment)
-        {
-            builder.AppendLine("    private bool _afterTokenRead;");
-        }
-
-        builder.AppendLine();
-
-        if (needInt) builder.AppendLine("    public int readInt() => ReadInt();");
-        if (needLong) builder.AppendLine("    public long readLong() => ReadLong();");
-        if (needDouble) builder.AppendLine("    public double readDouble() => double.Parse(NextToken(), CultureInfo.InvariantCulture);");
-        if (needDecimal) builder.AppendLine("    public decimal readDecimal() => decimal.Parse(NextToken(), CultureInfo.InvariantCulture);");
-        if (needBool) builder.AppendLine("    public bool readBool() => ParseBool(NextToken());");
-        if (needChar)
-        {
-            builder.AppendLine(
-                """
-                    public char readChar()
-                    {
-                        string token = NextToken();
-                        return token.Length == 0 ? '\0' : token[0];
-                    }
-                """);
-        }
-
-        if (needString) builder.AppendLine("    public string readString() => NextToken();");
-        if (needLine)
-        {
-            builder.AppendLine(
-                needLineAlignment
-                    ? """
-                        public string readLine()
-                        {
-                            ConsumePendingLineBoundary();
-                            return _reader.ReadLine() ?? string.Empty;
-                        }
-
-                        public string readRestOfLine() => _reader.ReadLine() ?? string.Empty;
-                        """
-                    : """
-                        public string readLine()
-                        {
-                            return _reader.ReadLine() ?? string.Empty;
-                        }
-
-                        public string readRestOfLine() => _reader.ReadLine() ?? string.Empty;
-                        """);
-        }
-
-        if (needLines)
-        {
-            builder.AppendLine(
-                """
-                    public string[] readLines(int n)
-                    {
-                        string[] result = new string[n];
-                        for (int i = 0; i < n; i++) result[i] = readLine();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needWords) builder.AppendLine("    public string[] readWords() => readLine().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);");
-        if (needChars) builder.AppendLine("    public char[] readChars() => readLine().ToCharArray();");
-
-        if (needArrayInt)
-        {
-            builder.AppendLine(
-                """
-                    public int[] readArrayInt(int n)
-                    {
-                        int[] result = new int[n];
-                        for (int i = 0; i < n; i++) result[i] = readInt();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayLong)
-        {
-            builder.AppendLine(
-                """
-                    public long[] readArrayLong(int n)
-                    {
-                        long[] result = new long[n];
-                        for (int i = 0; i < n; i++) result[i] = readLong();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayDouble)
-        {
-            builder.AppendLine(
-                """
-                    public double[] readArrayDouble(int n)
-                    {
-                        double[] result = new double[n];
-                        for (int i = 0; i < n; i++) result[i] = readDouble();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayDecimal)
-        {
-            builder.AppendLine(
-                """
-                    public decimal[] readArrayDecimal(int n)
-                    {
-                        decimal[] result = new decimal[n];
-                        for (int i = 0; i < n; i++) result[i] = readDecimal();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayBool)
-        {
-            builder.AppendLine(
-                """
-                    public bool[] readArrayBool(int n)
-                    {
-                        bool[] result = new bool[n];
-                        for (int i = 0; i < n; i++) result[i] = readBool();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayChar)
-        {
-            builder.AppendLine(
-                """
-                    public char[] readArrayChar(int n)
-                    {
-                        char[] result = new char[n];
-                        for (int i = 0; i < n; i++) result[i] = readChar();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needArrayString)
-        {
-            builder.AppendLine(
-                """
-                    public string[] readArrayString(int n)
-                    {
-                        string[] result = new string[n];
-                        for (int i = 0; i < n; i++) result[i] = readString();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needGridInt)
-        {
-            builder.AppendLine(
-                """
-                    public int[][] readGridInt(int n, int m)
-                    {
-                        int[][] result = new int[n][];
-                        for (int i = 0; i < n; i++) result[i] = readArrayInt(m);
-                        return result;
-                    }
-                """);
-        }
-
-        if (needGridLong)
-        {
-            builder.AppendLine(
-                """
-                    public long[][] readGridLong(int n, int m)
-                    {
-                        long[][] result = new long[n][];
-                        for (int i = 0; i < n; i++) result[i] = readArrayLong(m);
-                        return result;
-                    }
-                """);
-        }
-
-        if (needCharGrid)
-        {
-            builder.AppendLine(
-                """
-                    public char[][] readCharGrid(int n)
-                    {
-                        char[][] result = new char[n][];
-                        for (int i = 0; i < n; i++) result[i] = readLine().ToCharArray();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needWordGrid)
-        {
-            builder.AppendLine(
-                """
-                    public string[][] readWordGrid(int n)
-                    {
-                        string[][] result = new string[n][];
-                        for (int i = 0; i < n; i++) result[i] = readWords();
-                        return result;
-                    }
-                """);
-        }
-
-        if (needScannerCore)
-        {
-            builder.AppendLine(
-                """
-                    private int SkipTokenSeparators()
-                    {
-                        int next;
-                        while ((next = _reader.Peek()) >= 0 && char.IsWhiteSpace((char)next))
-                        {
-                            _reader.Read();
-                        }
-
-                        return next;
-                    }
-                """);
-        }
-
-        if (needLineAlignment)
-        {
-            builder.AppendLine(
-                """
-                    private void ConsumePendingLineBoundary()
-                    {
-                        if (!_afterTokenRead)
-                        {
-                            return;
-                        }
-
-                        int next;
-                        while ((next = _reader.Peek()) is ' ' or '\t' or '\r')
-                        {
-                            _reader.Read();
-                        }
-
-                        if (_reader.Peek() == '\n')
-                        {
-                            _reader.Read();
-                        }
-
-                        _afterTokenRead = false;
-                    }
-                """);
-        }
-
-        if (needNextToken)
-        {
-            builder.AppendLine(
-                """
-                    private string NextToken()
-                    {
-                        int next = SkipTokenSeparators();
-
-                    #if DEBUG
-                        if (next < 0)
-                        {
-                            throw new EndOfStreamException("Unexpected end of input.");
-                        }
-                    #endif
-
-                        StringBuilder token = new();
-                        while ((next = _reader.Peek()) >= 0 && !char.IsWhiteSpace((char)next))
-                        {
-                            token.Append((char)_reader.Read());
-                        }
-
-                    #if DEBUG
-                        if (token.Length == 0)
-                        {
-                            throw new FormatException("Expected a token.");
-                        }
-                    #endif
-
-                """);
-
-            if (needLineAlignment)
-            {
-                builder.AppendLine("        _afterTokenRead = token.Length != 0;");
-            }
-
-            builder.AppendLine(
-                """
-                        return token.ToString();
-                    }
-                """);
-        }
-
-        if (needReadInt)
-        {
-            builder.AppendLine(
-                """
-                    private int ReadInt()
-                    {
-                        int next = SkipTokenSeparators();
-
-                    #if DEBUG
-                        if (next < 0)
-                        {
-                            throw new EndOfStreamException("Unexpected end of input.");
-                        }
-                    #endif
-
-                        bool negative = false;
-                        if (next is '+' or '-')
-                        {
-                            negative = next == '-';
-                            _reader.Read();
-                            next = _reader.Peek();
-                        }
-
-                    #if DEBUG
-                        if (next < 0 || !char.IsDigit((char)next))
-                        {
-                            throw new FormatException("Expected an integer token.");
-                        }
-                    #endif
-
-                        long value = 0;
-                    #if DEBUG
-                        bool hasDigits = false;
-                    #endif
-                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
-                        {
-                    #if DEBUG
-                            hasDigits = true;
-                    #endif
-                            value = (value * 10L) + (_reader.Read() - '0');
-                        }
-
-                    #if DEBUG
-                        if (!hasDigits)
-                        {
-                            throw new FormatException("Expected an integer token.");
-                        }
-                    #endif
-
-                """);
-
-            if (needLineAlignment)
-            {
-                builder.AppendLine("        _afterTokenRead = true;");
-            }
-
-            builder.AppendLine(
-                """
-
-                    #if DEBUG
-                        if (next >= 0 && !char.IsWhiteSpace((char)next))
-                        {
-                            throw new FormatException("Invalid integer token.");
-                        }
-
-                        if ((!negative && value > int.MaxValue) || (negative && value > 2147483648L))
-                        {
-                            throw new OverflowException("Integer token is out of range for int.");
-                        }
-                    #endif
-
-                        return negative ? unchecked((int)(-value)) : unchecked((int)value);
-                    }
-                """);
-        }
-
-        if (needReadLong)
-        {
-            builder.AppendLine(
-                """
-                    private long ReadLong()
-                    {
-                        int next = SkipTokenSeparators();
-
-                    #if DEBUG
-                        if (next < 0)
-                        {
-                            throw new EndOfStreamException("Unexpected end of input.");
-                        }
-                    #endif
-
-                        bool negative = false;
-                        if (next is '+' or '-')
-                        {
-                            negative = next == '-';
-                            _reader.Read();
-                            next = _reader.Peek();
-                        }
-
-                    #if DEBUG
-                        if (next < 0 || !char.IsDigit((char)next))
-                        {
-                            throw new FormatException("Expected a long integer token.");
-                        }
-                    #endif
-
-                        ulong value = 0UL;
-                    #if DEBUG
-                        bool hasDigits = false;
-                    #endif
-                        while ((next = _reader.Peek()) >= 0 && char.IsDigit((char)next))
-                        {
-                    #if DEBUG
-                            hasDigits = true;
-                    #endif
-                            value = (value * 10UL) + (uint)(_reader.Read() - '0');
-                        }
-
-                    #if DEBUG
-                        if (!hasDigits)
-                        {
-                            throw new FormatException("Expected a long integer token.");
-                        }
-                    #endif
-
-                """);
-
-            if (needLineAlignment)
-            {
-                builder.AppendLine("        _afterTokenRead = true;");
-            }
-
-            builder.AppendLine(
-                """
-
-                    #if DEBUG
-                        if (next >= 0 && !char.IsWhiteSpace((char)next))
-                        {
-                            throw new FormatException("Invalid long integer token.");
-                        }
-
-                        if ((!negative && value > long.MaxValue) || (negative && value > 9223372036854775808UL))
-                        {
-                            throw new OverflowException("Integer token is out of range for long.");
-                        }
-                    #endif
-
-                        return negative ? unchecked(-(long)value) : unchecked((long)value);
-                    }
-                """);
-        }
-
-        if (needParseBool)
-        {
-            builder.AppendLine(
-                """
-                    private static bool ParseBool(string token)
-                    {
-                        if (string.Equals(token, "true", StringComparison.OrdinalIgnoreCase)) return true;
-                        if (string.Equals(token, "false", StringComparison.OrdinalIgnoreCase)) return false;
-                        if (token == "1") return true;
-                        if (token == "0") return false;
-                        return !string.IsNullOrEmpty(token);
-                    }
-                """);
-        }
-
-        builder.AppendLine("}");
-        WriteRuntimeBlock(builder.ToString());
-    }
-
-    private void EmitStdoutHelpers(string programText, bool verbose)
-    {
-        if (!verbose && !_stdoutNeedsFallbackHelpers)
-        {
-            EmitDirectStdoutHelpers();
-            return;
-        }
-
-        WriteRuntimeBlock(
-            """
-            public sealed class __PscpStdout
-            {
-                private readonly StreamWriter _writer = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };
-
-                // Route Console.Write* through the same buffer so pass-through Console output stays in order.
-                public __PscpStdout() => Console.SetOut(_writer);
-
-                public void flush() => _writer.Flush();
-
-                public void write(int value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                public void write(long value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                public void write(double value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                public void write(decimal value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                public void write(bool value) => _writer.Write(value ? "True" : "False");
-                public void write(char value) => _writer.Write(value);
-                public void write(string? value) => _writer.Write(value ?? string.Empty);
-
-                public void write<T1, T2>((T1, T2) value)
-                {
-                    WriteValue(value.Item1);
-                    _writer.Write(' ');
-                    WriteValue(value.Item2);
-                }
-
-                public void write<T1, T2, T3>((T1, T2, T3) value)
-                {
-                    WriteValue(value.Item1);
-                    _writer.Write(' ');
-                    WriteValue(value.Item2);
-                    _writer.Write(' ');
-                    WriteValue(value.Item3);
-                }
-
-                public void write(int[] values) => WriteJoined(values);
-                public void write(long[] values) => WriteJoined(values);
-                public void write(double[] values) => WriteJoined(values);
-                public void write(decimal[] values) => WriteJoined(values);
-                public void write(bool[] values) => WriteJoined(values);
-                public void write(char[] values) => WriteJoined(values);
-                public void write(string[] values) => WriteJoined(values);
-                public void write<T>(T[] values) => WriteJoined(values);
-                public void write<T>(IEnumerable<T> values) => WriteJoined(values);
-                public void write<T>(T value) => WriteValue(value);
-
-                public void writeln()
-                    => _writer.WriteLine();
-
-                public void writeln(int value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(long value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(double value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(decimal value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(bool value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(char value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(string? value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln<T1, T2>((T1, T2) value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln<T1, T2, T3>((T1, T2, T3) value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(int[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(long[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(double[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(decimal[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(bool[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(char[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln(string[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln<T>(T[] values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln<T>(IEnumerable<T> values)
-                {
-                    write(values);
-                    _writer.WriteLine();
-                }
-
-                public void writeln<T>(T value)
-                {
-                    write(value);
-                    _writer.WriteLine();
-                }
-
-                public void lines<T>(IEnumerable<T> values)
-                {
-                    foreach (T value in values)
-                    {
-                        writeln(value);
-                    }
-                }
-
-                public void grid<T>(IEnumerable<IEnumerable<T>> grid)
-                {
-                    foreach (IEnumerable<T> row in grid)
-                    {
-                        writeln(row);
-                    }
-                }
-
-                public void join<T>(string separator, IEnumerable<T> values)
-                {
-                    bool first = true;
-                    foreach (T value in values)
-                    {
-                        if (!first) _writer.Write(separator);
-                        first = false;
-                        WriteValue(value);
-                    }
-                }
-
-                public void join<T>(char separator, IEnumerable<T> values)
-                {
-                    bool first = true;
-                    foreach (T value in values)
-                    {
-                        if (!first) _writer.Write(separator);
-                        first = false;
-                        WriteValue(value);
-                    }
-                }
-
-                private void WriteJoined<T>(IEnumerable<T> values)
-                {
-                    bool first = true;
-                    foreach (T value in values)
-                    {
-                        if (!first) _writer.Write(' ');
-                        first = false;
-                        WriteValue(value);
-                    }
-                }
-
-                private void WriteValue(int value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                private void WriteValue(long value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                private void WriteValue(double value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                private void WriteValue(decimal value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));
-                private void WriteValue(bool value) => _writer.Write(value ? "True" : "False");
-                private void WriteValue(char value) => _writer.Write(value);
-                private void WriteValue(string? value) => _writer.Write(value ?? string.Empty);
-
-                private void WriteValue<T1, T2>((T1, T2) value)
-                {
-                    WriteValue(value.Item1);
-                    _writer.Write(' ');
-                    WriteValue(value.Item2);
-                }
-
-                private void WriteValue<T1, T2, T3>((T1, T2, T3) value)
-                {
-                    WriteValue(value.Item1);
-                    _writer.Write(' ');
-                    WriteValue(value.Item2);
-                    _writer.Write(' ');
-                    WriteValue(value.Item3);
-                }
-
-                private void WriteValue<T>(T value)
-                    => _writer.Write(__PscpRender.format(value));
-            }
-            """);
-    }
-
-    private void EmitDirectStdoutHelpers()
+    private static string StripRuntimeLiterals(string text)
     {
         System.Text.StringBuilder builder = new();
-        builder.AppendLine("public sealed class __PscpStdout");
-        builder.AppendLine("{");
-        builder.AppendLine("    private readonly StreamWriter _writer = new(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };");
-        builder.AppendLine();
-        // Route Console.Write* through the same buffer so pass-through Console output stays in order.
-        builder.AppendLine("    public __PscpStdout() => Console.SetOut(_writer);");
-        builder.AppendLine();
-        builder.AppendLine("    public void flush() => _writer.Flush();");
-        builder.AppendLine();
-
-        foreach (string kind in _stdoutDirectScalarWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            builder.AppendLine(kind switch
-            {
-                "int" => "    public void write(int value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));",
-                "long" => "    public void write(long value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));",
-                "double" => "    public void write(double value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));",
-                "decimal" => "    public void write(decimal value) => _writer.Write(value.ToString(CultureInfo.InvariantCulture));",
-                "bool" => "    public void write(bool value) => _writer.Write(value ? \"True\" : \"False\");",
-                "char" => "    public void write(char value) => _writer.Write(value);",
-                "string" => "    public void write(string? value) => _writer.Write(value ?? string.Empty);",
-                _ => string.Empty,
-            });
-        }
-
-        foreach (string kind in _stdoutDirectScalarWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            AppendStdoutMember(
-                builder,
-                kind switch
-                {
-                    "int" => """
-                        public void writeln(int value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "long" => """
-                        public void writeln(long value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "double" => """
-                        public void writeln(double value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "decimal" => """
-                        public void writeln(decimal value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "bool" => """
-                        public void writeln(bool value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "char" => """
-                        public void writeln(char value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "string" => """
-                        public void writeln(string? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    _ => string.Empty,
-                });
-        }
-
-        foreach (string kind in _stdoutDirectNullableScalarWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            AppendStdoutMember(
-                builder,
-                kind switch
-                {
-                    "int" => """
-                        public void write(int? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    "long" => """
-                        public void write(long? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    "double" => """
-                        public void write(double? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    "decimal" => """
-                        public void write(decimal? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    "bool" => """
-                        public void write(bool? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    "char" => """
-                        public void write(char? value)
-                        {
-                            if (value.HasValue) write(value.GetValueOrDefault());
-                        }
-                        """,
-                    _ => string.Empty,
-                });
-        }
-
-        foreach (string kind in _stdoutDirectNullableScalarWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            AppendStdoutMember(
-                builder,
-                kind switch
-                {
-                    "int" => """
-                        public void writeln(int? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "long" => """
-                        public void writeln(long? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "double" => """
-                        public void writeln(double? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "decimal" => """
-                        public void writeln(decimal? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "bool" => """
-                        public void writeln(bool? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "char" => """
-                        public void writeln(char? value)
-                        {
-                            write(value);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    _ => string.Empty,
-                });
-        }
-
-        if (_stdoutNeedsBlankLine)
-        {
-            builder.AppendLine("    public void writeln() => _writer.WriteLine();");
-        }
-
-        foreach (string kind in _stdoutDirectArrayWriteKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            AppendStdoutMember(
-                builder,
-                kind switch
-                {
-                    "int" => """
-                        public void write(int[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "long" => """
-                        public void write(long[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "double" => """
-                        public void write(double[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "decimal" => """
-                        public void write(decimal[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "bool" => """
-                        public void write(bool[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "char" => """
-                        public void write(char[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    "string" => """
-                        public void write(string[] values)
-                        {
-                            for (int i = 0; i < values.Length; i++)
-                            {
-                                if (i > 0) _writer.Write(' ');
-                                write(values[i]);
-                            }
-                        }
-                        """,
-                    _ => string.Empty,
-                });
-        }
-
-        foreach (string kind in _stdoutDirectArrayWritelnKinds.OrderBy(static value => value, StringComparer.Ordinal))
-        {
-            AppendStdoutMember(
-                builder,
-                kind switch
-                {
-                    "int" => """
-                        public void writeln(int[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "long" => """
-                        public void writeln(long[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "double" => """
-                        public void writeln(double[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "decimal" => """
-                        public void writeln(decimal[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "bool" => """
-                        public void writeln(bool[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "char" => """
-                        public void writeln(char[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    "string" => """
-                        public void writeln(string[] values)
-                        {
-                            write(values);
-                            _writer.WriteLine();
-                        }
-                        """,
-                    _ => string.Empty,
-                });
-        }
-
-        builder.AppendLine("}");
-        WriteRuntimeBlock(builder.ToString());
-    }
-
-    private static void AppendStdoutMember(System.Text.StringBuilder builder, string member)
-    {
-        if (string.IsNullOrWhiteSpace(member))
-        {
-            return;
-        }
-
-        foreach (string line in member.Replace("\r", string.Empty).TrimEnd('\n').Split('\n'))
-        {
-            if (line.Length == 0)
-            {
-                builder.AppendLine();
-                continue;
-            }
-
-            builder.Append("    ");
-            builder.AppendLine(line);
-        }
-    }
-
-    private void EmitRenderHelpers()
-    {
-        WriteRuntimeBlock(
-            """
-            public static class __PscpRender
-            {
-                public static string format<T>(T value)
-                {
-                    return value switch
-                    {
-                        null => string.Empty,
-                        string text => text,
-                        bool boolean => boolean ? "True" : "False",
-                        char ch => ch.ToString(),
-                        IEnumerable<int> ints => JoinFormattable(ints),
-                        IEnumerable<long> longs => JoinFormattable(longs),
-                        IEnumerable<double> doubles => JoinFormattable(doubles),
-                        System.Runtime.CompilerServices.ITuple tuple => FormatTuple(tuple),
-                        System.Collections.IEnumerable enumerable when value is not string => FormatEnumerable(enumerable),
-                        IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture) ?? string.Empty,
-                        _ => value?.ToString() ?? string.Empty,
-                    };
-                }
-
-                // Typed fast path for the common numeric collections (including rows of jagged grids): no per-element boxing.
-                private static string JoinFormattable<TItem>(IEnumerable<TItem> items) where TItem : IFormattable
-                {
-                    StringBuilder builder = new();
-                    bool first = true;
-                    foreach (TItem item in items)
-                    {
-                        if (!first) builder.Append(' ');
-                        first = false;
-                        builder.Append(item.ToString(null, CultureInfo.InvariantCulture));
-                    }
-
-                    return builder.ToString();
-                }
-
-                private static string FormatTuple(System.Runtime.CompilerServices.ITuple tuple)
-                {
-                    StringBuilder builder = new();
-                    for (int i = 0; i < tuple.Length; i++)
-                    {
-                        if (i > 0) builder.Append(' ');
-                        builder.Append(format(tuple[i]));
-                    }
-
-                    return builder.ToString();
-                }
-
-                private static string FormatEnumerable(System.Collections.IEnumerable enumerable)
-                {
-                    StringBuilder builder = new();
-                    bool first = true;
-                    foreach (object? item in enumerable)
-                    {
-                        if (!first) builder.Append(' ');
-                        first = false;
-                        builder.Append(format(item));
-                    }
-
-                    return builder.ToString();
-                }
-            }
-            """);
-    }
-
-    private void WriteRuntimeBlock(string text)
-    {
-        string formatted = _options.Pretty
-            ? FormatRuntimeBlockPretty(text)
-            : FormatRuntimeBlockCompact(text);
-
-        foreach (string line in formatted.Replace("\r", string.Empty).Split('\n'))
-        {
-            _writer.WriteLine(line);
-        }
-    }
-
-    private static string FormatRuntimeBlockPretty(string text)
-    {
-        string[] lines = NormalizeRuntimeBlockLines(text);
-        List<string> output = [];
-
-        foreach (string rawLine in lines)
-        {
-            string line = rawLine.TrimEnd();
-            string trimmed = line.Trim();
-            if (trimmed.Length == 0)
-            {
-                if (output.Count > 0 && output[^1].Length > 0)
-                {
-                    output.Add(string.Empty);
-                }
-
-                continue;
-            }
-
-            if (trimmed == "{" && TryAttachOpeningBrace(output))
-            {
-                continue;
-            }
-
-            output.Add(line);
-        }
-
-        while (output.Count > 0 && output[0].Length == 0)
-        {
-            output.RemoveAt(0);
-        }
-
-        while (output.Count > 0 && output[^1].Length == 0)
-        {
-            output.RemoveAt(output.Count - 1);
-        }
-
-        return string.Join("\n", output);
-    }
-
-    private static bool TryAttachOpeningBrace(List<string> output)
-    {
-        for (int i = output.Count - 1; i >= 0; i--)
-        {
-            string previous = output[i].TrimEnd();
-            if (previous.Length == 0)
-            {
-                continue;
-            }
-
-            string trimmed = previous.TrimStart();
-            if (trimmed.StartsWith("#", StringComparison.Ordinal)
-                || previous.EndsWith("{", StringComparison.Ordinal)
-                || previous.EndsWith(";", StringComparison.Ordinal)
-                || previous.EndsWith(",", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            output[i] = previous + " {";
-            return true;
-        }
-
-        return false;
-    }
-
-    private static string FormatRuntimeBlockCompact(string text)
-    {
-        string[] lines = NormalizeRuntimeBlockLines(text);
-        System.Text.StringBuilder output = new();
-        System.Text.StringBuilder codeLine = new();
-
-        void FlushCodeLine()
-        {
-            if (codeLine.Length == 0)
-            {
-                return;
-            }
-
-            output.AppendLine(codeLine.ToString());
-            codeLine.Clear();
-        }
-
-        foreach (string rawLine in lines)
-        {
-            string trimmed = rawLine.Trim();
-            if (trimmed.Length == 0)
-            {
-                continue;
-            }
-
-            if (IsPreprocessorDirective(trimmed))
-            {
-                FlushCodeLine();
-                output.AppendLine(trimmed);
-                continue;
-            }
-
-            string segment = MinifyRuntimeCodeLine(trimmed);
-            if (segment.Length == 0)
-            {
-                continue;
-            }
-
-            if (NeedsMinifiedSpace(codeLine, segment[0]))
-            {
-                codeLine.Append(' ');
-            }
-
-            codeLine.Append(segment);
-        }
-
-        FlushCodeLine();
-        return output.ToString().TrimEnd('\n');
-    }
-
-    private static string[] NormalizeRuntimeBlockLines(string text)
-        => text.Replace("\r", string.Empty).Trim('\n').Split('\n');
-
-    private static bool IsPreprocessorDirective(string trimmedLine)
-        => trimmedLine.StartsWith("#", StringComparison.Ordinal);
-
-    private static string MinifyRuntimeCodeLine(string line)
-    {
-        System.Text.StringBuilder builder = new(line.Length);
-        bool pendingSpace = false;
         bool inString = false;
-        bool inVerbatimString = false;
         bool inChar = false;
-        bool escaped = false;
-
-        for (int i = 0; i < line.Length; i++)
+        for (int i = 0; i < text.Length; i++)
         {
-            char ch = line[i];
-
-            if (inString)
+            char ch = text[i];
+            if (inString || inChar)
             {
-                builder.Append(ch);
-                if (inVerbatimString)
+                if (ch == '\\')
                 {
-                    if (ch == '"' && i + 1 < line.Length && line[i + 1] == '"')
-                    {
-                        builder.Append(line[++i]);
-                    }
-                    else if (ch == '"')
-                    {
-                        inString = false;
-                        inVerbatimString = false;
-                    }
+                    i++;
                 }
-                else if (escaped)
-                {
-                    escaped = false;
-                }
-                else if (ch == '\\')
-                {
-                    escaped = true;
-                }
-                else if (ch == '"')
+                else if ((inString && ch == '"') || (inChar && ch == '\''))
                 {
                     inString = false;
-                }
-
-                continue;
-            }
-
-            if (inChar)
-            {
-                builder.Append(ch);
-                if (escaped)
-                {
-                    escaped = false;
-                }
-                else if (ch == '\\')
-                {
-                    escaped = true;
-                }
-                else if (ch == '\'')
-                {
                     inChar = false;
                 }
 
                 continue;
             }
 
-            if (ch == '/' && i + 1 < line.Length && line[i + 1] == '/')
-            {
-                break;
-            }
-
-            if (char.IsWhiteSpace(ch))
-            {
-                pendingSpace = builder.Length > 0;
-                continue;
-            }
-
-            if (pendingSpace && NeedsMinifiedSpace(builder, ch))
-            {
-                builder.Append(' ');
-            }
-
-            pendingSpace = false;
-            builder.Append(ch);
-
             if (ch == '"')
             {
                 inString = true;
-                inVerbatimString = builder.Length >= 2 && builder[^2] == '@';
-                escaped = false;
+                continue;
             }
-            else if (ch == '\'')
+
+            if (ch == '\'')
             {
                 inChar = true;
-                escaped = false;
+                continue;
             }
+
+            if (ch == '/' && i + 1 < text.Length && text[i + 1] == '/')
+            {
+                while (i < text.Length && text[i] != '\n')
+                {
+                    i++;
+                }
+
+                builder.Append('\n');
+                continue;
+            }
+
+            builder.Append(ch);
         }
 
         return builder.ToString();
     }
 
-    private static bool NeedsMinifiedSpace(char left, char right)
-        => IsIdentifierPart(left) && IsIdentifierPart(right)
-            || IsIdentifierPart(right) && left is '>' or ']' or ')' or '?';
-
-    private static bool NeedsMinifiedSpace(System.Text.StringBuilder builder, char right)
+    // `public static T[] sort<T>(...)` → `sort`; `private int _length;` → `_length`; `public Foo()` → `Foo`.
+    private static string GetRuntimeMemberName(string signature)
     {
-        if (builder.Length == 0)
+        if (signature.StartsWith("//", StringComparison.Ordinal) || signature.StartsWith("#", StringComparison.Ordinal) || signature.StartsWith("[", StringComparison.Ordinal))
         {
-            return false;
+            return string.Empty;
         }
 
-        char left = builder[^1];
-        if (left == '>' && builder.Length >= 2 && builder[^2] == '=')
+        int paren = signature.IndexOf('(');
+        int equals = signature.IndexOf(" = ", StringComparison.Ordinal);
+        int semicolon = signature.IndexOf(';');
+        int end = paren >= 0 && (equals < 0 || paren < equals) ? paren : equals >= 0 ? equals : semicolon >= 0 ? semicolon : signature.Length;
+        string beforeEnd = signature[..end].TrimEnd();
+        int genericDepth = 0;
+        int nameEnd = beforeEnd.Length;
+        for (int i = beforeEnd.Length - 1; i >= 0; i--)
         {
-            return false;
+            char ch = beforeEnd[i];
+            if (ch == '>')
+            {
+                genericDepth++;
+            }
+            else if (ch == '<')
+            {
+                genericDepth--;
+                if (genericDepth == 0)
+                {
+                    nameEnd = i;
+                }
+            }
+            else if (genericDepth == 0 && !(char.IsLetterOrDigit(ch) || ch == '_'))
+            {
+                return beforeEnd[(i + 1)..nameEnd];
+            }
         }
 
-        if (left == '?' && builder.Length >= 2 && builder[^2] == '?')
-        {
-            return false;
-        }
-
-        return NeedsMinifiedSpace(left, right);
+        return beforeEnd[..nameEnd];
     }
 
-    private static bool IsIdentifierPart(char ch)
-        => char.IsLetterOrDigit(ch) || ch == '_' || ch == '@';
+    private const string ArrayHelpersTemplate =
+        """
+        public static class __PscpArray
+        {
+            public static T[] zero<T>(int n) => new T[n];
 
-    private static bool NeedsSequenceHelpers(string programText)
-        => GetRequiredSequenceHelperNames(programText).Count > 0;
+            public static T[] fillNew<T>(int n) where T : new()
+            {
+                T[] result = new T[n];
+                for (int i = 0; i < n; i++)
+                {
+                    result[i] = new T();
+                }
+
+                return result;
+            }
+
+            public static T[][] jagged<T>(int n, int m)
+            {
+                T[][] result = new T[n][];
+                for (int i = 0; i < n; i++)
+                {
+                    result[i] = new T[m];
+                }
+
+                return result;
+            }
+        }
+        """;
+
+    private const string CollectionHelpersTemplate =
+        """
+        public static class __PscpCollection
+        {
+            public static void enqueue<TElement, TPriority>(PriorityQueue<TElement, TPriority> queue, (TElement, TPriority) entry) => queue.Enqueue(entry.Item1, entry.Item2);
+            public static bool tryAdd<TKey, TValue>(Dictionary<TKey, TValue> dictionary, (TKey, TValue) entry) where TKey : notnull => dictionary.TryAdd(entry.Item1, entry.Item2);
+        }
+        """;
+
+    private const string ThunkHelpersTemplate =
+        """
+        public static class __PscpThunk
+        {
+            public static T run<T>(Func<T> thunk) => thunk();
+        }
+        """;
+
+    // PSCP default order (spec §25.1): strings compare ordinally, tuples element by element, other types use
+    // `Comparer<T>.Default` (numbers, `char`, `bool`, `IComparable<T>` including `operator<=>`).
+    private const string OrderTemplate =
+        """
+        public static class __PscpOrder<T>
+        {
+            public static readonly IComparer<T> Asc = Create();
+            public static readonly IComparer<T> Desc = Comparer<T>.Create((left, right) => Asc.Compare(right, left));
+
+            private static IComparer<T> Create()
+            {
+                if (typeof(T) == typeof(string)) return (IComparer<T>)(object)StringComparer.Ordinal;
+                if (__PscpOrderCore.NeedsOrdinal(typeof(T))) return Comparer<T>.Create(static (left, right) => __PscpOrderCore.Instance.Compare(left, right));
+                return Comparer<T>.Default;
+            }
+        }
+
+        public sealed class __PscpOrderCore : System.Collections.IComparer
+        {
+            public static readonly __PscpOrderCore Instance = new();
+
+            public static bool NeedsOrdinal(Type type)
+            {
+                if (type == typeof(string)) return true;
+                Type? underlying = Nullable.GetUnderlyingType(type);
+                if (underlying is not null) return NeedsOrdinal(underlying);
+                return type.IsGenericType
+                    && (type.FullName ?? string.Empty).StartsWith("System.ValueTuple`", StringComparison.Ordinal)
+                    && Array.Exists(type.GetGenericArguments(), NeedsOrdinal);
+            }
+
+            public int Compare(object? left, object? right)
+            {
+                if (left is string leftText && right is string rightText) return string.CompareOrdinal(leftText, rightText);
+                if (left is System.Collections.IStructuralComparable structural && right is not null) return structural.CompareTo(right, this);
+                return System.Collections.Comparer.Default.Compare(left, right);
+            }
+        }
+        """;
 }

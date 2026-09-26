@@ -9,68 +9,46 @@ internal sealed partial class PscpAnalyzer
 
     public PscpAnalysisResult Analyze(DocumentSnapshot snapshot)
     {
-        Lexer lexer = new(snapshot.Text);
-        IReadOnlyList<Token> tokens = lexer.Lex();
-        Parser parser = new(tokens);
-        PscpProgram program = parser.ParseProgram();
-
-        AnalyzerState state = new(snapshot, tokens);
-        foreach (Diagnostic diagnostic in lexer.Diagnostics)
+        // Diagnostics come from the same front end as `pscp check`, so the editor and the CLI agree on every
+        // judgement (guide §2). The token walk below only builds symbols, references and classifications.
+        PscpFrontEndResult frontEnd = RunFrontEnd(snapshot.Text);
+        AnalyzerState state = new(snapshot, frontEnd.Tokens);
+        foreach (Diagnostic diagnostic in frontEnd.Diagnostics)
         {
-            state.AddDiagnostic("PSCP1000", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
-        }
-
-        foreach (Diagnostic diagnostic in parser.Diagnostics)
-        {
-            state.AddDiagnostic("PSCP1001", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
+            state.AddDiagnostic(diagnostic.EffectiveCode, diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
         }
 
         Scope globalScope = state.CreateScope(null, 0, snapshot.Text.Length);
         InitializeIntrinsics(state, globalScope);
-        AnalyzeStatements(state, globalScope, 0, tokens.Count - 1, null, topLevel: true, loopDepth: 0);
-        if (!lexer.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
-            && !parser.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
-        {
-            AddTranspilerDiagnostics(state, tokens, program);
-        }
-
+        AnalyzeStatements(state, globalScope, 0, frontEnd.Tokens.Count - 1, null, topLevel: true, loopDepth: 0);
         AddDefaultTokenClassifications(state);
         return state.Build();
     }
 
-    // Reuses the already parsed program for the transpiler's semantic pass (no C# emission on every edit).
-    // Transpiler errors are reported unless the editor analysis already flagged that range, so `pscp check`
-    // and the editor agree on what fails to compile.
-    private static void AddTranspilerDiagnostics(AnalyzerState state, IReadOnlyList<Token> tokens, PscpProgram program)
+    // An internal failure of the binder or the semantic pass must not take the editor features down with it:
+    // the lexer and parser results are still reported.
+    private static PscpFrontEndResult RunFrontEnd(string text)
     {
-        IReadOnlyList<Diagnostic> diagnostics;
         try
         {
-            diagnostics = PscpTranspiler.AnalyzeSemantics(tokens, program);
+            return PscpTranspiler.Analyze(text);
         }
-        catch
+        catch (Exception)
         {
-            return;
-        }
-
-        foreach (Diagnostic diagnostic in diagnostics)
-        {
-            if (diagnostic.Severity == DiagnosticSeverity.Error)
-            {
-                if (!state.HasDiagnosticOverlapping(diagnostic.Span))
-                {
-                    state.AddDiagnostic("PSCP3002", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Error);
-                }
-
-                continue;
-            }
-
-            state.AddDiagnostic("PSCP3001", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Warning);
+            Lexer lexer = new(text);
+            IReadOnlyList<Token> tokens = lexer.Lex();
+            Parser parser = new(tokens);
+            PscpProgram program = parser.ParseProgram();
+            return new PscpFrontEndResult(tokens, program, parser.Spans, [.. lexer.Diagnostics, .. parser.Diagnostics]);
         }
     }
 
-    private static ServerDiagnosticSeverity ToServerSeverity(DiagnosticSeverity severity)
-        => severity == DiagnosticSeverity.Warning ? ServerDiagnosticSeverity.Warning : ServerDiagnosticSeverity.Error;
+    private static ServerDiagnosticSeverity ToServerSeverity(DiagnosticSeverity severity) => severity switch
+    {
+        DiagnosticSeverity.Error => ServerDiagnosticSeverity.Error,
+        DiagnosticSeverity.Warning => ServerDiagnosticSeverity.Warning,
+        _ => ServerDiagnosticSeverity.Information,
+    };
 
     private void InitializeIntrinsics(AnalyzerState state, Scope globalScope)
     {
@@ -116,11 +94,6 @@ internal sealed partial class PscpAnalyzer
                 }
                 case TokenKind.Break:
                 case TokenKind.Continue:
-                    if (loopDepth == 0)
-                    {
-                        state.AddDiagnostic("PSCP2008", $"`{token.Text}` is valid only inside a loop.", token.Span, ServerDiagnosticSeverity.Error);
-                    }
-
                     state.MarkToken(index, "keyword");
                     index = FindStatementEnd(state.Tokens, index, endExclusive);
                     break;
@@ -865,31 +838,6 @@ internal sealed partial class PscpAnalyzer
         }
 
         state.AddReference(symbol!, tokenIndex, isDeclaration: false, isWrite: true);
-        if (!symbol!.IsMutable
-            && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic
-            && !IsKnownCollectionMutationAssignment(symbol.TypeDisplay, assignmentKind))
-        {
-            state.AddDiagnostic("PSCP2007", $"Cannot assign to immutable binding `{symbol.Name}`.", state.Tokens[tokenIndex].Span, ServerDiagnosticSeverity.Error, symbol.Id);
-        }
-    }
-
-    private static bool IsKnownCollectionMutationAssignment(string? typeDisplay, TokenKind assignmentKind)
-    {
-        if (assignmentKind is not (TokenKind.PlusEqual or TokenKind.MinusEqual)
-            || string.IsNullOrWhiteSpace(typeDisplay))
-        {
-            return false;
-        }
-
-        string normalized = PscpExternalMetadata.NormalizeTypeReceiver(typeDisplay!);
-        return normalized is "List"
-            or "LinkedList"
-            or "Queue"
-            or "Stack"
-            or "HashSet"
-            or "SortedSet"
-            or "Dictionary"
-            or "PriorityQueue";
     }
 
     private string? InferLoopVariableType(AnalyzerState state, Scope scope, int start, int endExclusive)

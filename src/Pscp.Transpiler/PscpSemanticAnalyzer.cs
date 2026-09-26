@@ -36,17 +36,56 @@ internal sealed class SemanticAnalysisResult
 
     public bool IsIntrinsicCall(CallExpression call)
         => _intrinsicCalls.Contains(call);
+
+    // Top-level `let` constants that code inside type declarations reads; they become class-level constants.
+    public IReadOnlySet<string> ConstantsUsedByTypes { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+
+    // Fields declared immutable that are nevertheless assigned outside a constructor (`Type.field`).
+    public IReadOnlySet<string> MutatedImmutableFields { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+
+    // Spec §10.5: in tail position every expression statement returns its value except a plain assignment,
+    // compound assignment or increment. Known data-structure rewrites are calls: `set += x` (HashSet, SortedSet,
+    // Dictionary) and `--q` (Stack, Queue, PriorityQueue) return their value.
+    public bool IsReturnEligible(Expression expression)
+        => expression switch
+        {
+            AssignmentExpression assignment => assignment.IsExplicitValueAssignment
+                || (assignment.Operator is AssignmentOperator.AddAssign or AssignmentOperator.SubtractAssign
+                    && PscpSemanticAnalyzer.IsValueReturningSetLike(GetExpressionType(assignment.Target))),
+            PrefixExpression { Operator: PostfixOperator.Decrement } prefix => PscpSemanticAnalyzer.IsPoppable(GetExpressionType(prefix.Operand)),
+            PrefixExpression or PostfixExpression => false,
+            _ => true,
+        };
 }
 
 internal static class PscpSemanticAnalyzer
 {
-    public static SemanticAnalysisResult Analyze(IReadOnlyList<Token> tokens, PscpProgram program)
+    public static SemanticAnalysisResult Analyze(PscpProgram program, SyntaxSpans spans, IReadOnlySet<string>? constantsUsedByTypes = null)
     {
-        Analyzer analyzer = new(tokens);
+        Analyzer analyzer = new(spans);
         analyzer.Predeclare(program);
         analyzer.Analyze(program);
-        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls, analyzer.ReassignedImmutableNames, analyzer.MutatedNames);
+        return new SemanticAnalysisResult(analyzer.Diagnostics, analyzer.ExpressionTypes, analyzer.IntrinsicCalls, analyzer.ReassignedImmutableNames, analyzer.MutatedNames)
+        {
+            ConstantsUsedByTypes = constantsUsedByTypes ?? new HashSet<string>(StringComparer.Ordinal),
+            MutatedImmutableFields = analyzer.MutatedImmutableFields,
+        };
     }
+
+    internal static bool IsValueReturningSetLike(TypeSyntax? type)
+        => type is NamedTypeSyntax { Name: "HashSet" or "System.Collections.Generic.HashSet" or "SortedSet" or "System.Collections.Generic.SortedSet" or "Dictionary" or "System.Collections.Generic.Dictionary" };
+
+    internal static bool IsPoppable(TypeSyntax? type)
+        => type is NamedTypeSyntax { Name: "Stack" or "System.Collections.Generic.Stack" or "Queue" or "System.Collections.Generic.Queue" or "PriorityQueue" or "System.Collections.Generic.PriorityQueue" };
+
+    // Names under which the intrinsic receivers appear after binding, and how diagnostics show them.
+    internal static string DisplayName(string name)
+        => name switch
+        {
+            PscpBinder.StdinName => "stdin",
+            PscpBinder.StdoutName => "stdout",
+            _ => name,
+        };
 
     private enum SymbolKind
     {
@@ -58,7 +97,9 @@ internal static class PscpSemanticAnalyzer
         Type,
     }
 
-    private sealed record Symbol(SymbolKind Kind, TypeSyntax? Type, bool IsMutable, TypeInfo? TypeInfo = null);
+    // `IsImmutableField` marks a type field declared without `mut`/`var` (spec §28.2): assignments outside a
+    // constructor are reported, and the field is then generated as an ordinary field.
+    private sealed record Symbol(SymbolKind Kind, TypeSyntax? Type, bool IsMutable, TypeInfo? TypeInfo = null, bool IsImmutableField = false, string? OwnerType = null);
 
     private sealed class TypeInfo
     {
@@ -72,6 +113,8 @@ internal static class PscpSemanticAnalyzer
 
         public string Name { get; }
         public bool IsValueType { get; }
+        public bool HasParameterlessConstructor { get; set; } = true;
+        public bool HasOrdering { get; set; }
         public Dictionary<string, Symbol> Members { get; }
         public Dictionary<string, TypeInfo> NestedTypes { get; }
     }
@@ -105,68 +148,18 @@ internal static class PscpSemanticAnalyzer
         }
     }
 
-    private sealed class TokenTracker
-    {
-        private readonly IReadOnlyList<Token> _tokens;
-        private int _index;
-
-        public TokenTracker(IReadOnlyList<Token> tokens) => _tokens = tokens;
-
-        // First `name++`, `++name`, `ref name` or `out name` occurrence in the source.
-        public TextSpan FindMutationSite(string name)
-        {
-            for (int i = 0; i < _tokens.Count; i++)
-            {
-                if (_tokens[i].Kind != TokenKind.Identifier || _tokens[i].Text != name)
-                {
-                    continue;
-                }
-
-                TokenKind previous = i > 0 ? _tokens[i - 1].Kind : TokenKind.EndOfFile;
-                TokenKind next = i + 1 < _tokens.Count ? _tokens[i + 1].Kind : TokenKind.EndOfFile;
-                if (next is TokenKind.PlusPlus or TokenKind.MinusMinus
-                    || previous is TokenKind.PlusPlus or TokenKind.MinusMinus or TokenKind.Ref or TokenKind.Out)
-                {
-                    return _tokens[i].Span;
-                }
-            }
-
-            return default;
-        }
-
-        public TextSpan Take(string name)
-        {
-            name = PscpIntrinsicCatalog.StripGenericSuffix(name);
-            for (int i = _index; i < _tokens.Count; i++)
-            {
-                if (_tokens[i].Kind == TokenKind.Identifier && _tokens[i].Text == name)
-                {
-                    _index = i + 1;
-                    return _tokens[i].Span;
-                }
-            }
-
-            for (int i = 0; i < _tokens.Count; i++)
-            {
-                if (_tokens[i].Kind == TokenKind.Identifier && _tokens[i].Text == name)
-                {
-                    return _tokens[i].Span;
-                }
-            }
-
-            return default;
-        }
-    }
-
     private sealed class Analyzer
     {
-        private readonly TokenTracker _tracker;
+        private readonly SyntaxSpans _spans;
         private readonly Scope _global = new(null);
         private readonly Dictionary<string, TypeInfo> _types = new(StringComparer.Ordinal);
+        private readonly Stack<string> _typeStack = new();
+        private readonly HashSet<AssignmentExpression> _statementAssignments = new(ReferenceEqualityComparer.Instance);
+        private bool _inConstructor;
 
-        public Analyzer(IReadOnlyList<Token> tokens)
+        public Analyzer(SyntaxSpans spans)
         {
-            _tracker = new(tokens);
+            _spans = spans;
             Diagnostics = [];
             ExpressionTypes = new Dictionary<Expression, TypeSyntax?>(ReferenceEqualityComparer.Instance);
             IntrinsicCalls = new HashSet<CallExpression>(ReferenceEqualityComparer.Instance);
@@ -176,8 +169,8 @@ internal static class PscpSemanticAnalyzer
                 _global.DeclareType(builtin, new TypeInfo(builtin, isValueType: builtin is "int" or "long" or "double" or "decimal" or "bool" or "char"));
             }
 
-            _global.DeclareValue("stdin", new Symbol(SymbolKind.Intrinsic, TypeName("stdin"), false));
-            _global.DeclareValue("stdout", new Symbol(SymbolKind.Intrinsic, TypeName("stdout"), false));
+            _global.DeclareValue(PscpBinder.StdinName, new Symbol(SymbolKind.Intrinsic, TypeName("stdin"), false));
+            _global.DeclareValue(PscpBinder.StdoutName, new Symbol(SymbolKind.Intrinsic, TypeName("stdout"), false));
             _global.DeclareValue("Array", new Symbol(SymbolKind.Intrinsic, TypeName("Array"), false));
             foreach (string intrinsic in PscpIntrinsicCatalog.IntrinsicCallNames)
             {
@@ -193,6 +186,8 @@ internal static class PscpSemanticAnalyzer
 
         public HashSet<string> MutatedNames { get; } = new(StringComparer.Ordinal);
 
+        public HashSet<string> MutatedImmutableFields { get; } = new(StringComparer.Ordinal);
+
         public void Predeclare(PscpProgram program)
         {
             foreach (TypeDeclaration type in program.Types) CollectType(type, null);
@@ -200,6 +195,7 @@ internal static class PscpSemanticAnalyzer
             foreach (FunctionDeclaration function in program.Functions)
             {
                 _global.DeclareValue(function.Name, new Symbol(SymbolKind.Function, Normalize(function.ReturnType), false));
+                _functionArity[function.Name] = function.Parameters.Count;
             }
 
             foreach (DeclarationStatement declaration in program.GlobalStatements.OfType<DeclarationStatement>())
@@ -213,13 +209,19 @@ internal static class PscpSemanticAnalyzer
             string fullName = parent is null ? declaration.Name : parent.Name + "." + declaration.Name;
             if (_types.ContainsKey(fullName)) return;
             TypeInfo info = new(fullName, IsValueTypeDeclarationHeader(declaration.HeaderText));
+            MethodMember[] constructors = declaration.Members.OfType<MethodMember>().Where(method => method.IsConstructor).ToArray();
+            bool positional = declaration.HeaderText.IndexOf('(') is int open && open >= 0 && declaration.HeaderText.IndexOf(')', open) > open + 1;
+            info.HasParameterlessConstructor = info.IsValueType
+                || (constructors.Length == 0 ? !positional : constructors.Any(constructor => constructor.Parameters.Count == 0));
+            info.HasOrdering = declaration.Members.Any(member => member is OrderingShorthandMember)
+                || declaration.HeaderText.Contains("IComparable", StringComparison.Ordinal);
             _types[fullName] = info;
             _types.TryAdd(declaration.Name, info);
             if (parent is not null) parent.NestedTypes.TryAdd(declaration.Name, info);
 
             foreach ((string primaryMember, TypeSyntax? primaryType) in GetPrimaryConstructorMembers(declaration))
             {
-                info.Members.TryAdd(primaryMember, new Symbol(SymbolKind.Field, Normalize(primaryType), true));
+                info.Members.TryAdd(primaryMember, new Symbol(SymbolKind.Field, Normalize(primaryType), true, OwnerType: fullName));
             }
 
             foreach (TypeMember member in declaration.Members)
@@ -229,7 +231,8 @@ internal static class PscpSemanticAnalyzer
                     case FieldMember field:
                         foreach ((string name, TypeSyntax? type) in EnumerateNamedBindings(field.Declaration))
                         {
-                            info.Members[name] = new Symbol(SymbolKind.Field, type, true);
+                            TypeSyntax? fieldType = type ?? (field.Declaration.Initializer is LiteralExpression literal ? LiteralType(literal) : null);
+                            info.Members[name] = new Symbol(SymbolKind.Field, fieldType, field.Declaration.Mutability == MutabilityKind.Mutable, IsImmutableField: field.Declaration.Mutability == MutabilityKind.Immutable, OwnerType: fullName);
                         }
                         break;
                     case PropertyMember property:
@@ -253,11 +256,91 @@ internal static class PscpSemanticAnalyzer
             foreach (TypeDeclaration type in program.Types) AnalyzeType(type, _global);
             foreach (FunctionDeclaration function in program.Functions) AnalyzeFunction(function, _global);
             AnalyzeStatements(program.GlobalStatements, _global);
+
+            // A statement in tail position returns its value, so it is only known to be discarded once the
+            // enclosing function has been checked.
+            foreach ((ExpressionStatement statement, string code, string message, TextSpan span) in _discardedValueWarnings)
+            {
+                if (!_tailStatements.Contains(statement))
+                {
+                    Warning(code, message, span);
+                }
+            }
+        }
+
+        private readonly HashSet<Statement> _tailStatements = new(ReferenceEqualityComparer.Instance);
+        private readonly List<(ExpressionStatement Statement, string Code, string Message, TextSpan Span)> _discardedValueWarnings = [];
+
+        // Expression statements whose value is the result of the enclosing function or value block (spec §10.5).
+        private void MarkTailStatements(Statement? statement)
+        {
+            switch (statement)
+            {
+                case ExpressionStatement:
+                    _tailStatements.Add(statement);
+                    break;
+                case BlockStatement { Statements.Count: > 0 } block:
+                    MarkTailStatements(block.Statements[^1]);
+                    break;
+                case IfStatement { ElseBranch: not null } ifStatement:
+                    MarkTailStatements(ifStatement.ThenBranch);
+                    MarkTailStatements(ifStatement.ElseBranch);
+                    break;
+            }
         }
 
         private void AnalyzeType(TypeDeclaration declaration, Scope parent)
         {
-            WarnOnDeclarationName(declaration.Name, _tracker.Take(declaration.Name), "type");
+            WarnOnDeclarationName(declaration.Name, _spans.GetName(declaration), "type");
+            _typeStack.Push(declaration.Name);
+            HashSet<string> constructorAssigned = new(StringComparer.Ordinal);
+            _constructorAssignedFields.Push(constructorAssigned);
+            try
+            {
+                AnalyzeTypeMembers(declaration, parent);
+            }
+            finally
+            {
+                _constructorAssignedFields.Pop();
+                _typeStack.Pop();
+            }
+
+            ReportUnassignedImmutableFields(declaration, constructorAssigned);
+        }
+
+        private readonly Stack<HashSet<string>> _constructorAssignedFields = new();
+
+        // Spec §28.2: an immutable field without an initializer must be assigned in a constructor.
+        private void ReportUnassignedImmutableFields(TypeDeclaration declaration, HashSet<string> constructorAssigned)
+        {
+            foreach (FieldMember field in declaration.Members.OfType<FieldMember>())
+            {
+                DeclarationStatement fieldDeclaration = field.Declaration;
+                if (fieldDeclaration.Mutability != MutabilityKind.Immutable
+                    || fieldDeclaration.Initializer is not null
+                    || fieldDeclaration.IsInputShorthand
+                    || fieldDeclaration.ExplicitType is SizedArrayTypeSyntax
+                    || IsKnownAutoConstructType(Normalize(fieldDeclaration.ExplicitType))
+                    || field.Modifiers.Contains("static", StringComparer.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach ((string name, _) in EnumerateNamedBindings(fieldDeclaration))
+                {
+                    if (!constructorAssigned.Contains(name) && !MutatedImmutableFields.Contains(declaration.Name + "." + name))
+                    {
+                        Warning(
+                            DiagnosticCodes.UnassignedImmutableField,
+                            $"Field `{name}` is immutable and never assigned, so it always keeps its default value. Give it an initializer, assign it in a constructor, or declare it `mut`.",
+                            _spans.Get(fieldDeclaration.Targets.Count > 0 ? fieldDeclaration.Targets[0] : fieldDeclaration));
+                    }
+                }
+            }
+        }
+
+        private void AnalyzeTypeMembers(TypeDeclaration declaration, Scope parent)
+        {
             Scope scope = new(parent);
             TypeSyntax currentType = TypeName(declaration.Name);
             if (TryResolveType(declaration.Name, out TypeInfo? typeInfo) && typeInfo is not null)
@@ -275,7 +358,6 @@ internal static class PscpSemanticAnalyzer
                         AnalyzeType(nested.Declaration, scope);
                         break;
                     case FieldMember field:
-                        ConsumeDeclarationSignature(field.Declaration);
                         if (field.Declaration.Initializer is not null) AnalyzeExpression(field.Declaration.Initializer, scope);
                         break;
                     case MethodMember method:
@@ -296,8 +378,7 @@ internal static class PscpSemanticAnalyzer
 
         private void AnalyzeFunction(FunctionDeclaration function, Scope parent)
         {
-            ConsumeType(function.ReturnType);
-            TextSpan functionSpan = _tracker.Take(function.Name);
+            TextSpan functionSpan = _spans.GetName(function);
             WarnOnDeclarationName(function.Name, functionSpan, "function");
             if (ReferenceEquals(parent, _global) && function.Name == "Main" && function.Parameters.Count == 0)
             {
@@ -305,22 +386,38 @@ internal static class PscpSemanticAnalyzer
             }
 
             Scope scope = new(parent);
-            foreach (ParameterSyntax parameter in function.Parameters)
+            DeclareParameters(function.Parameters, scope);
+            bool savedConstructor = _inConstructor;
+            _inConstructor = false;
+            TypeSyntax? savedReturnType = _currentReturnType;
+            _currentReturnType = Normalize(function.ReturnType);
+            try
             {
-                ConsumeType(parameter.Type);
-                ConsumeBinding(parameter.Target);
-                DeclareBinding(parameter.Target, Normalize(parameter.Type), scope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
+                AnalyzeBlock(function.Body, scope);
+            }
+            finally
+            {
+                _inConstructor = savedConstructor;
+                _currentReturnType = savedReturnType;
             }
 
-            AnalyzeBlock(function.Body, scope);
-            ValidateRecursion(function.Name, function.IsRecursive, function.Body, functionSpan);
             ValidateValueReturningBody(function.Name, Normalize(function.ReturnType), function.Body, functionSpan);
+        }
+
+        private TypeSyntax? _currentReturnType;
+
+        private void DeclareParameters(IReadOnlyList<ParameterSyntax> parameters, Scope scope)
+        {
+            foreach (ParameterSyntax parameter in parameters)
+            {
+                CheckBindingNames(parameter.Target);
+                DeclareBinding(parameter.Target, Normalize(parameter.Type), scope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
+            }
         }
 
         private void AnalyzeMethod(MethodMember method, Scope parent, TypeSyntax? thisType = null)
         {
-            if (!method.IsConstructor && method.ReturnType is not null) ConsumeType(method.ReturnType);
-            TextSpan methodSpan = _tracker.Take(method.Name);
+            TextSpan methodSpan = _spans.GetName(method);
             if (!method.IsConstructor)
             {
                 WarnOnDeclarationName(method.Name, methodSpan, "method");
@@ -333,14 +430,20 @@ internal static class PscpSemanticAnalyzer
                 scope.DeclareValue("base", new Symbol(SymbolKind.Local, thisType, false));
             }
 
-            foreach (ParameterSyntax parameter in method.Parameters)
+            DeclareParameters(method.Parameters, scope);
+            bool savedConstructor = _inConstructor;
+            _inConstructor = method.IsConstructor;
+            TypeSyntax? savedReturnType = _currentReturnType;
+            _currentReturnType = method.IsConstructor ? TypeName("void") : Normalize(method.ReturnType);
+            try
             {
-                ConsumeType(parameter.Type);
-                ConsumeBinding(parameter.Target);
-                DeclareBinding(parameter.Target, Normalize(parameter.Type), scope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
+                AnalyzeMethodBody(method.Body, scope);
             }
-
-            AnalyzeMethodBody(method.Body, scope);
+            finally
+            {
+                _inConstructor = savedConstructor;
+                _currentReturnType = savedReturnType;
+            }
 
             if (!method.IsConstructor && method.ReturnType is not null)
             {
@@ -350,8 +453,7 @@ internal static class PscpSemanticAnalyzer
 
         private void AnalyzeProperty(PropertyMember property, Scope parent, TypeSyntax thisType)
         {
-            ConsumeType(property.Type);
-            TextSpan propertySpan = _tracker.Take(property.Name);
+            TextSpan propertySpan = _spans.GetName(property);
             WarnOnDeclarationName(property.Name, propertySpan, "property");
             Scope scope = new(parent);
             scope.DeclareValue("this", new Symbol(SymbolKind.Local, thisType, false));
@@ -362,17 +464,11 @@ internal static class PscpSemanticAnalyzer
 
         private void AnalyzeOperator(OperatorMember @operator, Scope parent, TypeSyntax thisType)
         {
-            ConsumeType(@operator.ReturnType);
-            TextSpan operatorSpan = _tracker.Take("operator");
+            TextSpan operatorSpan = _spans.Get(@operator);
             Scope scope = new(parent);
             scope.DeclareValue("this", new Symbol(SymbolKind.Local, thisType, false));
             scope.DeclareValue("base", new Symbol(SymbolKind.Local, thisType, false));
-            foreach (ParameterSyntax parameter in @operator.Parameters)
-            {
-                ConsumeType(parameter.Type);
-                ConsumeBinding(parameter.Target);
-                DeclareBinding(parameter.Target, Normalize(parameter.Type), scope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
-            }
+            DeclareParameters(@operator.Parameters, scope);
 
             AnalyzeMethodBody(@operator.Body, scope);
             ValidateMethodBody("operator", Normalize(@operator.ReturnType) ?? TypeName("void"), @operator.Body, operatorSpan);
@@ -380,7 +476,6 @@ internal static class PscpSemanticAnalyzer
 
         private void AnalyzeOrderingShorthand(OrderingShorthandMember ordering, Scope parent, TypeSyntax thisType)
         {
-            _tracker.Take("operator");
             Scope scope = new(parent);
             if (ordering.ParameterNames.Count <= 1)
             {
@@ -389,7 +484,6 @@ internal static class PscpSemanticAnalyzer
 
             foreach (string parameterName in ordering.ParameterNames)
             {
-                _tracker.Take(parameterName);
                 scope.DeclareValue(parameterName, new Symbol(SymbolKind.Local, thisType, false));
             }
 
@@ -404,6 +498,11 @@ internal static class PscpSemanticAnalyzer
                     AnalyzeBlock(blockBody.Block, scope);
                     break;
                 case ExpressionMethodBody expressionBody:
+                    if (expressionBody.Expression is AssignmentExpression bodyAssignment)
+                    {
+                        _statementAssignments.Add(bodyAssignment);
+                    }
+
                     AnalyzeExpression(expressionBody.Expression, scope);
                     break;
             }
@@ -417,6 +516,7 @@ internal static class PscpSemanticAnalyzer
                 if (statement is LocalFunctionStatement localFunction)
                 {
                     scope.DeclareValue(localFunction.Function.Name, new Symbol(SymbolKind.Function, Normalize(localFunction.Function.ReturnType), false));
+                    _functionArity[localFunction.Function.Name] = localFunction.Function.Parameters.Count;
                 }
             }
 
@@ -439,97 +539,196 @@ internal static class PscpSemanticAnalyzer
                     AnalyzeDeclaration(declaration, scope);
                     break;
                 case ExpressionStatement expressionStatement:
+                    if (expressionStatement.Expression is AssignmentExpression statementAssignment)
+                    {
+                        _statementAssignments.Add(statementAssignment);
+                    }
+
                     AnalyzeExpression(expressionStatement.Expression, scope);
+                    CheckExpressionStatement(expressionStatement);
                     break;
                 case AssignmentStatement assignment:
                     AnalyzeAssignmentTarget(assignment.Target, scope);
                     AnalyzeExpression(assignment.Value, scope);
                     break;
                 case OutputStatement output:
-                    AnalyzeExpression(output.Expression, scope);
+                    CheckRenderable(AnalyzeExpression(output.Expression, scope), output.Expression);
                     break;
                 case IfStatement ifStatement:
                     AnalyzeExpression(ifStatement.Condition, scope);
-                    AnalyzeStatement(ifStatement.ThenBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: true));
-                    if (ifStatement.ElseBranch is not null) AnalyzeStatement(ifStatement.ElseBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: false));
+                    AnalyzeEmbedded(ifStatement.ThenBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: true));
+                    if (ifStatement.ElseBranch is not null) AnalyzeEmbedded(ifStatement.ElseBranch, CreateConditionScope(scope, ifStatement.Condition, assumeTrue: false));
                     break;
                 case WhileStatement whileStatement:
                     AnalyzeExpression(whileStatement.Condition, scope);
-                    AnalyzeStatement(whileStatement.Body, CreateConditionScope(scope, whileStatement.Condition, assumeTrue: true));
+                    AnalyzeEmbedded(whileStatement.Body, CreateConditionScope(scope, whileStatement.Condition, assumeTrue: true));
                     break;
                 case ForInStatement forIn:
+                {
                     AnalyzeExpression(forIn.Source, scope);
                     Scope forScope = new(scope);
-                    ConsumeBinding(forIn.Iterator);
-                    DeclareBinding(forIn.Iterator, EnumerableElement(GetType(forIn.Source)), forScope, false);
-                    AnalyzeStatement(forIn.Body, forScope);
+                    CheckBindingNames(forIn.Iterator);
+                    DeclareBinding(forIn.Iterator, IterationElement(GetType(forIn.Source)), forScope, false);
+                    AnalyzeEmbedded(forIn.Body, forScope);
                     break;
+                }
                 case CStyleForStatement cStyleFor:
+                {
                     Scope cStyleScope = new(scope);
-                    foreach (string headerBinding in GetCStyleForHeaderBindings(cStyleFor.HeaderText))
+                    foreach (string headerBinding in PscpSyntaxFacts.GetCStyleForHeaderBindings(cStyleFor.HeaderText))
                     {
                         cStyleScope.DeclareValue(headerBinding, new Symbol(SymbolKind.Local, TypeName("int"), true));
                     }
 
-                    AnalyzeStatement(cStyleFor.Body, cStyleScope);
+                    AnalyzeEmbedded(cStyleFor.Body, cStyleScope);
                     break;
+                }
                 case FastForStatement fastFor:
+                {
                     AnalyzeExpression(fastFor.Source, scope);
                     Scope fastScope = new(scope);
                     if (fastFor.IndexTarget is not null)
                     {
-                        ConsumeBinding(fastFor.IndexTarget);
+                        CheckBindingNames(fastFor.IndexTarget);
                         DeclareBinding(fastFor.IndexTarget, TypeName("int"), fastScope, false);
                     }
 
-                    ConsumeBinding(fastFor.ItemTarget);
-                    DeclareBinding(fastFor.ItemTarget, EnumerableElement(GetType(fastFor.Source)), fastScope, false);
-                    AnalyzeStatement(fastFor.Body, fastScope);
+                    CheckBindingNames(fastFor.ItemTarget);
+                    DeclareBinding(fastFor.ItemTarget, IterationElement(GetType(fastFor.Source)), fastScope, false);
+                    AnalyzeEmbedded(fastFor.Body, fastScope);
                     break;
+                }
                 case ReturnStatement returnStatement when returnStatement.Expression is not null:
                     AnalyzeExpression(returnStatement.Expression, scope);
                     break;
                 case LocalFunctionStatement localFunction:
                     AnalyzeFunction(localFunction.Function, scope);
                     break;
+                case TryStatement tryStatement:
+                    AnalyzeBlock(tryStatement.Body, scope);
+                    foreach (CatchClause catchClause in tryStatement.Catches)
+                    {
+                        Scope catchScope = new(scope);
+                        if (catchClause.Name is not null)
+                        {
+                            catchScope.DeclareValue(catchClause.Name, new Symbol(SymbolKind.Local, Normalize(catchClause.Type) ?? TypeName("Exception"), false));
+                        }
+
+                        if (catchClause.Filter is not null) AnalyzeExpression(catchClause.Filter, catchScope);
+                        AnalyzeBlock(catchClause.Body, catchScope);
+                    }
+
+                    if (tryStatement.Finally is not null) AnalyzeBlock(tryStatement.Finally, scope);
+                    break;
+                case ThrowStatement throwStatement when throwStatement.Expression is not null:
+                    AnalyzeExpression(throwStatement.Expression, scope);
+                    break;
             }
         }
 
+        // The body of `if`, `while`, `for`, `->`: a single statement gets its own scope like a block.
+        private void AnalyzeEmbedded(Statement statement, Scope scope)
+        {
+            if (statement is BlockStatement)
+            {
+                AnalyzeStatement(statement, scope);
+                return;
+            }
+
+            AnalyzeStatement(statement, new Scope(scope));
+        }
+
+        // Warnings about expression statements whose value is lost.
+        private void CheckExpressionStatement(ExpressionStatement statement)
+        {
+            Expression expression = statement.Expression;
+            switch (expression)
+            {
+                case UnaryExpression { Operator: UnaryOperator.Plus or UnaryOperator.Negate or UnaryOperator.LogicalNot } unary:
+                case UnaryExpression { Operator: UnaryOperator.Peek } peek when !IsPoppable(GetType(peek.Operand)):
+                    _discardedValueWarnings.Add((
+                        statement,
+                        DiagnosticCodes.UnusedUnaryStatement,
+                        "This statement computes a value and discards it. A line that starts with `+` or `-` begins a new statement; to continue the previous line, end that line with the operator.",
+                        _spans.Get(expression)));
+                    break;
+                case CallExpression { Callee: MemberAccessExpression member } call
+                    when IsIntrinsicCallNode(call)
+                        && PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName) is "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" or "map" or "filter" or "scan":
+                {
+                    string receiverText = member.Receiver is IdentifierExpression receiver ? DisplayName(receiver.Name) : "the receiver";
+                    string helper = PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName);
+                    string suggestion = helper == "sort" && member.Receiver is IdentifierExpression sorted
+                        ? GetType(member.Receiver) is NamedTypeSyntax { Name: "List" } ? $" Use `{sorted.Name}.Sort()` to sort in place, or `{sorted.Name} = {sorted.Name}.sort()`." : $" Use `Array.Sort({sorted.Name})` to sort in place, or `{sorted.Name} = {sorted.Name}.sort()`."
+                        : " Use the result, for example `let result = ...`.";
+                    _discardedValueWarnings.Add((
+                        statement,
+                        DiagnosticCodes.DiscardedHelperResult,
+                        $"`{helper}()` returns a new array and does not change {receiverText}; the result is discarded.{suggestion}",
+                        _spans.Get(expression)));
+                    break;
+                }
+            }
+        }
+
+        private bool IsIntrinsicCallNode(CallExpression call) => IntrinsicCalls.Contains(call);
+
         private void AnalyzeDeclaration(DeclarationStatement declaration, Scope scope)
         {
-            ConsumeDeclarationSignature(declaration);
+            foreach (BindingTarget target in declaration.Targets)
+            {
+                CheckBindingNames(target);
+            }
 
-            // A binding declared without a value (`string? line;`) is initialized later by assignment.
-            bool allowsReassignment = declaration.Mutability == MutabilityKind.Mutable
-                || (declaration.Initializer is null && !declaration.IsInputShorthand);
+            TypeSyntax? explicitType = Normalize(declaration.ExplicitType);
+            if (declaration.ExplicitType is SizedArrayTypeSyntax sized)
+            {
+                foreach (Expression dimension in sized.Dimensions) AnalyzeExpression(dimension, scope);
+            }
+
+            if (declaration.IsInputShorthand)
+            {
+                CheckInputType(declaration);
+            }
+            else if (declaration.Initializer is null
+                && declaration.Mutability == MutabilityKind.Immutable
+                && declaration.ExplicitType is not SizedArrayTypeSyntax
+                && !IsKnownAutoConstructType(explicitType))
+            {
+                Error(
+                    DiagnosticCodes.UninitializedImmutable,
+                    $"`{DescribeTargets(declaration.Targets)}` is immutable but has no value. Give it an initializer, read it from input with `{DisplayType(explicitType)} {DescribeTargets(declaration.Targets)} =`, or declare it `mut`.",
+                    _spans.Get(declaration));
+            }
+
             if (declaration.Initializer is not null)
             {
-                AnalyzeExpression(declaration.Initializer, scope);
-                if (declaration.ExplicitType is not null)
+                TypeSyntax? initializerType = AnalyzeExpression(declaration.Initializer, scope, explicitType);
+                if (explicitType is not null)
                 {
-                    WarnIfNullabilityMismatch(declaration.Initializer, Normalize(declaration.ExplicitType), default);
+                    WarnIfNullabilityMismatch(declaration.Initializer, explicitType, _spans.Get(declaration.Initializer));
+                }
+                else if (declaration.Initializer is CollectionExpression { Elements.Count: 0 })
+                {
+                    Error(
+                        DiagnosticCodes.EmptyCollectionWithoutType,
+                        "The element type of an empty `[]` is unknown. Declare the type: `int[] xs = []` or `List<int> xs = []`.",
+                        _spans.Get(declaration.Initializer));
+                }
+                else if (initializerType is NamedTypeSyntax { Name: "void" })
+                {
+                    Error(DiagnosticCodes.SurfaceTypeError, "This expression produces no value, so it cannot initialize a binding.", _spans.Get(declaration.Initializer));
                 }
             }
 
             if (declaration.Initializer is TargetTypedNewArrayExpression targetTypedNewArray)
             {
-                TypeSyntax? normalizedExplicitType = Normalize(declaration.ExplicitType);
-                if (normalizedExplicitType is not ArrayTypeSyntax arrayType)
-                {
-                    Error("Target-typed array allocation requires an explicit array target type.", default);
-                }
-                else
-                {
-                    ExpressionTypes[targetTypedNewArray] = arrayType;
-                    if (targetTypedNewArray.AutoConstructElements
-                        && !IsKnownAutoConstructType(arrayType.ElementType))
-                    {
-                        Error("`new![n]` requires a known auto-constructible collection element type.", default);
-                    }
-                }
+                CheckTargetTypedNewArray(targetTypedNewArray, explicitType);
             }
 
-            TypeSyntax? inferred = Normalize(declaration.ExplicitType) ?? GetType(declaration.Initializer);
+            // A binding declared without a value (`mut string? line`) is assigned later.
+            bool allowsReassignment = declaration.Mutability == MutabilityKind.Mutable;
+            TypeSyntax? inferred = explicitType ?? GetType(declaration.Initializer);
             if (declaration.Targets.Count == 1)
             {
                 DeclareBinding(declaration.Targets[0], inferred, scope, allowsReassignment);
@@ -540,7 +739,7 @@ internal static class PscpSemanticAnalyzer
             {
                 foreach (BindingTarget target in declaration.Targets)
                 {
-                    DeclareBinding(target, inferred, scope, allowsReassignment);
+                    DeclareBinding(target, declaration.IsInputShorthand || explicitType is not null ? inferred : null, scope, allowsReassignment);
                 }
 
                 return;
@@ -552,23 +751,119 @@ internal static class PscpSemanticAnalyzer
             }
         }
 
+        private static string DescribeTargets(IReadOnlyList<BindingTarget> targets)
+            => string.Join(", ", targets.Select(target => target switch
+            {
+                NameTarget name => name.Name,
+                DiscardTarget => "_",
+                TupleTarget => "(...)",
+                _ => "x",
+            }));
+
+        private void CheckTargetTypedNewArray(TargetTypedNewArrayExpression newArray, TypeSyntax? targetType)
+        {
+            if (targetType is not ArrayTypeSyntax arrayType)
+            {
+                Error(
+                    DiagnosticCodes.NewArrayWithoutTarget,
+                    $"`{(newArray.AutoConstructElements ? "new!" : "new")}[n]` needs an array target type: `int[] a = new[n]`.",
+                    _spans.Get(newArray));
+                return;
+            }
+
+            ExpressionTypes[newArray] = arrayType;
+            if (!newArray.AutoConstructElements)
+            {
+                return;
+            }
+
+            TypeSyntax elementType = arrayType.Depth > 1 ? new ArrayTypeSyntax(arrayType.ElementType, arrayType.Depth - 1) : arrayType.ElementType;
+            if (elementType is ArrayTypeSyntax || !HasParameterlessConstructor(elementType))
+            {
+                Error(
+                    DiagnosticCodes.AutoConstructWithoutConstructor,
+                    elementType is ArrayTypeSyntax
+                        ? "`new![n]` fills each element with `new()`, which an array element cannot use. Use `new[n][m]` for a jagged array."
+                        : $"`new![n]` fills each element with `new()`, but `{DisplayType(elementType)}` has no parameterless constructor.",
+                    _spans.Get(newArray));
+            }
+        }
+
+        private bool HasParameterlessConstructor(TypeSyntax type)
+        {
+            if (type is TupleTypeSyntax)
+            {
+                return true;
+            }
+
+            if (type is not NamedTypeSyntax named)
+            {
+                return false;
+            }
+
+            if (named.Name is "string")
+            {
+                return false;
+            }
+
+            if (!TryResolveType(named.Name, out TypeInfo? typeInfo) || typeInfo is null)
+            {
+                return true;
+            }
+
+            return typeInfo.IsValueType || typeInfo.HasParameterlessConstructor;
+        }
+
+        // Spec §17.6: scalars and flat tuples of 2 to 7 scalars.
+        private void CheckInputType(DeclarationStatement declaration)
+        {
+            if (declaration.ExplicitType is null)
+            {
+                return;
+            }
+
+            TypeSyntax elementType = declaration.ExplicitType is SizedArrayTypeSyntax sized ? sized.ElementType : declaration.ExplicitType;
+            if (!IsTokenReadable(elementType))
+            {
+                Error(
+                    DiagnosticCodes.NotTokenReadable,
+                    $"`{DisplayType(Normalize(declaration.ExplicitType))}` cannot be read from input. Input declarations read `int`, `long`, `double`, `decimal`, `bool`, `char`, `string`, flat tuples of those, and sized arrays of them (`int[n] a =`).",
+                    _spans.Get(declaration));
+            }
+        }
+
+        internal static bool IsTokenReadable(TypeSyntax type)
+            => type switch
+            {
+                NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "decimal" or "bool" or "char" or "string" } => true,
+                TupleTypeSyntax tuple => tuple.Elements.Count is >= 2 and <= 7
+                    && tuple.Elements.All(element => element is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "decimal" or "bool" or "char" or "string" }),
+                _ => false,
+            };
+
         private void AnalyzeAssignmentTarget(Expression expression, Scope scope, bool allowImmutableBindingTarget = false)
         {
             switch (expression)
             {
                 case IdentifierExpression identifier:
                 {
-                    TextSpan span = _tracker.Take(identifier.Name);
+                    TextSpan span = _spans.Get(identifier);
                     if (!scope.TryResolveValue(identifier.Name, out Symbol? symbol) || symbol is null)
                     {
-                        Error($"Undefined name `{identifier.Name}`.", span);
+                        Error(DiagnosticCodes.UndefinedName, $"Undefined name `{identifier.Name}`.", span);
                     }
-                    else if (!allowImmutableBindingTarget)
+                    else
                     {
-                        NoteImmutableMutation(identifier.Name, symbol, span);
+                        ExpressionTypes[identifier] = symbol.Type;
+                        if (!allowImmutableBindingTarget)
+                        {
+                            NoteImmutableMutation(identifier.Name, symbol, span);
+                        }
                     }
                     break;
                 }
+                case DiscardExpression:
+                    break;
                 case TupleExpression tuple:
                     foreach (Expression element in tuple.Elements) AnalyzeAssignmentTarget(element, scope, allowImmutableBindingTarget);
                     break;
@@ -577,22 +872,66 @@ internal static class PscpSemanticAnalyzer
                     TypeSyntax? receiverType = AnalyzeExpression(member.Receiver, scope);
                     if (receiverType is NullableTypeSyntax nullable && IsValueTypeLike(nullable.InnerType))
                     {
-                        Error("Assigning through a member of a nullable value type is not supported directly. Store it in a non-nullable temporary first.", default);
+                        Error(DiagnosticCodes.SurfaceTypeError, "Assigning through a member of a nullable value type is not supported directly. Store it in a non-nullable temporary first.", _spans.Get(member));
                     }
 
-                    AnalyzeMember(member, scope);
+                    ExpressionTypes[member] = AnalyzeMember(member, scope);
+                    if (!allowImmutableBindingTarget)
+                    {
+                        NoteFieldMutation(UnwrapNullable(receiverType), member.MemberName, _spans.GetName(member), member.Receiver is IdentifierExpression { Name: "this" });
+                    }
+
                     break;
                 }
                 case IndexExpression index:
-                    AnalyzeExpression(index.Receiver, scope);
-                    foreach (Expression argument in index.Arguments) AnalyzeExpression(argument, scope);
+                    ExpressionTypes[index] = AnalyzeIndex(index, scope);
                     break;
                 case TupleProjectionExpression projection:
-                    AnalyzeExpression(projection.Receiver, scope);
+                    ExpressionTypes[projection] = AnalyzeTupleProjection(projection, scope);
                     break;
                 default:
                     AnalyzeExpression(expression, scope);
                     break;
+            }
+        }
+
+        // Assigning an immutable field outside a constructor (spec §28.2).
+        private void NoteFieldMutation(TypeSyntax? receiverType, string memberName, TextSpan span, bool throughThis)
+        {
+            if (receiverType is not NamedTypeSyntax named
+                || !TryResolveType(named.Name, out TypeInfo? typeInfo)
+                || typeInfo is null
+                || !typeInfo.Members.TryGetValue(memberName, out Symbol? symbol))
+            {
+                return;
+            }
+
+            NoteFieldSymbolMutation(typeInfo.Name, memberName, symbol, span, throughThis);
+        }
+
+        private void NoteFieldSymbolMutation(string typeName, string memberName, Symbol symbol, TextSpan span, bool inOwnType)
+        {
+            if (!symbol.IsImmutableField)
+            {
+                return;
+            }
+
+            if (_inConstructor && inOwnType)
+            {
+                if (_constructorAssignedFields.Count > 0)
+                {
+                    _constructorAssignedFields.Peek().Add(memberName);
+                }
+
+                return;
+            }
+
+            if (MutatedImmutableFields.Add(typeName + "." + memberName))
+            {
+                Warning(
+                    DiagnosticCodes.ImmutableMutation,
+                    $"Field `{memberName}` is immutable but is assigned here. Declare it `mut {memberName}` (or with `var`) to make it mutable.",
+                    span);
             }
         }
 
@@ -608,11 +947,18 @@ internal static class PscpSemanticAnalyzer
                     or "Stack" or "System.Collections.Generic.Stack"
                     or "PriorityQueue" or "System.Collections.Generic.PriorityQueue";
 
-        private TypeSyntax? AnalyzeExpression(Expression? expression, Scope scope)
+        private TypeSyntax? AnalyzeExpression(Expression? expression, Scope scope, TypeSyntax? targetType = null)
         {
             if (expression is null) return null;
             TypeSyntax? type = expression switch
             {
+                CollectionExpression collection when targetType is not null && Normalize(targetType) is ArrayTypeSyntax or NamedTypeSyntax { TypeArguments.Count: > 0 }
+                    => AnalyzeTargetTypedCollection(collection, scope, Normalize(targetType)!),
+                TargetTypedNewArrayExpression targetTypedNewArray when targetType is not null => AnalyzeTargetTypedNewArray(targetTypedNewArray, scope) ?? Normalize(targetType),
+                CastExpression cast => AnalyzeCast(cast, scope),
+                AsExpression asExpression => AnalyzeAs(asExpression, scope),
+                NullForgivingExpression nullForgiving => UnwrapNullable(AnalyzeExpression(nullForgiving.Operand, scope)),
+                ThrowExpression throwExpression => AnalyzeThrowExpression(throwExpression, scope),
                 LiteralExpression literal => LiteralType(literal),
                 InterpolatedStringExpression interpolated => AnalyzeInterpolatedString(interpolated, scope),
                 IdentifierExpression identifier => AnalyzeIdentifier(identifier, scope),
@@ -651,12 +997,56 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeIdentifier(IdentifierExpression identifier, Scope scope)
         {
-            TextSpan span = _tracker.Take(identifier.Name);
-            if (scope.TryResolveValue(identifier.Name, out Symbol? symbol) && symbol is not null) return symbol.Type;
+            if (scope.TryResolveValue(identifier.Name, out Symbol? symbol) && symbol is not null)
+            {
+                if (symbol.Kind == SymbolKind.Field && symbol.OwnerType is not null)
+                {
+                    FieldReferences[identifier] = symbol.OwnerType;
+                }
+
+                return symbol.Type;
+            }
+
             if (scope.TryResolveType(identifier.Name, out TypeInfo? typeInfo) && typeInfo is not null) return TypeName(typeInfo.Name);
             if (PscpIntrinsicCatalog.BuiltinTypes.Contains(identifier.Name) || PscpIntrinsicCatalog.IntrinsicCallNames.Contains(identifier.Name)) return TypeName(identifier.Name);
-            Error($"Undefined name `{identifier.Name}`.", span);
+            if (identifier.Name is "default" or "typeof" or "nameof" or "sizeof" or "checked" or "unchecked" || PscpIntrinsicCatalog.IsLikelyExternalTypeLikeRoot(identifier.Name)) return null;
+            Error(DiagnosticCodes.UndefinedName, $"Undefined name `{identifier.Name}`.", _spans.Get(identifier));
             return null;
+        }
+
+        // Identifiers that name a field of the enclosing type, for the field mutability rule.
+        public Dictionary<IdentifierExpression, string> FieldReferences { get; } = new(ReferenceEqualityComparer.Instance);
+
+        private TypeSyntax? AnalyzeCast(CastExpression cast, Scope scope)
+        {
+            AnalyzeExpression(cast.Operand, scope);
+            return Normalize(cast.Type);
+        }
+
+        private TypeSyntax? AnalyzeAs(AsExpression expression, Scope scope)
+        {
+            AnalyzeExpression(expression.Operand, scope);
+            return Normalize(expression.Type);
+        }
+
+        private TypeSyntax? AnalyzeThrowExpression(ThrowExpression expression, Scope scope)
+        {
+            AnalyzeExpression(expression.Expression, scope);
+            return null;
+        }
+
+        // `List<int> xs = [...]`, `int[] empty = []`: the target type decides the collection (spec §16.1).
+        private TypeSyntax AnalyzeTargetTypedCollection(CollectionExpression collection, Scope scope, TypeSyntax targetType)
+        {
+            TypeSyntax? elementHint = targetType switch
+            {
+                ArrayTypeSyntax { Depth: 1 } array => array.ElementType,
+                ArrayTypeSyntax array => new ArrayTypeSyntax(array.ElementType, array.Depth - 1),
+                NamedTypeSyntax named when named.TypeArguments.Count > 0 => named.TypeArguments[0],
+                _ => null,
+            };
+            AnalyzeCollectionElements(collection, scope, elementHint);
+            return targetType;
         }
 
         private TypeSyntax AnalyzeInterpolatedString(InterpolatedStringExpression interpolated, Scope scope)
@@ -675,49 +1065,70 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzeAssignmentExpression(AssignmentExpression assignment, Scope scope)
         {
             TypeSyntax? targetType = GetType(assignment.Target) ?? InferAssignmentTargetType(assignment.Target, scope);
-            AnalyzeAssignmentTarget(assignment.Target, scope, IsKnownDataStructureMutationTarget(targetType, assignment.Operator));
-            AnalyzeExpression(assignment.Value, scope);
-            WarnIfNullabilityMismatch(assignment.Value, Normalize(targetType), default);
+            bool knownRewrite = IsKnownDataStructureMutationTarget(targetType, assignment.Operator);
+            AnalyzeAssignmentTarget(assignment.Target, scope, knownRewrite);
+            TypeSyntax? valueType = AnalyzeExpression(assignment.Value, scope, knownRewrite ? null : Normalize(targetType));
+            WarnIfNullabilityMismatch(assignment.Value, Normalize(targetType), _spans.Get(assignment.Value));
+
+            if (assignment.Operator == AssignmentOperator.Assign
+                && !assignment.IsExplicitValueAssignment
+                && !_statementAssignments.Contains(assignment))
+            {
+                Warning(
+                    DiagnosticCodes.AssignmentInExpression,
+                    "`=` inside an expression assigns and then uses the value. Write `:=` to make the value-producing assignment explicit, or move the assignment to its own statement.",
+                    _spans.Get(assignment));
+            }
 
             if (assignment.Value is TargetTypedNewArrayExpression targetTypedNewArray)
             {
-                if (Normalize(targetType) is not ArrayTypeSyntax arrayType)
-                {
-                    Error("Target-typed array allocation requires an array target type.", default);
-                }
-                else
-                {
-                    ExpressionTypes[targetTypedNewArray] = arrayType;
-                    if (targetTypedNewArray.AutoConstructElements
-                        && !IsKnownAutoConstructType(arrayType.ElementType))
-                    {
-                        Error("`new![n]` requires a known auto-constructible collection element type.", default);
-                    }
-                }
+                CheckTargetTypedNewArray(targetTypedNewArray, Normalize(targetType));
             }
 
-            if (targetType is NamedTypeSyntax named)
+            if (knownRewrite && targetType is NamedTypeSyntax named)
             {
+                CheckRewriteOperand(assignment, named, valueType);
                 if (named.Name is "HashSet" or "System.Collections.Generic.HashSet"
                     or "SortedSet" or "System.Collections.Generic.SortedSet"
-                    or "Dictionary" or "System.Collections.Generic.Dictionary"
-                    && assignment.Operator is AssignmentOperator.AddAssign or AssignmentOperator.SubtractAssign)
+                    or "Dictionary" or "System.Collections.Generic.Dictionary")
                 {
                     return TypeName("bool");
                 }
 
-                if (assignment.Operator == AssignmentOperator.AddAssign
-                    && named.Name is "List" or "System.Collections.Generic.List"
-                        or "LinkedList" or "System.Collections.Generic.LinkedList"
-                        or "Queue" or "System.Collections.Generic.Queue"
-                        or "Stack" or "System.Collections.Generic.Stack"
-                        or "PriorityQueue" or "System.Collections.Generic.PriorityQueue")
-                {
-                    return TypeName("void");
-                }
+                return TypeName("void");
             }
 
             return targetType;
+        }
+
+        // Spec §26.2: the operand of a known data-structure `+=`/`-=` must be an element, not a collection.
+        private void CheckRewriteOperand(AssignmentExpression assignment, NamedTypeSyntax target, TypeSyntax? valueType)
+        {
+            if (valueType is null || target.TypeArguments.Count == 0)
+            {
+                return;
+            }
+
+            TypeSyntax element = target.Name is "Dictionary" or "System.Collections.Generic.Dictionary" or "PriorityQueue" or "System.Collections.Generic.PriorityQueue"
+                    && assignment.Operator == AssignmentOperator.AddAssign
+                    && target.TypeArguments.Count == 2
+                ? new TupleTypeSyntax(target.TypeArguments)
+                : target.TypeArguments[0];
+            if (assignment.Operator == AssignmentOperator.SubtractAssign
+                && target.Name is "Dictionary" or "System.Collections.Generic.Dictionary")
+            {
+                element = target.TypeArguments[0];
+            }
+
+            bool elementIsCollection = element is ArrayTypeSyntax || element is NamedTypeSyntax { Name: "List" or "HashSet" or "IEnumerable" };
+            if (!elementIsCollection && (valueType is ArrayTypeSyntax || valueType is NamedTypeSyntax { Name: "List" or "HashSet" or "SortedSet" or "IEnumerable" or "LinkedList" or "Queue" or "Stack" }))
+            {
+                string targetText = assignment.Target is IdentifierExpression id ? id.Name : "xs";
+                Error(
+                    DiagnosticCodes.RewriteOperandMismatch,
+                    $"`{targetText} {(assignment.Operator == AssignmentOperator.AddAssign ? "+=" : "-=")} ...` adds one element of type `{DisplayType(element)}`, but the value is a whole `{DisplayType(valueType)}`. Use `{targetText}.AddRange(...)` or a spread such as `[..{targetText}, ..other]`.",
+                    _spans.Get(assignment));
+            }
         }
 
         private TypeSyntax? InferAssignmentTargetType(Expression target, Scope scope)
@@ -739,6 +1150,16 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzePostfixExpression(PostfixExpression postfix, Scope scope)
         {
             TypeSyntax? operandType = AnalyzeExpression(postfix.Operand, scope);
+            if (IsPoppable(operandType) || IsKnownDataStructureMutationTarget(operandType, AssignmentOperator.AddAssign))
+            {
+                string op = postfix.Operator == PostfixOperator.Increment ? "++" : "--";
+                Error(
+                    DiagnosticCodes.PostfixOnKnownCollection,
+                    $"Postfix `{op}` cannot be used on a `{DisplayType(operandType)}`. Use prefix `--q` to pop or dequeue, `~q` to peek.",
+                    _spans.Get(postfix));
+                return operandType;
+            }
+
             NoteImmutableMutation(postfix.Operand, scope);
             return operandType;
         }
@@ -749,21 +1170,31 @@ internal static class PscpSemanticAnalyzer
                 && scope.TryResolveValue(identifier.Name, out Symbol? symbol)
                 && symbol is not null)
             {
-                NoteImmutableMutation(identifier.Name, symbol, _tracker.FindMutationSite(identifier.Name));
+                NoteImmutableMutation(identifier.Name, symbol, _spans.Get(target));
             }
         }
 
         private void NoteImmutableMutation(string name, Symbol symbol, TextSpan span)
         {
             MutatedNames.Add(name);
-            if (symbol.Kind != SymbolKind.Local || symbol.IsMutable)
+            if (symbol.Kind == SymbolKind.Field && symbol.OwnerType is not null)
+            {
+                NoteFieldSymbolMutation(symbol.OwnerType, name, symbol, span, inOwnType: true);
+                return;
+            }
+
+            bool binding = symbol.Kind == SymbolKind.Local || (symbol.Kind == SymbolKind.Field && symbol.OwnerType is null);
+            if (!binding || symbol.IsMutable)
             {
                 return;
             }
 
             if (ReassignedImmutableNames.Add(name))
             {
-                Warning($"`{name}` is immutable but is modified here. Declare it with `mut` or `var` to make the mutation explicit.", span);
+                Warning(
+                    DiagnosticCodes.ImmutableMutation,
+                    $"`{name}` is immutable but is modified here. Declare it with `mut` (or `var`) to make the mutation explicit.",
+                    span);
             }
         }
 
@@ -817,8 +1248,14 @@ internal static class PscpSemanticAnalyzer
         {
             TypeSyntax? left = AnalyzeExpression(binary.Left, scope);
             TypeSyntax? right = AnalyzeExpression(binary.Right, scope);
+            if (binary.Operator == BinaryOperator.Subtract)
+            {
+                CheckSubtractionFromFunction(binary, scope);
+            }
+
             return binary.Operator switch
             {
+                BinaryOperator.Coalesce => Merge(UnwrapNullable(left), right) ?? UnwrapNullable(left),
                 BinaryOperator.Add when IsNamed(left, "string") || IsNamed(right, "string") => TypeName("string"),
                 BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply or BinaryOperator.Divide or BinaryOperator.Modulo => Promote(left, right),
                 BinaryOperator.ShiftLeft or BinaryOperator.ShiftRight => left,
@@ -829,25 +1266,107 @@ internal static class PscpSemanticAnalyzer
             };
         }
 
+        // Spec §11.3: `f -1` is `f - 1`, which is meaningless when `f` is a function.
+        private void CheckSubtractionFromFunction(BinaryExpression binary, Scope scope)
+        {
+            string? functionName = binary.Left switch
+            {
+                IdentifierExpression identifier when IsFunctionName(identifier.Name, scope) => identifier.Name,
+                MemberAccessExpression member when GetType(binary.Left) is null && IsIntrinsicMemberName(member.MemberName) => null,
+                _ => null,
+            };
+
+            if (functionName is not null)
+            {
+                string rightText = binary.Right is LiteralExpression literal ? literal.RawText : "x";
+                Error(
+                    DiagnosticCodes.SubtractFromFunction,
+                    $"`{functionName} -{rightText}` subtracts {rightText} from the function `{functionName}`. To pass a negative argument write `{functionName} (-{rightText})`.",
+                    _spans.Get(binary));
+                return;
+            }
+
+            if (binary.Left is CallExpression { IsSpaceSeparated: true, Callee: IdentifierExpression callee } application
+                && scope.TryResolveValue(callee.Name, out Symbol? symbol)
+                && symbol is { Kind: SymbolKind.Function }
+                && _functionArity.TryGetValue(callee.Name, out int arity)
+                && application.Arguments.Count < arity)
+            {
+                string rightText = binary.Right is LiteralExpression literal ? literal.RawText : "x";
+                Error(
+                    DiagnosticCodes.SubtractFromFunction,
+                    $"`{callee.Name}` takes {arity} arguments, so `- {rightText}` subtracts from a partial call. To pass a negative argument write `({(binary.Right is LiteralExpression ? "-" + rightText : "-x")})`.",
+                    _spans.Get(binary));
+            }
+        }
+
+        private readonly Dictionary<string, int> _functionArity = new(StringComparer.Ordinal);
+
+        private static bool IsIntrinsicMemberName(string name) => false;
+
+        private bool IsFunctionName(string name, Scope scope)
+        {
+            if (scope.TryResolveValue(name, out Symbol? symbol) && symbol is not null)
+            {
+                return symbol.Kind is SymbolKind.Function or SymbolKind.Method
+                    || (symbol.Kind == SymbolKind.Intrinsic && PscpIntrinsicCatalog.IntrinsicCallNames.Contains(name));
+            }
+
+            return false;
+        }
+
         private TypeSyntax? InferBitwiseResult(TypeSyntax? left, TypeSyntax? right)
             => IsNamed(left, "bool") && IsNamed(right, "bool")
                 ? TypeName("bool")
                 : Promote(left, right);
 
+        // Spec §14.2: the element type is `char` when both bounds are `char`, `long` when any bound or the step is
+        // `long`, and `int` otherwise. A constant step of 0 and mixed `char`/integer bounds are errors.
         private TypeSyntax AnalyzeRange(RangeExpression range, Scope scope)
         {
             TypeSyntax? start = AnalyzeExpression(range.Start, scope);
-            TypeSyntax? end = AnalyzeExpression(range.End, scope);
             TypeSyntax? step = range.Step is null ? null : AnalyzeExpression(range.Step, scope);
+            TypeSyntax? end = AnalyzeExpression(range.End, scope);
+            if (range.Step is not null && PscpSyntaxFacts.TryEvaluateIntegerConstant(range.Step, out long stepValue) && stepValue == 0)
+            {
+                Error(DiagnosticCodes.ZeroRangeStep, "The step of this range is 0, so it would never advance. Use a non-zero step.", _spans.Get(range.Step));
+            }
+
+            bool startChar = IsNamed(start, "char");
+            bool endChar = IsNamed(end, "char");
+            if (startChar != endChar && start is not null && end is not null)
+            {
+                Error(
+                    DiagnosticCodes.MixedCharRange,
+                    "A range cannot mix a `char` bound with an integer bound. Use two `char` bounds (`'a'..'z'`) or convert with `int c` / `char n`.",
+                    _spans.Get(range));
+            }
+
+            if (startChar && endChar)
+            {
+                return new NamedTypeSyntax("IEnumerable", Immutable.List(TypeName("char")));
+            }
+
             bool isLong = IsNamed(start, "long") || IsNamed(end, "long") || IsNamed(step, "long");
             return new NamedTypeSyntax("IEnumerable", Immutable.List(isLong ? TypeName("long") : TypeName("int")));
         }
 
+        // Pattern variables are in scope for the rest of the enclosing statement list, as in C#.
         private TypeSyntax AnalyzeIsPattern(IsPatternExpression expression, Scope scope)
         {
-            AnalyzeExpression(expression.Left, scope);
-            if (expression.Pattern is ConstantPatternSyntax constantPattern) AnalyzeExpression(constantPattern.Expression, scope);
+            TypeSyntax? operandType = AnalyzeExpression(expression.Left, scope);
+            DeclarePatternDesignations(expression.Pattern, operandType, scope);
             return TypeName("bool");
+        }
+
+        private static void DeclarePatternDesignations(PatternSyntax pattern, TypeSyntax? operandType, Scope scope)
+        {
+            foreach (PatternDesignation designation in pattern.Designations)
+            {
+                TypeSyntax? type = Normalize(designation.Type)
+                    ?? (pattern.Designations.Count == 1 && pattern.Text.StartsWith("var ", StringComparison.Ordinal) ? UnwrapNullable(operandType) : null);
+                scope.DeclareValue(designation.Name, new Symbol(SymbolKind.Local, type, false));
+            }
         }
 
         private TypeSyntax? AnalyzeCall(CallExpression call, Scope scope)
@@ -857,13 +1376,26 @@ internal static class PscpSemanticAnalyzer
                 if (argument is ExpressionArgumentSyntax { Modifier: ArgumentModifier.Ref or ArgumentModifier.Out } byReference)
                 {
                     NoteImmutableMutation(byReference.Expression, scope);
+                    if (byReference.Expression is MemberAccessExpression referencedMember)
+                    {
+                        AnalyzeExpression(referencedMember.Receiver, scope);
+                        NoteFieldMutation(UnwrapNullable(GetType(referencedMember.Receiver)), referencedMember.MemberName, _spans.GetName(referencedMember), referencedMember.Receiver is IdentifierExpression { Name: "this" });
+                    }
                 }
             }
 
+            if (call.Pipe == PipeKind.Delegate && call.Callee is LambdaExpression pipedLambda && call.Arguments.Count == 1 && call.Arguments[0] is ExpressionArgumentSyntax pipedValue)
+            {
+                TypeSyntax? valueType = AnalyzeExpression(pipedValue.Expression, scope);
+                return AnalyzeLambdaWithParameterTypes(pipedLambda, scope, [valueType]);
+            }
+
             TypeSyntax? calleeType = AnalyzeExpression(call.Callee, scope);
-            if (call.Callee is IdentifierExpression conversionIdentifier && IsConversionKeyword(conversionIdentifier.Name))
+            if (call.Callee is IdentifierExpression conversionIdentifier && IsConversionKeyword(conversionIdentifier.Name)
+                && !(scope.TryResolveValue(conversionIdentifier.Name, out Symbol? shadow) && shadow is not null))
             {
                 AnalyzeArgumentsNormally(call.Arguments, scope);
+                CheckConversion(call, conversionIdentifier.Name);
                 return TypeName(conversionIdentifier.Name);
             }
 
@@ -874,10 +1406,10 @@ internal static class PscpSemanticAnalyzer
             }
 
             if (call.Callee is MemberAccessExpression stdinMember
-                && stdinMember.Receiver is IdentifierExpression { Name: "stdin" })
+                && stdinMember.Receiver is IdentifierExpression { Name: PscpBinder.StdinName })
             {
                 AnalyzeArgumentsNormally(call.Arguments, scope);
-                TypeSyntax? stdinType = AnalyzeKnownStdinCall(stdinMember.MemberName, call.Arguments);
+                TypeSyntax? stdinType = AnalyzeKnownStdinCall(stdinMember, call.Arguments);
                 if (stdinType is not null)
                 {
                     return stdinType;
@@ -888,13 +1420,15 @@ internal static class PscpSemanticAnalyzer
                 AnalyzeArgumentsNormally(call.Arguments, scope);
             }
 
+            CheckCallable(call, scope, calleeType);
+
             if (call.Callee is MemberAccessExpression member)
             {
                 string memberName = PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName);
                 TypeSyntax? receiverType = UnwrapNullable(GetType(member.Receiver));
                 if (receiverType is ArrayTypeSyntax && memberName == "Add")
                 {
-                    Error("Arrays do not contain an `Add` method. Use indexing or a growable collection type.", default);
+                    Error(DiagnosticCodes.SurfaceTypeError, "Arrays do not have an `Add` method. Use indexing, or a growable collection such as `List<T>`.", _spans.GetName(member));
                 }
 
                 if (receiverType is NamedTypeSyntax namedReceiver
@@ -902,11 +1436,118 @@ internal static class PscpSemanticAnalyzer
                     && memberName is "TryPeek" or "TryDequeue"
                     && (call.Arguments.Count != 2 || call.Arguments.Any(argument => !IsOutLike(argument))))
                 {
-                    Error($"`{namedReceiver.Name}.{memberName}` requires two `out` arguments: item and priority.", default);
+                    Error(DiagnosticCodes.SurfaceTypeError, $"`{namedReceiver.Name}.{memberName}` requires two `out` arguments: item and priority.", _spans.Get(call));
+                }
+
+                CheckCultureOrderedSort(call, member, memberName, receiverType);
+                if (receiverType is NamedTypeSyntax { Name: "Dictionary" or "System.Collections.Generic.Dictionary" } dictionary
+                    && dictionary.TypeArguments.Count == 2)
+                {
+                    TypeSyntax? dictionaryResult = memberName switch
+                    {
+                        "ContainsKey" or "ContainsValue" or "Remove" or "TryAdd" or "TryGetValue" => TypeName("bool"),
+                        "GetValueOrDefault" => dictionary.TypeArguments[1],
+                        _ => null,
+                    };
+                    if (dictionaryResult is not null)
+                    {
+                        return dictionaryResult;
+                    }
+                }
+
+                if (receiverType is NamedTypeSyntax { TypeArguments.Count: 1 } generic
+                    && memberName is "Contains" or "Add" or "Remove"
+                    && generic.Name is "HashSet" or "SortedSet" or "List")
+                {
+                    return memberName == "Add" && generic.Name == "List" ? TypeName("void") : TypeName("bool");
                 }
             }
 
             return calleeType;
+        }
+
+        // Spec §11.2, §13.3: the head of a space-call and the target of a pipe must be callable.
+        private void CheckCallable(CallExpression call, Scope scope, TypeSyntax? calleeType)
+        {
+            if (!call.IsSpaceSeparated && call.Pipe == PipeKind.None)
+            {
+                return;
+            }
+
+            bool notCallable = call.Callee switch
+            {
+                LiteralExpression or InterpolatedStringExpression or CollectionExpression or TupleExpression => true,
+                IdentifierExpression identifier when scope.TryResolveValue(identifier.Name, out Symbol? symbol) && symbol is { Kind: SymbolKind.Local or SymbolKind.Field }
+                    => IsDefinitelyNotDelegate(calleeType),
+                _ => false,
+            };
+
+            if (!notCallable)
+            {
+                return;
+            }
+
+            string calleeText = call.Callee is IdentifierExpression named ? $"`{named.Name}`" : "this value";
+            Error(
+                DiagnosticCodes.NotCallable,
+                call.Pipe != PipeKind.None
+                    ? $"The pipe target {calleeText} is not a function. The right side of `|>` must be a function, a method, or a call such as `f(y)`."
+                    : $"{calleeText} is not a function, so it cannot take arguments. Separate the values with an operator or a comma.",
+                _spans.Get(call.Callee));
+        }
+
+        private static bool IsDefinitelyNotDelegate(TypeSyntax? type)
+            => type switch
+            {
+                ArrayTypeSyntax or TupleTypeSyntax => true,
+                NamedTypeSyntax { Name: "int" or "long" or "double" or "decimal" or "bool" or "char" or "string" } => true,
+                NamedTypeSyntax { Name: "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet" or "Dictionary" or "PriorityQueue" or "IEnumerable" } => true,
+                _ => false,
+            };
+
+        // Spec §25.4: .NET sorts of strings follow the current culture.
+        private void CheckCultureOrderedSort(CallExpression call, MemberAccessExpression member, string memberName, TypeSyntax? receiverType)
+        {
+            bool stringListSort = memberName == "Sort"
+                && call.Arguments.Count == 0
+                && receiverType is NamedTypeSyntax { Name: "List", TypeArguments: [var element] }
+                && ContainsString(element);
+            bool stringArraySort = memberName == "Sort"
+                && member.Receiver is IdentifierExpression { Name: "Array" }
+                && call.Arguments.Count == 1
+                && call.Arguments[0] is ExpressionArgumentSyntax sortedArgument
+                && GetType(sortedArgument.Expression) is ArrayTypeSyntax { Depth: 1 } sortedArray
+                && ContainsString(sortedArray.ElementType);
+            if (stringListSort || stringArraySort)
+            {
+                Warning(
+                    DiagnosticCodes.CultureOrderedStrings,
+                    "This .NET sort orders strings by the current culture (`a A b B`), not ordinally. Pass `string.asc` (or `StringComparer.Ordinal`), or use `.sort()`.",
+                    _spans.Get(call));
+            }
+        }
+
+        private static bool ContainsString(TypeSyntax? type)
+            => type switch
+            {
+                NamedTypeSyntax { Name: "string" } => true,
+                TupleTypeSyntax tuple => tuple.Elements.Any(ContainsString),
+                _ => false,
+            };
+
+        // Spec §21: `bool "text"` parses; the conversion of a non-renderable value is an error.
+        private void CheckConversion(CallExpression call, string keyword)
+        {
+            if (call.Arguments.Count != 1)
+            {
+                Error(DiagnosticCodes.SurfaceTypeError, $"`{keyword}` converts exactly one value.", _spans.Get(call));
+                return;
+            }
+
+            if (keyword == "string" && call.Arguments[0] is ExpressionArgumentSyntax argument)
+            {
+                CheckRenderable(GetType(argument.Expression), argument.Expression);
+            }
         }
 
         private void AnalyzeArgumentsNormally(IReadOnlyList<ArgumentSyntax> arguments, Scope scope)
@@ -919,9 +1560,8 @@ internal static class PscpSemanticAnalyzer
                         AnalyzeExpression(expressionArgument.Expression, scope);
                         break;
                     case OutDeclarationArgumentSyntax outDeclaration:
-                        ConsumeType(outDeclaration.Type);
-                        ConsumeBinding(outDeclaration.Target);
-                        DeclareBinding(outDeclaration.Target, Normalize(outDeclaration.Type), scope, true);
+                        CheckBindingNames(outDeclaration.Target);
+                        DeclareBinding(outDeclaration.Target, outDeclaration.Type is NamedTypeSyntax { Name: "var" } ? null : Normalize(outDeclaration.Type), scope, true);
                         break;
                 }
             }
@@ -944,7 +1584,7 @@ internal static class PscpSemanticAnalyzer
             else if (call.Callee is MemberAccessExpression memberAccess)
             {
                 string memberName = PscpIntrinsicCatalog.StripGenericSuffix(memberAccess.MemberName);
-                if (PscpIntrinsicCatalog.IntrinsicCallNames.Contains(memberName)
+                if ((PscpIntrinsicCatalog.IntrinsicCallNames.Contains(memberName) || PscpIntrinsicCatalog.CollectionHelperNames.Contains(memberName))
                     && IsIntrinsicMemberCall(memberAccess, memberName, scope))
                 {
                     intrinsicName = memberName;
@@ -957,13 +1597,101 @@ internal static class PscpSemanticAnalyzer
             }
 
             Expression? receiver = call.Callee is MemberAccessExpression receiverMember ? receiverMember.Receiver : null;
-            if (!TryAnalyzeIntrinsicLambdaArguments(intrinsicName, receiver, call.Arguments, scope))
+            AnalyzeIntrinsicArguments(intrinsicName, receiver, call.Arguments, scope);
+            intrinsicType = IntrinsicType(intrinsicName, call.Arguments, receiver is null ? null : GetType(receiver));
+            CheckIntrinsicCall(call, intrinsicName, receiver);
+            return true;
+        }
+
+        // Types the lambda arguments of aggregates and helpers from the source's element type (spec §22, §24).
+        private void AnalyzeIntrinsicArguments(string name, Expression? receiver, IReadOnlyList<ArgumentSyntax> arguments, Scope scope)
+        {
+            Expression? source = receiver;
+            int first = 0;
+            if (source is null
+                && name is not ("min" or "max" or "chmin" or "chmax" or "abs" or "sqrt" or "clamp" or "gcd" or "lcm" or "floor" or "ceil" or "round" or "pow" or "popcount" or "bitLength")
+                && arguments.Count > 0
+                && arguments[0] is ExpressionArgumentSyntax { Expression: not LambdaExpression } sourceArgument)
             {
-                AnalyzeArgumentsNormally(call.Arguments, scope);
+                source = sourceArgument.Expression;
+                first = 1;
+                AnalyzeExpression(source, scope);
             }
 
-            intrinsicType = IntrinsicType(intrinsicName, call.Arguments, receiver is null ? null : GetType(receiver));
-            return true;
+            TypeSyntax? element = source is null ? null : IterationElement(GetType(source));
+            TypeSyntax? seed = null;
+            for (int i = first; i < arguments.Count; i++)
+            {
+                if (arguments[i] is ExpressionArgumentSyntax { Expression: LambdaExpression lambda })
+                {
+                    IReadOnlyList<TypeSyntax?> parameterTypes = name switch
+                    {
+                        "sortWith" => [element, element],
+                        "fold" or "scan" or "mapFold" => [seed, element],
+                        _ => [element],
+                    };
+                    _lambdaResultTypes[lambda] = AnalyzeLambdaWithParameterTypes(lambda, scope, parameterTypes);
+                    continue;
+                }
+
+                AnalyzeArgumentsNormally([arguments[i]], scope);
+                if (i == first && name is "fold" or "scan" or "mapFold")
+                {
+                    seed = ArgType(arguments, i);
+                }
+            }
+        }
+
+        private readonly Dictionary<LambdaExpression, TypeSyntax?> _lambdaResultTypes = new(ReferenceEqualityComparer.Instance);
+
+        private TypeSyntax? LambdaResultType(IReadOnlyList<ArgumentSyntax> arguments)
+        {
+            foreach (ArgumentSyntax argument in arguments)
+            {
+                if (argument is ExpressionArgumentSyntax { Expression: LambdaExpression lambda } && _lambdaResultTypes.TryGetValue(lambda, out TypeSyntax? type))
+                {
+                    return type;
+                }
+            }
+
+            return null;
+        }
+
+        private void CheckIntrinsicCall(CallExpression call, string name, Expression? receiver)
+        {
+            if (name is "min" or "max" && receiver is null && call.Arguments.Count == 1)
+            {
+                TypeSyntax? argumentType = ArgType(call.Arguments, 0);
+                if (argumentType is NamedTypeSyntax { Name: "int" or "long" or "double" or "decimal" or "char" or "bool" })
+                {
+                    Error(
+                        DiagnosticCodes.ScalarMinMax,
+                        $"`{name}` of a single `{DisplayType(argumentType)}` has nothing to compare. Give two or more values (`{name} a b`) or a sequence (`{name} xs`).",
+                        _spans.Get(call));
+                }
+            }
+
+            if (name == "groupCount")
+            {
+                Warning(DiagnosticCodes.Deprecated, "`groupCount()` is deprecated and will be removed in v0.8. Use `freq()`.", _spans.Get(call.Callee));
+            }
+
+            if (name is "sort" or "min" or "max" or "minBy" or "maxBy" or "lowerBound" or "upperBound")
+            {
+                TypeSyntax? ordered = name is "minBy" or "maxBy"
+                    ? LambdaResultType(call.Arguments)
+                    : receiver is not null ? IterationElement(GetType(receiver)) : call.Arguments.Count == 1 ? IterationElement(ArgType(call.Arguments, 0)) : ArgType(call.Arguments, 0);
+                if (ordered is NamedTypeSyntax { TypeArguments.Count: 0 } orderedType
+                    && TryResolveType(orderedType.Name, out TypeInfo? typeInfo)
+                    && typeInfo is not null
+                    && !typeInfo.HasOrdering)
+                {
+                    Error(
+                        DiagnosticCodes.NoDefaultOrder,
+                        $"`{typeInfo.Name}` has no default order. Define `operator<=>` in the type, or use `sortBy` / `minBy` with a key.",
+                        _spans.Get(call));
+                }
+            }
         }
 
         private bool IsIntrinsicMemberCall(MemberAccessExpression memberAccess, string memberName, Scope scope)
@@ -976,72 +1704,100 @@ internal static class PscpSemanticAnalyzer
             }
 
             TypeSyntax? receiverType = GetType(memberAccess.Receiver) ?? AnalyzeExpression(memberAccess.Receiver, scope);
+            if (UnwrapNullable(receiverType) is NamedTypeSyntax named
+                && TryResolveType(named.Name, out TypeInfo? userType)
+                && userType is not null
+                && userType.Members.ContainsKey(memberName))
+            {
+                // A real member wins over the intrinsic alias (spec §5.2).
+                return false;
+            }
+
             if (memberName is "sum" or "sumBy" or "min" or "max" or "minBy" or "maxBy"
-                or "count" or "any" or "all" or "find" or "findIndex" or "findLastIndex"
-                or "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy"
-                or "groupCount" or "freq" or "index"
-                or "map" or "filter" or "fold" or "scan" or "mapFold")
+                || PscpIntrinsicCatalog.CollectionHelperNames.Contains(memberName))
             {
-                return EnumerableElement(receiverType) is not null;
+                return IterationElement(receiverType) is not null
+                    || receiverType is null && memberAccess.Receiver is not IdentifierExpression { Name: PscpBinder.StdinName or PscpBinder.StdoutName };
             }
 
             return false;
         }
 
-        private bool TryAnalyzeIntrinsicLambdaArguments(string intrinsicName, Expression? receiver, IReadOnlyList<ArgumentSyntax> arguments, Scope scope)
-        {
-            if (intrinsicName is "sumBy" or "minBy" or "maxBy" or "count" or "any" or "all" or "find" or "findIndex" or "findLastIndex" or "sortBy")
-            {
-                if (!TryGetSourceAndUnaryLambdaCall(receiver, arguments, out Expression? source, out LambdaExpression? lambda))
-                {
-                    return false;
-                }
-
-                AnalyzeExpression(source!, scope);
-                TypeSyntax? elementType = EnumerableElement(GetType(source));
-                AnalyzeLambdaWithParameterTypes(lambda!, scope, [elementType]);
-                return true;
-            }
-
-            if (intrinsicName == "sortWith")
-            {
-                if (!TryGetSourceAndBinaryLambdaCall(receiver, arguments, out Expression? source, out LambdaExpression? lambda))
-                {
-                    return false;
-                }
-
-                AnalyzeExpression(source!, scope);
-                TypeSyntax? elementType = EnumerableElement(GetType(source));
-                AnalyzeLambdaWithParameterTypes(lambda!, scope, [elementType, elementType]);
-                return true;
-            }
-
-            return false;
-        }
-
-        private void AnalyzeLambdaWithParameterTypes(LambdaExpression lambda, Scope scope, IReadOnlyList<TypeSyntax?> parameterTypes)
+        private TypeSyntax? AnalyzeLambdaWithParameterTypes(LambdaExpression lambda, Scope scope, IReadOnlyList<TypeSyntax?> parameterTypes)
         {
             Scope lambdaScope = new(scope);
             for (int i = 0; i < lambda.Parameters.Count; i++)
             {
-                TypeSyntax? parameterType = i < parameterTypes.Count ? parameterTypes[i] : Normalize(lambda.Parameters[i].Type);
+                TypeSyntax? parameterType = Normalize(lambda.Parameters[i].Type) ?? (i < parameterTypes.Count ? parameterTypes[i] : null);
                 DeclareBinding(lambda.Parameters[i].Target, parameterType, lambdaScope, lambda.Parameters[i].Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
             }
 
-            switch (lambda.Body)
+            return AnalyzeLambdaBody(lambda.Body, lambdaScope);
+        }
+
+        private TypeSyntax? AnalyzeLambdaBody(LambdaBody body, Scope lambdaScope)
+        {
+            switch (body)
             {
                 case LambdaExpressionBody expressionBody:
-                    AnalyzeExpression(expressionBody.Expression, lambdaScope);
-                    break;
+                    if (expressionBody.Expression is AssignmentExpression bodyAssignment)
+                    {
+                        _statementAssignments.Add(bodyAssignment);
+                    }
+
+                    return AnalyzeExpression(expressionBody.Expression, lambdaScope);
                 case LambdaBlockBody blockBody:
-                    AnalyzeBlock(blockBody.Block, lambdaScope);
-                    break;
+                    return AnalyzeBlockLike(blockBody.Block, lambdaScope);
+                default:
+                    return null;
             }
         }
 
-        private TypeSyntax? AnalyzeKnownStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments)
+        // Deprecated `stdin` names (spec §17.8) and their replacements.
+        internal static readonly IReadOnlyDictionary<string, string> DeprecatedStdinMembers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
+            ["int"] = "readInt()", ["long"] = "readLong()", ["double"] = "readDouble()", ["decimal"] = "readDecimal()",
+            ["bool"] = "readBool()", ["char"] = "readChar()", ["str"] = "readString()", ["line"] = "readLine()",
+            ["lines"] = "readLines(n)", ["words"] = "readWords()", ["chars"] = "readChars()",
+            ["array"] = "readArray<T>(n)", ["list"] = "readList<T>(n)", ["linkedList"] = "readLinkedList<T>(n)",
+            ["readTuple2"] = "readTuple<A, B>()", ["readTuple3"] = "readTuple<A, B, C>()", ["tuple2"] = "readTuple<A, B>()", ["tuple3"] = "readTuple<A, B, C>()",
+            ["readTuples2"] = "readArray<(A, B)>(n)", ["readTuples3"] = "readArray<(A, B, C)>(n)", ["tuples2"] = "readArray<(A, B)>(n)", ["tuples3"] = "readArray<(A, B, C)>(n)",
+            ["readGridInt"] = "readGrid<int>(n, m)", ["readGridLong"] = "readGrid<long>(n, m)", ["gridInt"] = "readGrid<int>(n, m)", ["gridLong"] = "readGrid<long>(n, m)",
+            ["readNestedArray"] = "readGrid<T>(n, m)", ["nestedArray"] = "readGrid<T>(n, m)",
+            ["charGrid"] = "readCharGrid(n)", ["wordGrid"] = "readWordGrid(n)",
+        };
+
+        private TypeSyntax? AnalyzeKnownStdinCall(MemberAccessExpression member, IReadOnlyList<ArgumentSyntax> arguments)
+        {
+            string memberName = member.MemberName;
             string root = PscpIntrinsicCatalog.StripGenericSuffix(memberName);
+            if (DeprecatedStdinMembers.TryGetValue(root, out string? replacement))
+            {
+                Warning(
+                    DiagnosticCodes.Deprecated,
+                    $"`stdin.{root}` is deprecated and will be removed in v0.8. Use `stdin.{replacement}`.",
+                    _spans.GetName(member));
+            }
+
+            IReadOnlyList<TypeSyntax>? typeArguments = TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? parsed) ? parsed : null;
+            if (root is "readArray" or "array" or "readList" or "list" or "readLinkedList" or "linkedList" or "readGrid" or "readNestedArray" or "nestedArray"
+                && typeArguments is { Count: 1 }
+                && !IsTokenReadable(typeArguments[0]))
+            {
+                Error(
+                    DiagnosticCodes.NotTokenReadable,
+                    $"`{DisplayType(typeArguments[0])}` cannot be read from input. Use `int`, `long`, `double`, `decimal`, `bool`, `char`, `string`, or a flat tuple of them.",
+                    _spans.GetName(member));
+            }
+
+            if (root is "readTuple" && (typeArguments is null || typeArguments.Count is < 2 or > 7 || !typeArguments.All(IsTokenReadable)))
+            {
+                Error(
+                    DiagnosticCodes.NotTokenReadable,
+                    "`readTuple<...>()` reads 2 to 7 values of `int`, `long`, `double`, `decimal`, `bool`, `char` or `string`.",
+                    _spans.GetName(member));
+            }
+
             return root switch
             {
                 "int" or "readInt" => TypeName("int"),
@@ -1051,25 +1807,16 @@ internal static class PscpSemanticAnalyzer
                 "bool" or "readBool" => TypeName("bool"),
                 "char" or "readChar" => TypeName("char"),
                 "str" or "readString" or "line" or "readLine" or "readRestOfLine" => TypeName("string"),
+                "hasNext" or "hasNextLine" => TypeName("bool"),
                 "lines" or "readLines" => new ArrayTypeSyntax(TypeName("string"), 1),
                 "words" or "readWords" => new ArrayTypeSyntax(TypeName("string"), 1),
                 "chars" or "readChars" => new ArrayTypeSyntax(TypeName("char"), 1),
-                "array" or "readArray" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? arrayArgs) && arrayArgs is not null && arrayArgs.Count == 1
-                    => new ArrayTypeSyntax(arrayArgs[0], 1),
-                "list" or "readList" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? listArgs) && listArgs is not null && listArgs.Count == 1
-                    => new NamedTypeSyntax("List", Immutable.List(listArgs[0])),
-                "linkedList" or "readLinkedList" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? linkedListArgs) && linkedListArgs is not null && linkedListArgs.Count == 1
-                    => new NamedTypeSyntax("LinkedList", Immutable.List(linkedListArgs[0])),
-                "tuple2" or "readTuple2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple2Args) && tuple2Args is not null && tuple2Args.Count == 2
-                    => new TupleTypeSyntax(tuple2Args),
-                "tuple3" or "readTuple3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuple3Args) && tuple3Args is not null && tuple3Args.Count == 3
-                    => new TupleTypeSyntax(tuple3Args),
-                "tuples2" or "readTuples2" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples2Args) && tuples2Args is not null && tuples2Args.Count == 2
-                    => new ArrayTypeSyntax(new TupleTypeSyntax(tuples2Args), 1),
-                "tuples3" or "readTuples3" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? tuples3Args) && tuples3Args is not null && tuples3Args.Count == 3
-                    => new ArrayTypeSyntax(new TupleTypeSyntax(tuples3Args), 1),
-                "nestedArray" or "readNestedArray" when TryParseGenericTypeArguments(memberName, out IReadOnlyList<TypeSyntax>? nestedArrayArgs) && nestedArrayArgs is not null && nestedArrayArgs.Count == 1
-                    => new ArrayTypeSyntax(nestedArrayArgs[0], 2),
+                "array" or "readArray" when typeArguments is { Count: 1 } => new ArrayTypeSyntax(typeArguments[0], 1),
+                "list" or "readList" when typeArguments is { Count: 1 } => new NamedTypeSyntax("List", Immutable.List(typeArguments[0])),
+                "linkedList" or "readLinkedList" when typeArguments is { Count: 1 } => new NamedTypeSyntax("LinkedList", Immutable.List(typeArguments[0])),
+                "readTuple" or "tuple2" or "readTuple2" or "tuple3" or "readTuple3" when typeArguments is { Count: >= 2 } => new TupleTypeSyntax(typeArguments),
+                "tuples2" or "readTuples2" or "tuples3" or "readTuples3" when typeArguments is { Count: >= 2 } => new ArrayTypeSyntax(new TupleTypeSyntax(typeArguments), 1),
+                "readGrid" or "nestedArray" or "readNestedArray" when typeArguments is { Count: 1 } => new ArrayTypeSyntax(typeArguments[0], 2),
                 "gridInt" or "readGridInt" => new ArrayTypeSyntax(TypeName("int"), 2),
                 "gridLong" or "readGridLong" => new ArrayTypeSyntax(TypeName("long"), 2),
                 "charGrid" or "readCharGrid" => new ArrayTypeSyntax(TypeName("char"), 2),
@@ -1324,82 +2071,108 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzeMember(MemberAccessExpression member, Scope scope)
         {
             string memberName = PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName);
-            TextSpan span = _tracker.Take(member.MemberName);
+            TextSpan span = _spans.GetName(member);
 
             if (memberName is "asc" or "desc")
             {
+                if (member.Receiver is TupleExpression tupleTypeExpression && TryGetTupleTypeFromExpression(tupleTypeExpression, scope, out TypeSyntax? tupleType))
+                {
+                    return new NamedTypeSyntax("IComparer", Immutable.List(tupleType!));
+                }
+
                 if (!TryGetTypeLikeReceiverName(member.Receiver, scope, out string? typeLikeName))
                 {
-                    Error($"`{memberName}` comparator sugar requires a type receiver such as `int.{memberName}` or `MyType.{memberName}`.", span);
+                    Error(DiagnosticCodes.SurfaceTypeError, $"`{memberName}` comparator sugar requires a type receiver such as `int.{memberName}` or `MyType.{memberName}`.", span);
                     return new NamedTypeSyntax("IComparer", Immutable.List(TypeName("object")));
                 }
 
                 return new NamedTypeSyntax("IComparer", Immutable.List(TypeName(typeLikeName!)));
             }
 
-            bool hasTypeLikeReceiver = TryGetTypeLikeReceiverName(member.Receiver, scope, out string? typeLikeReceiverName);
-            TypeSyntax? receiverType = hasTypeLikeReceiver ? TypeName(typeLikeReceiverName!) : AnalyzeExpression(member.Receiver, scope);
-            TypeSyntax? effectiveReceiverType = UnwrapNullable(receiverType);
-            if (receiverType is NullableTypeSyntax)
+            if (member.Receiver is IdentifierExpression intrinsicReceiver
+                && scope.TryResolveValue(intrinsicReceiver.Name, out Symbol? intrinsicSymbol)
+                && intrinsicSymbol is { Kind: SymbolKind.Intrinsic }
+                && PscpIntrinsicCatalog.TryGetKnownMembers(DisplayName(intrinsicReceiver.Name), out IReadOnlySet<string>? members)
+                && members is not null)
             {
-                Warning($"Possible null dereference on nullable receiver when accessing `{memberName}`.", span);
-            }
-
-            string receiverName = hasTypeLikeReceiver
-                ? typeLikeReceiverName!
-                : member.Receiver is IdentifierExpression id ? id.Name : (effectiveReceiverType as NamedTypeSyntax)?.Name ?? string.Empty;
-
-            if (PscpIntrinsicCatalog.TryGetKnownMembers(receiverName, out IReadOnlySet<string>? members) && members is not null)
-            {
+                string receiverDisplay = DisplayName(intrinsicReceiver.Name);
+                ExpressionTypes[member.Receiver] = intrinsicSymbol.Type;
                 if (!members.Contains(memberName))
                 {
-                    if (PscpIntrinsicCatalog.StrictIntrinsicReceivers.Contains(receiverName))
+                    if (PscpIntrinsicCatalog.StrictIntrinsicReceivers.Contains(receiverDisplay))
                     {
-                        Error($"Unknown intrinsic member `{receiverName}.{memberName}`.", span);
+                        Error(DiagnosticCodes.UnknownIoMember, $"`{receiverDisplay}` has no member `{memberName}`.", span);
                     }
 
                     return null;
                 }
 
-                return receiverName switch
+                if (receiverDisplay == "Array" && memberName == "zero")
+                {
+                    Warning(DiagnosticCodes.Deprecated, "`Array.zero(n)` is deprecated and will be removed in v0.8. Use `new[n]`.", span);
+                }
+
+                return receiverDisplay switch
                 {
                     "stdout" => TypeName("void"),
                     "stdin" when memberName is "int" or "readInt" => TypeName("int"),
                     "stdin" when memberName is "long" or "readLong" => TypeName("long"),
                     "stdin" when memberName is "double" or "readDouble" => TypeName("double"),
                     "stdin" when memberName is "decimal" or "readDecimal" => TypeName("decimal"),
-                    "stdin" when memberName is "bool" or "readBool" => TypeName("bool"),
+                    "stdin" when memberName is "bool" or "readBool" or "hasNext" or "hasNextLine" => TypeName("bool"),
                     "stdin" when memberName is "char" or "readChar" => TypeName("char"),
                     "stdin" when memberName is "str" or "readString" or "line" or "readLine" or "readRestOfLine" => TypeName("string"),
                     _ => null,
                 };
             }
 
+            bool hasTypeLikeReceiver = TryGetTypeLikeReceiverName(member.Receiver, scope, out string? typeLikeReceiverName);
+            TypeSyntax? receiverType = hasTypeLikeReceiver ? TypeName(typeLikeReceiverName!) : AnalyzeExpression(member.Receiver, scope);
+            TypeSyntax? effectiveReceiverType = UnwrapNullable(receiverType);
+            if (receiverType is NullableTypeSyntax && !member.IsNullConditional)
+            {
+                Warning(DiagnosticCodes.GenericWarning, $"Possible null dereference on nullable receiver when accessing `{memberName}`.", span);
+            }
+
+            string receiverName = hasTypeLikeReceiver
+                ? typeLikeReceiverName!
+                : member.Receiver is IdentifierExpression id ? id.Name : (effectiveReceiverType as NamedTypeSyntax)?.Name ?? string.Empty;
+
             if (hasTypeLikeReceiver)
             {
                 if (TryResolveType(receiverName, out TypeInfo? receiverTypeInfo) && receiverTypeInfo is not null)
                 {
-                    if (!receiverTypeInfo.Members.TryGetValue(memberName, out Symbol? staticSymbol))
+                    if (receiverTypeInfo.NestedTypes.TryGetValue(memberName, out TypeInfo? nestedType))
                     {
-                        Error($"Type `{receiverTypeInfo.Name}` does not contain a member named `{memberName}`.", span);
-                        return null;
+                        return TypeName(nestedType.Name);
                     }
 
-                    return staticSymbol.Type;
+                    return receiverTypeInfo.Members.TryGetValue(memberName, out Symbol? staticSymbol) ? staticSymbol.Type : null;
                 }
 
-                return null;
+                TryInferKnownExternalMemberType(receiverName, effectiveReceiverType, hasTypeLikeReceiver, memberName, out TypeSyntax? staticExternal);
+                return staticExternal;
             }
 
             if (effectiveReceiverType is NamedTypeSyntax receiverNamed && TryResolveType(receiverNamed.Name, out TypeInfo? typeInfo) && typeInfo is not null)
             {
-                if (!typeInfo.Members.TryGetValue(memberName, out Symbol? symbol))
+                if (typeInfo.Members.TryGetValue(memberName, out Symbol? symbol))
                 {
-                    Error($"Type `{typeInfo.Name}` does not contain a member named `{memberName}`.", span);
-                    return null;
+                    return symbol.Type;
                 }
 
-                return symbol.Type;
+                if (memberName is "ToString" or "Equals" or "GetHashCode" or "GetType" or "CompareTo" or "Deconstruct")
+                {
+                    return memberName switch
+                    {
+                        "ToString" => TypeName("string"),
+                        "Equals" => TypeName("bool"),
+                        "GetHashCode" or "CompareTo" => TypeName("int"),
+                        _ => null,
+                    };
+                }
+
+                return null;
             }
 
             if (effectiveReceiverType is ArrayTypeSyntax && memberName == "Length")
@@ -1409,9 +2182,23 @@ internal static class PscpSemanticAnalyzer
 
             if (effectiveReceiverType is NamedTypeSyntax named
                 && memberName == "Count"
-                && named.Name is "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "Dictionary" or "PriorityQueue" or "SortedSet")
+                && named.Name is "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "Dictionary" or "PriorityQueue" or "SortedSet" or "SortedDictionary")
             {
                 return TypeName("int");
+            }
+
+            if (effectiveReceiverType is NamedTypeSyntax { TypeArguments.Count: 2 } dictionary
+                && dictionary.Name is "Dictionary" or "SortedDictionary"
+                && memberName is "Keys" or "Values")
+            {
+                return new NamedTypeSyntax("IEnumerable", Immutable.List(memberName == "Keys" ? dictionary.TypeArguments[0] : dictionary.TypeArguments[1]));
+            }
+
+            if (effectiveReceiverType is NamedTypeSyntax { TypeArguments.Count: 1 } sortedSet
+                && sortedSet.Name is "SortedSet"
+                && memberName is "Min" or "Max")
+            {
+                return sortedSet.TypeArguments[0];
             }
 
             if (TryInferKnownExternalMemberType(receiverName, effectiveReceiverType, hasTypeLikeReceiver, memberName, out TypeSyntax? knownExternalType))
@@ -1422,39 +2209,67 @@ internal static class PscpSemanticAnalyzer
             return null;
         }
 
+        // `(int, string).asc`: a tuple of type names written as a tuple expression.
+        private bool TryGetTupleTypeFromExpression(TupleExpression tuple, Scope scope, out TypeSyntax? type)
+        {
+            List<TypeSyntax> elements = [];
+            foreach (Expression element in tuple.Elements)
+            {
+                if (element is TupleExpression nested && TryGetTupleTypeFromExpression(nested, scope, out TypeSyntax? nestedType))
+                {
+                    elements.Add(nestedType!);
+                    continue;
+                }
+
+                if (!TryGetTypeLikeReceiverName(element, scope, out string? name))
+                {
+                    type = null;
+                    return false;
+                }
+
+                elements.Add(TypeName(name!));
+            }
+
+            type = new TupleTypeSyntax(elements);
+            return true;
+        }
+
         private TypeSyntax? AnalyzeIndex(IndexExpression index, Scope scope)
         {
             TypeSyntax? receiverType = AnalyzeExpression(index.Receiver, scope);
-            if (receiverType is NullableTypeSyntax)
+            if (receiverType is NullableTypeSyntax && !index.IsNullConditional)
             {
-                Warning("Possible null dereference on nullable receiver when indexing.", default);
+                Warning(DiagnosticCodes.GenericWarning, "Possible null dereference on nullable receiver when indexing.", _spans.Get(index));
             }
 
             foreach (Expression argument in index.Arguments) AnalyzeExpression(argument, scope);
+            TypeSyntax? effective = UnwrapNullable(receiverType);
             if (index.Arguments.Any(argument => argument is SliceExpression))
             {
-                if (receiverType is not NamedTypeSyntax { Name: "string" } && receiverType is not ArrayTypeSyntax)
+                // Spec §15.3: arrays, strings and `List<T>` can be sliced.
+                bool supported = effective is ArrayTypeSyntax
+                    || effective is NamedTypeSyntax { Name: "string" or "List" or "System.Collections.Generic.List" };
+                if (!supported && effective is not null)
                 {
-                    Error("Slicing is supported only on strings and arrays.", default);
+                    Error(
+                        DiagnosticCodes.UnsupportedSliceTarget,
+                        $"A `{DisplayType(effective)}` cannot be sliced. Slices work on arrays, `string` and `List<T>`.",
+                        _spans.Get(index));
                 }
 
-                return receiverType switch
-                {
-                    NamedTypeSyntax { Name: "string" } => TypeName("string"),
-                    ArrayTypeSyntax array => new ArrayTypeSyntax(array.ElementType, array.Depth),
-                    _ => receiverType,
-                };
+                return effective;
             }
 
-            return receiverType switch
-                {
-                    ArrayTypeSyntax { Depth: 1 } array => array.ElementType,
-                    ArrayTypeSyntax array => new ArrayTypeSyntax(array.ElementType, array.Depth - 1),
-                    NamedTypeSyntax named when named.TypeArguments.Count == 2
-                        && named.Name is "Dictionary" or "System.Collections.Generic.Dictionary" => named.TypeArguments[1],
-                    NamedTypeSyntax named when named.TypeArguments.Count == 1 => named.TypeArguments[0],
-                    _ => null,
-                };
+            return effective switch
+            {
+                ArrayTypeSyntax { Depth: 1 } array => array.ElementType,
+                ArrayTypeSyntax array => new ArrayTypeSyntax(array.ElementType, array.Depth - 1),
+                NamedTypeSyntax { Name: "string" } => TypeName("char"),
+                NamedTypeSyntax named when named.TypeArguments.Count == 2
+                    && named.Name is "Dictionary" or "System.Collections.Generic.Dictionary" or "SortedDictionary" => named.TypeArguments[1],
+                NamedTypeSyntax named when named.TypeArguments.Count == 1 => named.TypeArguments[0],
+                _ => null,
+            };
         }
 
         private TypeSyntax? AnalyzeWithExpression(WithExpression withExpression, Scope scope)
@@ -1472,13 +2287,11 @@ internal static class PscpSemanticAnalyzer
         {
             AnalyzeExpression(switchExpression.Receiver, scope);
             TypeSyntax? resultType = null;
+            TypeSyntax? receiverType = GetType(switchExpression.Receiver);
             foreach (SwitchArm arm in switchExpression.Arms)
             {
                 Scope armScope = new(scope);
-                foreach (string designation in arm.Designations)
-                {
-                    armScope.DeclareValue(designation, new Symbol(SymbolKind.Local, null, false));
-                }
+                DeclarePatternDesignations(arm.Pattern, receiverType, armScope);
 
                 if (arm.Guard is not null)
                 {
@@ -1506,11 +2319,16 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeTupleProjection(TupleProjectionExpression projection, Scope scope)
         {
-            TypeSyntax? receiverType = AnalyzeExpression(projection.Receiver, scope);
+            TypeSyntax? receiverType = UnwrapNullable(AnalyzeExpression(projection.Receiver, scope));
             TypeSyntax? elementType = TupleElement(receiverType, projection.Position - 1);
-            if (elementType is null)
+            if (elementType is null && receiverType is not null)
             {
-                Error($"Invalid tuple projection `. {projection.Position}`.".Replace(". ", "."), default);
+                Error(
+                    DiagnosticCodes.SurfaceTypeError,
+                    receiverType is TupleTypeSyntax tuple
+                        ? $"`.{projection.Position}` is out of range: the tuple has {tuple.Elements.Count} elements."
+                        : $"`.{projection.Position}` needs a tuple, but the value is a `{DisplayType(receiverType)}`.",
+                    _spans.Get(projection));
             }
 
             return elementType;
@@ -1521,29 +2339,58 @@ internal static class PscpSemanticAnalyzer
             Scope lambdaScope = new(scope);
             foreach (LambdaParameter parameter in lambda.Parameters)
             {
-                if (parameter.Type is not null) ConsumeType(parameter.Type);
-                ConsumeBinding(parameter.Target);
+                CheckBindingNames(parameter.Target);
                 DeclareBinding(parameter.Target, Normalize(parameter.Type), lambdaScope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
             }
 
-            return lambda.Body switch
-            {
-                LambdaExpressionBody expressionBody => AnalyzeExpression(expressionBody.Expression, lambdaScope),
-                LambdaBlockBody blockBody => AnalyzeBlockLike(blockBody.Block, lambdaScope),
-                _ => null,
-            };
+            return AnalyzeLambdaBody(lambda.Body, lambdaScope);
         }
 
         private TypeSyntax? AnalyzeNew(NewExpression creation, Scope scope)
         {
-            if (creation.Type is not null) ConsumeType(creation.Type);
-            foreach (ArgumentSyntax argument in creation.Arguments) if (argument is ExpressionArgumentSyntax ea) AnalyzeExpression(ea.Expression, scope);
+            foreach (ArgumentSyntax argument in creation.Arguments)
+            {
+                AnalyzeArgumentsNormally([argument], scope);
+            }
+
+            if (creation.Initializer is not null)
+            {
+                foreach (WithAssignment assignment in creation.Initializer) AnalyzeExpression(assignment.Value, scope);
+            }
+
+            if (creation.Type is not null)
+            {
+                CheckCultureOrderedConstruction(creation);
+            }
+
             return Normalize(creation.Type);
+        }
+
+        // Spec §25.4: `new SortedSet<string>()` without a comparer orders strings by the current culture.
+        private void CheckCultureOrderedConstruction(NewExpression creation)
+        {
+            if (creation.Arguments.Count != 0 || creation.Type is not NamedTypeSyntax named)
+            {
+                return;
+            }
+
+            TypeSyntax? key = named.Name switch
+            {
+                "SortedSet" or "SortedDictionary" or "SortedList" when named.TypeArguments.Count >= 1 => named.TypeArguments[0],
+                "PriorityQueue" when named.TypeArguments.Count == 2 => named.TypeArguments[1],
+                _ => null,
+            };
+            if (ContainsString(key))
+            {
+                Warning(
+                    DiagnosticCodes.CultureOrderedStrings,
+                    $"`new {DisplayType(named)}()` orders strings by the current culture (`a A b B`). Pass a comparer: `new(string.asc)` or `new(StringComparer.Ordinal)`.",
+                    _spans.Get(creation));
+            }
         }
 
         private TypeSyntax AnalyzeNewArray(NewArrayExpression newArray, Scope scope)
         {
-            ConsumeType(newArray.ElementType);
             foreach (Expression dimension in newArray.Dimensions) AnalyzeExpression(dimension, scope);
             return new ArrayTypeSyntax(newArray.ElementType, newArray.Dimensions.Count);
         }
@@ -1551,42 +2398,77 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? AnalyzeTargetTypedNewArray(TargetTypedNewArrayExpression targetTypedNewArray, Scope scope)
         {
             foreach (Expression dimension in targetTypedNewArray.Dimensions) AnalyzeExpression(dimension, scope);
-            return null;
+            return GetType(targetTypedNewArray);
         }
 
-        private TypeSyntax AnalyzeCollection(CollectionExpression collection, Scope scope)
+        private TypeSyntax? AnalyzeCollection(CollectionExpression collection, Scope scope)
+        {
+            TypeSyntax? elementType = AnalyzeCollectionElements(collection, scope, null);
+            return collection.Elements.Count == 0 ? null : new ArrayTypeSyntax(elementType ?? TypeName("object"), 1);
+        }
+
+        // Spec §16.1: the element type is the common type of the elements (numeric promotion allowed).
+        private TypeSyntax? AnalyzeCollectionElements(CollectionExpression collection, Scope scope, TypeSyntax? elementHint)
         {
             TypeSyntax? elementType = null;
+            bool reported = false;
             foreach (CollectionElement element in collection.Elements)
             {
-                elementType = element switch
+                TypeSyntax? current = element switch
                 {
-                    ExpressionElement expressionElement => Merge(elementType, AnalyzeExpression(expressionElement.Expression, scope)),
-                    RangeElement rangeElement => Merge(elementType, EnumerableElement(AnalyzeRange(rangeElement.Range, scope))),
-                    SpreadElement spreadElement => Merge(elementType, EnumerableElement(AnalyzeExpression(spreadElement.Expression, scope))),
-                    BuilderElement builderElement => Merge(elementType, AnalyzeBuilder(builderElement, scope)),
-                    _ => elementType,
+                    ExpressionElement expressionElement => AnalyzeExpression(expressionElement.Expression, scope, elementHint),
+                    RangeElement rangeElement => EnumerableElement(AnalyzeRange(rangeElement.Range, scope)),
+                    SpreadElement spreadElement => IterationElement(AnalyzeExpression(spreadElement.Expression, scope)),
+                    BuilderElement builderElement => AnalyzeBuilder(builderElement, scope, elementHint),
+                    _ => null,
                 };
+
+                if (current is null)
+                {
+                    continue;
+                }
+
+                if (elementType is null)
+                {
+                    elementType = current;
+                    continue;
+                }
+
+                TypeSyntax? merged = Equals(elementType, current) ? elementType : Promote(elementType, current);
+                if (merged is null && !reported && elementHint is null && IsSimpleKnownType(elementType) && IsSimpleKnownType(current))
+                {
+                    reported = true;
+                    Error(
+                        DiagnosticCodes.NoCommonElementType,
+                        $"The elements of this collection have no common type (`{DisplayType(elementType)}` and `{DisplayType(current)}`). Convert them, or declare the target type.",
+                        _spans.Get(collection));
+                }
+
+                elementType = merged ?? elementType;
             }
 
-            return new ArrayTypeSyntax(elementType ?? TypeName("object"), 1);
+            return elementType;
         }
 
-        private TypeSyntax? AnalyzeBuilder(BuilderElement builder, Scope scope)
+        private static bool IsSimpleKnownType(TypeSyntax? type)
+            => type is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "decimal" or "bool" or "char" or "string" }
+                || type is TupleTypeSyntax;
+
+        private TypeSyntax? AnalyzeBuilder(BuilderElement builder, Scope scope, TypeSyntax? elementHint = null)
         {
             AnalyzeExpression(builder.Source, scope);
             Scope builderScope = new(scope);
             if (builder.IndexTarget is not null)
             {
-                ConsumeBinding(builder.IndexTarget);
+                CheckBindingNames(builder.IndexTarget);
                 DeclareBinding(builder.IndexTarget, TypeName("int"), builderScope, false);
             }
 
-            ConsumeBinding(builder.ItemTarget);
-            DeclareBinding(builder.ItemTarget, EnumerableElement(GetType(builder.Source)), builderScope, false);
+            CheckBindingNames(builder.ItemTarget);
+            DeclareBinding(builder.ItemTarget, IterationElement(GetType(builder.Source)), builderScope, false);
             return builder.Body switch
             {
-                LambdaExpressionBody expressionBody => AnalyzeExpression(expressionBody.Expression, builderScope),
+                LambdaExpressionBody expressionBody => AnalyzeExpression(expressionBody.Expression, builderScope, elementHint),
                 LambdaBlockBody blockBody => AnalyzeBlockLike(blockBody.Block, builderScope),
                 _ => null,
             };
@@ -1594,19 +2476,18 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeAggregation(AggregationExpression aggregation, Scope scope)
         {
-            _tracker.Take(aggregation.AggregatorName);
             AnalyzeExpression(aggregation.Source, scope);
-            Scope aggrScope = new(scope);
+            Scope aggregationScope = new(scope);
             if (aggregation.IndexTarget is not null)
             {
-                ConsumeBinding(aggregation.IndexTarget);
-                DeclareBinding(aggregation.IndexTarget, TypeName("int"), aggrScope, false);
+                CheckBindingNames(aggregation.IndexTarget);
+                DeclareBinding(aggregation.IndexTarget, TypeName("int"), aggregationScope, false);
             }
 
-            ConsumeBinding(aggregation.ItemTarget);
-            DeclareBinding(aggregation.ItemTarget, EnumerableElement(GetType(aggregation.Source)), aggrScope, false);
-            if (aggregation.WhereExpression is not null) AnalyzeExpression(aggregation.WhereExpression, aggrScope);
-            TypeSyntax? bodyType = AnalyzeExpression(aggregation.Body, aggrScope);
+            CheckBindingNames(aggregation.ItemTarget);
+            DeclareBinding(aggregation.ItemTarget, IterationElement(GetType(aggregation.Source)), aggregationScope, false);
+            if (aggregation.WhereExpression is not null) AnalyzeExpression(aggregation.WhereExpression, aggregationScope);
+            TypeSyntax? bodyType = AnalyzeExpression(aggregation.Body, aggregationScope);
             return aggregation.AggregatorName switch
             {
                 "count" => TypeName("int"),
@@ -1620,12 +2501,12 @@ internal static class PscpSemanticAnalyzer
             Scope generatorScope = new(scope);
             if (generator.IndexTarget is not null)
             {
-                ConsumeBinding(generator.IndexTarget);
+                CheckBindingNames(generator.IndexTarget);
                 DeclareBinding(generator.IndexTarget, TypeName("int"), generatorScope, false);
             }
 
-            ConsumeBinding(generator.ItemTarget);
-            DeclareBinding(generator.ItemTarget, EnumerableElement(GetType(generator.Source)), generatorScope, false);
+            CheckBindingNames(generator.ItemTarget);
+            DeclareBinding(generator.ItemTarget, IterationElement(GetType(generator.Source)), generatorScope, false);
             TypeSyntax? bodyType = generator.Body switch
             {
                 LambdaExpressionBody expressionBody => AnalyzeExpression(expressionBody.Expression, generatorScope),
@@ -1635,26 +2516,23 @@ internal static class PscpSemanticAnalyzer
             return new NamedTypeSyntax("IEnumerable", Immutable.List(bodyType ?? TypeName("object")));
         }
 
+        // A block used as a value: its type is the type of its tail expression or of its `return`.
         private TypeSyntax? AnalyzeBlockLike(BlockStatement block, Scope scope)
         {
+            MarkTailStatements(block);
             AnalyzeBlock(block, scope);
-            return block.Statements.LastOrDefault() switch
+            return TailValueType(block.Statements.LastOrDefault());
+        }
+
+        private TypeSyntax? TailValueType(Statement? statement)
+            => statement switch
             {
-                ExpressionStatement { HasSemicolon: false } tail => GetType(tail.Expression),
+                ExpressionStatement tail => GetType(tail.Expression),
                 ReturnStatement { Expression: not null } tail => GetType(tail.Expression),
+                BlockStatement block => TailValueType(block.Statements.LastOrDefault()),
+                IfStatement { ElseBranch: not null } ifStatement => Merge(TailValueType(ifStatement.ThenBranch), TailValueType(ifStatement.ElseBranch)),
                 _ => null,
             };
-        }
-
-        private void ValidateRecursion(string functionName, bool isRecursive, BlockStatement body, TextSpan functionSpan)
-        {
-            if (isRecursive || !ContainsSelfCall(body, functionName))
-            {
-                return;
-            }
-
-            Error($"Recursive self-reference to `{functionName}` requires the `rec` modifier.", functionSpan);
-        }
 
         private void ValidateMethodBody(string name, TypeSyntax returnType, MethodBody body, TextSpan declarationSpan)
         {
@@ -1666,9 +2544,9 @@ internal static class PscpSemanticAnalyzer
             if (body is ExpressionMethodBody expressionBody)
             {
                 TypeSyntax? expressionType = GetType(expressionBody.Expression);
-                if (expressionType is not null && !CanImplicitlyConvert(expressionType, returnType))
+                if (expressionType is not null && !CanImplicitlyConvert(expressionType, returnType) && !IsUnknownLike(expressionType))
                 {
-                    Error($"Expression-bodied member `{name}` returns `{DisplayType(expressionType)}`, but `{DisplayType(returnType)}` is required.", declarationSpan);
+                    Error(DiagnosticCodes.MissingReturnValue, $"`{name}` returns `{DisplayType(expressionType)}`, but `{DisplayType(returnType)}` is required.", declarationSpan);
                 }
 
                 return;
@@ -1680,6 +2558,8 @@ internal static class PscpSemanticAnalyzer
             }
         }
 
+        // Spec §10.5: every path of a function that returns a value ends with `return`, `throw`, or a tail
+        // expression that returns its value.
         private void ValidateValueReturningBody(string name, TypeSyntax? returnType, BlockStatement body, TextSpan declarationSpan)
         {
             if (returnType is null || IsNamed(returnType, "void"))
@@ -1687,62 +2567,131 @@ internal static class PscpSemanticAnalyzer
                 return;
             }
 
+            MarkTailStatements(body);
+
             foreach (ReturnStatement returnStatement in EnumerateReturnStatements(body))
             {
-                TypeSyntax? returnExpressionType = returnStatement.Expression is null ? null : GetType(returnStatement.Expression);
+                TextSpan returnSpan = _spans.TryGet(returnStatement, out TextSpan found) ? found : declarationSpan;
                 if (returnStatement.Expression is null)
                 {
-                    Error($"`return` in `{name}` requires a value of type `{DisplayType(returnType)}`.", declarationSpan);
+                    Error(DiagnosticCodes.MissingReturnValue, $"`return` in `{name}` needs a value of type `{DisplayType(returnType)}`.", returnSpan);
                     continue;
                 }
 
-                if (returnExpressionType is not null && !CanImplicitlyConvert(returnExpressionType, returnType))
+                TypeSyntax? returnExpressionType = GetType(returnStatement.Expression);
+                if (returnExpressionType is not null && !CanImplicitlyConvert(returnExpressionType, returnType) && !IsUnknownLike(returnExpressionType))
                 {
-                    Error($"`return` in `{name}` returns `{DisplayType(returnExpressionType)}`, but `{DisplayType(returnType)}` is required.", declarationSpan);
+                    Error(DiagnosticCodes.MissingReturnValue, $"`return` in `{name}` returns `{DisplayType(returnExpressionType)}`, but `{DisplayType(returnType)}` is required.", returnSpan);
                 }
             }
 
-            Statement? tailStatement = body.Statements.LastOrDefault();
-            if (tailStatement is ExpressionStatement { HasSemicolon: false } tail
-                && IsImplicitReturnEligibleExpression(tail.Expression))
+            if (body.Statements.Count == 0)
             {
-                TypeSyntax? tailType = GetType(tail.Expression);
-                if (tailType is not null && !CanImplicitlyConvert(tailType, returnType))
+                Error(DiagnosticCodes.MissingReturnValue, $"`{name}` must return a value of type `{DisplayType(returnType)}`, but its body is empty.", declarationSpan);
+                return;
+            }
+
+            CheckTailValue(name, returnType, body.Statements[^1], declarationSpan);
+        }
+
+        private void CheckTailValue(string name, TypeSyntax returnType, Statement tail, TextSpan declarationSpan)
+        {
+            TextSpan span = _spans.TryGet(tail, out TextSpan found) ? found : declarationSpan;
+            switch (tail)
+            {
+                case ReturnStatement or ThrowStatement:
+                    return;
+                case ExpressionStatement { Expression: ThrowExpression }:
+                    return;
+                case ExpressionStatement expressionStatement:
                 {
-                    Error($"Final expression in `{name}` returns `{DisplayType(tailType)}`, but `{DisplayType(returnType)}` is required.", declarationSpan);
+                    Expression expression = expressionStatement.Expression;
+                    if (!_resultReturnEligible(expression))
+                    {
+                        string hint = expression switch
+                        {
+                            AssignmentExpression { Operator: AssignmentOperator.Assign } => " A plain `x = e` does not produce a value here; write `x := e` to assign and return the value.",
+                            AssignmentExpression => " A compound assignment does not return a value; add the value on the next line.",
+                            PrefixExpression or PostfixExpression => " An increment does not return a value; add the value on the next line.",
+                            _ => string.Empty,
+                        };
+                        Error(DiagnosticCodes.MissingReturnValue, $"`{name}` must end with a value of type `{DisplayType(returnType)}`.{hint}", span);
+                        return;
+                    }
+
+                    TypeSyntax? tailType = GetType(expression);
+                    if (IsNamed(tailType, "void"))
+                    {
+                        Error(DiagnosticCodes.MissingReturnValue, $"The last expression of `{name}` produces no value, but `{DisplayType(returnType)}` is required.", span);
+                        return;
+                    }
+
+                    if (tailType is not null && !CanImplicitlyConvert(tailType, returnType) && !IsUnknownLike(tailType))
+                    {
+                        Error(DiagnosticCodes.MissingReturnValue, $"The last expression of `{name}` is `{DisplayType(tailType)}`, but `{DisplayType(returnType)}` is required.", span);
+                    }
+
+                    return;
                 }
+                case BlockStatement block:
+                    if (block.Statements.Count == 0)
+                    {
+                        Error(DiagnosticCodes.MissingReturnValue, $"`{name}` must end with a value of type `{DisplayType(returnType)}`, but this block is empty.", span);
+                        return;
+                    }
 
-                return;
-            }
-
-            if (tailStatement is not null && IsImplicitReturningStatement(tailStatement))
-            {
-                return;
-            }
-
-            if (!ContainsExplicitReturn(body))
-            {
-                Error($"`{name}` must end with a return value of type `{DisplayType(returnType)}`. Use `return`, a return-eligible expression, or `:=` for value-yielding assignment.", declarationSpan);
+                    CheckTailValue(name, returnType, block.Statements[^1], declarationSpan);
+                    return;
+                case IfStatement { ElseBranch: not null } ifStatement:
+                    CheckTailValue(name, returnType, ifStatement.ThenBranch, declarationSpan);
+                    CheckTailValue(name, returnType, ifStatement.ElseBranch, declarationSpan);
+                    return;
+                case IfStatement:
+                    Error(
+                        DiagnosticCodes.MissingReturnValue,
+                        $"`{name}` must end with a value of type `{DisplayType(returnType)}`, but this `if` has no `else`, so the value is missing when the condition is false.",
+                        span);
+                    return;
+                case WhileStatement { Condition: LiteralExpression { Kind: LiteralKind.True } } loop when !ContainsBreak(loop.Body):
+                    // `while true` without `break` never falls through.
+                    return;
+                case TryStatement:
+                    Error(
+                        DiagnosticCodes.MissingReturnValue,
+                        $"`{name}` must end with a value of type `{DisplayType(returnType)}`. A `try` statement does not return its last value; use `return` inside it.",
+                        span);
+                    return;
+                default:
+                    Error(
+                        DiagnosticCodes.MissingReturnValue,
+                        $"`{name}` must end with a value of type `{DisplayType(returnType)}`. A loop does not produce a value; add `return` or a final expression after it.",
+                        span);
+                    return;
             }
         }
 
-        private static bool IsImplicitReturnEligibleExpression(Expression expression)
+        private bool _resultReturnEligible(Expression expression)
             => expression switch
             {
-                AssignmentExpression assignment => assignment.IsExplicitValueAssignment,
+                AssignmentExpression assignment => assignment.IsExplicitValueAssignment
+                    || (assignment.Operator is AssignmentOperator.AddAssign or AssignmentOperator.SubtractAssign
+                        && IsValueReturningSetLike(GetType(assignment.Target))),
+                PrefixExpression { Operator: PostfixOperator.Decrement } prefix => IsPoppable(GetType(prefix.Operand)),
                 PrefixExpression or PostfixExpression => false,
-                CallExpression => false,
                 _ => true,
             };
 
-        private static bool IsImplicitReturningStatement(Statement statement)
+        private static bool IsUnknownLike(TypeSyntax type)
+            => type is NamedTypeSyntax { Name: "object" or "var" or "IEnumerable" };
+
+        // `break` that leaves this loop: nested loops and lambdas have their own.
+        private static bool ContainsBreak(Statement statement)
             => statement switch
             {
-                ReturnStatement => true,
-                ExpressionStatement { HasSemicolon: false } expressionStatement => IsImplicitReturnEligibleExpression(expressionStatement.Expression),
-                BlockStatement block => block.Statements.Count > 0 && IsImplicitReturningStatement(block.Statements[^1]),
-                IfStatement { ElseBranch: not null } ifStatement
-                    => IsImplicitReturningStatement(ifStatement.ThenBranch) && IsImplicitReturningStatement(ifStatement.ElseBranch),
+                BreakStatement => true,
+                BlockStatement block => block.Statements.Any(ContainsBreak),
+                IfStatement ifStatement => ContainsBreak(ifStatement.ThenBranch) || (ifStatement.ElseBranch is not null && ContainsBreak(ifStatement.ElseBranch)),
+                TryStatement tryStatement => ContainsBreak(tryStatement.Body) || tryStatement.Catches.Any(catchClause => ContainsBreak(catchClause.Body)) || (tryStatement.Finally is not null && ContainsBreak(tryStatement.Finally)),
                 _ => false,
             };
 
@@ -1814,101 +2763,23 @@ internal static class PscpSemanticAnalyzer
                     }
 
                     yield break;
+                case TryStatement tryStatement:
+                    foreach (ReturnStatement returnStatement in EnumerateReturnStatements(tryStatement.Body))
+                    {
+                        yield return returnStatement;
+                    }
+
+                    foreach (CatchClause catchClause in tryStatement.Catches)
+                    {
+                        foreach (ReturnStatement returnStatement in EnumerateReturnStatements(catchClause.Body))
+                        {
+                            yield return returnStatement;
+                        }
+                    }
+
+                    yield break;
             }
         }
-
-        private static bool ContainsExplicitReturn(BlockStatement block)
-            => EnumerateReturnStatements(block).Any();
-
-        private static bool ContainsSelfCall(BlockStatement block, string functionName)
-            => block.Statements.Any(statement => ContainsSelfCall(statement, functionName));
-
-        private static bool ContainsSelfCall(Statement statement, string functionName)
-            => statement switch
-            {
-                BlockStatement block => ContainsSelfCall(block, functionName),
-                DeclarationStatement declaration => ContainsSelfCall(declaration.Initializer, functionName),
-                ExpressionStatement expressionStatement => ContainsSelfCall(expressionStatement.Expression, functionName),
-                AssignmentStatement assignment => ContainsSelfCall(assignment.Target, functionName) || ContainsSelfCall(assignment.Value, functionName),
-                OutputStatement output => ContainsSelfCall(output.Expression, functionName),
-                IfStatement ifStatement => ContainsSelfCall(ifStatement.Condition, functionName)
-                    || ContainsSelfCall(ifStatement.ThenBranch, functionName)
-                    || (ifStatement.ElseBranch is not null && ContainsSelfCall(ifStatement.ElseBranch, functionName)),
-                WhileStatement whileStatement => ContainsSelfCall(whileStatement.Condition, functionName) || ContainsSelfCall(whileStatement.Body, functionName),
-                ForInStatement forIn => ContainsSelfCall(forIn.Source, functionName) || ContainsSelfCall(forIn.Body, functionName),
-                FastForStatement fastFor => ContainsSelfCall(fastFor.Source, functionName) || ContainsSelfCall(fastFor.Body, functionName),
-                ReturnStatement returnStatement => ContainsSelfCall(returnStatement.Expression, functionName),
-                LocalFunctionStatement => false,
-                _ => false,
-            };
-
-        private static bool ContainsSelfCall(Expression? expression, string functionName)
-            => expression switch
-            {
-                null => false,
-                CallExpression { Callee: IdentifierExpression identifier } call when identifier.Name == functionName => true,
-                CallExpression call => ContainsSelfCall(call.Callee, functionName) || call.Arguments.Any(argument => ContainsSelfCall(argument, functionName)),
-                InterpolatedStringExpression interpolated => interpolated.Parts.OfType<InterpolatedStringInterpolationPart>().Any(part => ContainsSelfCall(part.Expression, functionName)),
-                TupleExpression tuple => tuple.Elements.Any(element => ContainsSelfCall(element, functionName)),
-                BlockExpression block => ContainsSelfCall(block.Block, functionName),
-                IfExpression ifExpression => ContainsSelfCall(ifExpression.Condition, functionName) || ContainsSelfCall(ifExpression.ThenExpression, functionName) || ContainsSelfCall(ifExpression.ElseExpression, functionName),
-                ConditionalExpression conditional => ContainsSelfCall(conditional.Condition, functionName) || ContainsSelfCall(conditional.WhenTrue, functionName) || ContainsSelfCall(conditional.WhenFalse, functionName),
-                UnaryExpression unary => ContainsSelfCall(unary.Operand, functionName),
-                AssignmentExpression assignment => ContainsSelfCall(assignment.Target, functionName) || ContainsSelfCall(assignment.Value, functionName),
-                PrefixExpression prefix => ContainsSelfCall(prefix.Operand, functionName),
-                PostfixExpression postfix => ContainsSelfCall(postfix.Operand, functionName),
-                BinaryExpression binary => ContainsSelfCall(binary.Left, functionName) || ContainsSelfCall(binary.Right, functionName),
-                RangeExpression range => ContainsSelfCall(range.Start, functionName) || ContainsSelfCall(range.Step, functionName) || ContainsSelfCall(range.End, functionName),
-                IsPatternExpression isPattern => ContainsSelfCall(isPattern.Left, functionName) || (isPattern.Pattern is ConstantPatternSyntax constantPattern && ContainsSelfCall(constantPattern.Expression, functionName)),
-                MemberAccessExpression member => ContainsSelfCall(member.Receiver, functionName),
-                IndexExpression index => ContainsSelfCall(index.Receiver, functionName) || index.Arguments.Any(argument => ContainsSelfCall(argument, functionName)),
-                SwitchExpression @switch => ContainsSelfCall(@switch.Receiver, functionName)
-                    || @switch.Arms.Any(arm => ContainsSelfCall(arm.Guard, functionName) || ContainsSelfCall(arm.Result, functionName)),
-                WithExpression @with => ContainsSelfCall(@with.Receiver, functionName)
-                    || @with.Assignments.Any(assignment => ContainsSelfCall(assignment.Value, functionName)),
-                FromEndExpression fromEnd => ContainsSelfCall(fromEnd.Operand, functionName),
-                SliceExpression slice => ContainsSelfCall(slice.Start, functionName) || ContainsSelfCall(slice.End, functionName),
-                TupleProjectionExpression projection => ContainsSelfCall(projection.Receiver, functionName),
-                LambdaExpression lambda => lambda.Body switch
-                {
-                    LambdaExpressionBody expressionBody => ContainsSelfCall(expressionBody.Expression, functionName),
-                    LambdaBlockBody blockBody => ContainsSelfCall(blockBody.Block, functionName),
-                    _ => false,
-                },
-                NewExpression creation => creation.Arguments.Any(argument => ContainsSelfCall(argument, functionName)),
-                NewArrayExpression newArray => newArray.Dimensions.Any(dimension => ContainsSelfCall(dimension, functionName)),
-                TargetTypedNewArrayExpression targetTypedNewArray => targetTypedNewArray.Dimensions.Any(dimension => ContainsSelfCall(dimension, functionName)),
-                CollectionExpression collection => collection.Elements.Any(element => element switch
-                {
-                    ExpressionElement expressionElement => ContainsSelfCall(expressionElement.Expression, functionName),
-                    RangeElement rangeElement => ContainsSelfCall(rangeElement.Range, functionName),
-                    SpreadElement spreadElement => ContainsSelfCall(spreadElement.Expression, functionName),
-                    BuilderElement builderElement => ContainsSelfCall(builderElement.Source, functionName) || builderElement.Body switch
-                    {
-                        LambdaExpressionBody expressionBody => ContainsSelfCall(expressionBody.Expression, functionName),
-                        LambdaBlockBody blockBody => ContainsSelfCall(blockBody.Block, functionName),
-                        _ => false,
-                    },
-                    _ => false,
-                }),
-                AggregationExpression aggregation => ContainsSelfCall(aggregation.Source, functionName)
-                    || ContainsSelfCall(aggregation.WhereExpression, functionName)
-                    || ContainsSelfCall(aggregation.Body, functionName),
-                GeneratorExpression generator => ContainsSelfCall(generator.Source, functionName) || generator.Body switch
-                {
-                    LambdaExpressionBody expressionBody => ContainsSelfCall(expressionBody.Expression, functionName),
-                    LambdaBlockBody blockBody => ContainsSelfCall(blockBody.Block, functionName),
-                    _ => false,
-                },
-                _ => false,
-            };
-
-        private static bool ContainsSelfCall(ArgumentSyntax argument, string functionName)
-            => argument switch
-            {
-                ExpressionArgumentSyntax expressionArgument => ContainsSelfCall(expressionArgument.Expression, functionName),
-                _ => false,
-            };
 
         private static bool IsOutLike(ArgumentSyntax argument)
             => argument switch
@@ -1953,28 +2824,49 @@ internal static class PscpSemanticAnalyzer
                 _ => "object",
             };
 
+        // Result types of the aggregate, math and helper families (spec §22, §23, §24).
         private TypeSyntax? IntrinsicType(string name, IReadOnlyList<ArgumentSyntax> args, TypeSyntax? receiverType)
         {
-            TypeSyntax? first = receiverType ?? ArgType(args, 0);
+            bool memberForm = receiverType is not null;
+            TypeSyntax? source = receiverType ?? ArgType(args, 0);
+            TypeSyntax? element = IterationElement(source);
+            int helperArguments = memberForm ? args.Count : args.Count - 1;
             return name switch
             {
-                "min" or "max" when receiverType is null && args.Count == 2 => Merge(ArgType(args, 0), ArgType(args, 1)),
-                "min" or "max" or "sum" => EnumerableElement(first),
-                "count" or "findIndex" or "findLastIndex" => TypeName("int"),
+                "min" or "max" when !memberForm && args.Count >= 2 => args.Select((_, index) => ArgType(args, index)).Aggregate((TypeSyntax?)null, (merged, next) => merged is null ? next : Merge(merged, next)),
+                "min" or "max" or "sum" => element,
+                "sumBy" => LambdaResultType(args) ?? element,
+                "count" or "findIndex" or "findLastIndex" or "lowerBound" or "upperBound" => TypeName("int"),
                 "any" or "all" or "chmin" or "chmax" => TypeName("bool"),
-                "find" when EnumerableElement(first) is TypeSyntax findElement => new NullableTypeSyntax(findElement),
-                "minBy" or "maxBy" => EnumerableElement(first),
-                "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" when EnumerableElement(first) is TypeSyntax elem => new ArrayTypeSyntax(elem, 1),
-                "groupCount" or "freq" or "index" when EnumerableElement(first) is TypeSyntax key => new NamedTypeSyntax("Dictionary", Immutable.List(key, TypeName("int"))),
+                "find" when element is not null => helperArguments >= 2 ? element : NullableElement(element),
+                "minBy" or "maxBy" => element,
+                "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" or "filter" when element is not null => new ArrayTypeSyntax(element, 1),
+                "map" when LambdaResultType(args) is TypeSyntax mapped => new ArrayTypeSyntax(mapped, 1),
+                "fold" => ArgType(args, memberForm ? 0 : 1) is TypeSyntax foldSeed ? Merge(foldSeed, LambdaResultType(args)) ?? foldSeed : LambdaResultType(args),
+                "scan" when (ArgType(args, memberForm ? 0 : 1) ?? LambdaResultType(args)) is TypeSyntax scanState => new ArrayTypeSyntax(scanState, 1),
+                "mapFold" when LambdaResultType(args) is TupleTypeSyntax { Elements.Count: 2 } mapFoldResult
+                    => new TupleTypeSyntax([new ArrayTypeSyntax(mapFoldResult.Elements[0], 1), mapFoldResult.Elements[1]]),
+                "groupCount" or "freq" or "index" when element is not null => new NamedTypeSyntax("Dictionary", Immutable.List(element, TypeName("int"))),
                 "abs" => ArgType(args, 0),
-                "sqrt" or "pow" => TypeName("double"),
+                "sqrt" => TypeName("double"),
+                "pow" when args.Count == 3 => TypeName("long"),
+                "pow" => IsIntegral(ArgType(args, 0)) && IsIntegral(ArgType(args, 1))
+                    ? (IsNamed(ArgType(args, 0), "long") ? TypeName("long") : TypeName("int"))
+                    : TypeName("double"),
                 "clamp" => Merge(Merge(ArgType(args, 0), ArgType(args, 1)), ArgType(args, 2)),
                 "gcd" or "lcm" => Merge(ArgType(args, 0), ArgType(args, 1)),
+                "floor" or "ceil" when args.Count == 2 => Merge(ArgType(args, 0), ArgType(args, 1)),
                 "floor" or "ceil" or "round" => InferMathRoundingType(ArgType(args, 0)),
                 "popcount" or "bitLength" => TypeName("int"),
                 _ => null,
             };
         }
+
+        private static TypeSyntax NullableElement(TypeSyntax element)
+            => element is NullableTypeSyntax ? element : new NullableTypeSyntax(element);
+
+        private static bool IsIntegral(TypeSyntax? type)
+            => type is NamedTypeSyntax { Name: "int" or "long" or "char" or "short" or "byte" };
 
         private static TypeSyntax InferMathRoundingType(TypeSyntax? sourceType)
             => sourceType is NamedTypeSyntax { Name: "decimal" } ? TypeName("decimal") : TypeName("double");
@@ -1988,44 +2880,15 @@ internal static class PscpSemanticAnalyzer
         private TypeSyntax? GetType(Expression? expression)
             => expression is not null && ExpressionTypes.TryGetValue(expression, out TypeSyntax? type) ? type : null;
 
-        private void ConsumeDeclarationSignature(DeclarationStatement declaration)
-        {
-            if (declaration.ExplicitType is not null) ConsumeType(declaration.ExplicitType);
-            foreach (BindingTarget target in declaration.Targets) ConsumeBinding(target);
-        }
-
-        private void ConsumeType(TypeSyntax type)
-        {
-            switch (type)
-            {
-                case NamedTypeSyntax named:
-                    foreach (string part in named.Name.Split('.', StringSplitOptions.RemoveEmptyEntries)) _tracker.Take(part);
-                    foreach (TypeSyntax argument in named.TypeArguments) ConsumeType(argument);
-                    break;
-                case TupleTypeSyntax tuple:
-                    foreach (TypeSyntax element in tuple.Elements) ConsumeType(element);
-                    break;
-                case ArrayTypeSyntax array:
-                    ConsumeType(array.ElementType);
-                    break;
-                case SizedArrayTypeSyntax sized:
-                    ConsumeType(sized.ElementType);
-                    break;
-            }
-        }
-
-        private void ConsumeBinding(BindingTarget target)
+        private void CheckBindingNames(BindingTarget target)
         {
             switch (target)
             {
                 case NameTarget nameTarget:
-                    WarnOnDeclarationName(nameTarget.Name, _tracker.Take(nameTarget.Name), "binding");
-                    break;
-                case DiscardTarget:
-                    _tracker.Take("_");
+                    WarnOnDeclarationName(nameTarget.Name, _spans.Get(nameTarget), "binding");
                     break;
                 case TupleTarget tupleTarget:
-                    foreach (BindingTarget element in tupleTarget.Elements) ConsumeBinding(element);
+                    foreach (BindingTarget element in tupleTarget.Elements) CheckBindingNames(element);
                     break;
             }
         }
@@ -2102,6 +2965,12 @@ internal static class PscpSemanticAnalyzer
             _ => null,
         };
 
+        // The value an iteration binds: `Dictionary<K, V>` yields `(K, V)` pairs (spec §16.4).
+        private static TypeSyntax? IterationElement(TypeSyntax? type)
+            => type is NamedTypeSyntax { TypeArguments.Count: 2 } dictionary && dictionary.Name is "Dictionary" or "SortedDictionary" or "System.Collections.Generic.Dictionary"
+                ? new TupleTypeSyntax(dictionary.TypeArguments)
+                : EnumerableElement(type);
+
         private static TypeSyntax? PriorityQueueElement(TypeSyntax? type)
             => type is NamedTypeSyntax named && named.TypeArguments.Count > 0 ? named.TypeArguments[0] : null;
 
@@ -2138,15 +3007,23 @@ internal static class PscpSemanticAnalyzer
                     or "HashSet" or "System.Collections.Generic.HashSet"
                     or "Dictionary" or "System.Collections.Generic.Dictionary"
                     or "SortedSet" or "System.Collections.Generic.SortedSet"
+                    or "SortedDictionary" or "System.Collections.Generic.SortedDictionary"
                     or "PriorityQueue" or "System.Collections.Generic.PriorityQueue";
         private static TypeSyntax? Merge(TypeSyntax? left, TypeSyntax? right) => Equals(left, right) ? left : Promote(left, right) ?? left ?? right;
         private static TypeSyntax? Promote(TypeSyntax? left, TypeSyntax? right)
         {
             if (left is not NamedTypeSyntax l || right is not NamedTypeSyntax r) return null;
-            int Rank(string name) => name switch { "int" => 0, "long" => 1, "double" => 2, "decimal" => 3, _ => -1 };
+            int Rank(string name) => name switch { "char" => 0, "int" => 0, "long" => 1, "double" => 2, "decimal" => 3, _ => -1 };
             int lr = Rank(l.Name);
             int rr = Rank(r.Name);
-            return lr < 0 || rr < 0 ? null : (lr >= rr ? left : right);
+            if (lr < 0 || rr < 0)
+            {
+                return null;
+            }
+
+            // `char` arithmetic produces `int` (spec §8.1).
+            TypeSyntax wider = lr >= rr ? left : right;
+            return wider is NamedTypeSyntax { Name: "char" } ? new NamedTypeSyntax("int", Immutable.List<TypeSyntax>()) : wider;
         }
 
         private void PredeclareGlobalDeclaration(DeclarationStatement declaration, Scope scope)
@@ -2372,12 +3249,12 @@ internal static class PscpSemanticAnalyzer
         {
             if (PscpIntrinsicCatalog.CSharpReservedKeywords.Contains(name))
             {
-                Warning($"`{name}` is also a reserved C# keyword. Rename it or expect escaping in generated C#.", span);
+                Warning(DiagnosticCodes.GenericWarning, $"`{name}` is also a reserved C# keyword. Rename it or expect escaping in generated C#.", span);
             }
 
-            if (PscpIntrinsicCatalog.GlobalValues.Contains(name))
+            if (PscpIntrinsicCatalog.GlobalValues.Contains(name) || PscpIntrinsicCatalog.IntrinsicCallNames.Contains(name))
             {
-                Warning($"`{name}` shadows a PSCP intrinsic {role} name.", span);
+                Diagnostics.Add(new Diagnostic($"`{name}` hides the PSCP intrinsic `{name}` in this scope.", span, DiagnosticSeverity.Info, DiagnosticCodes.ShadowsIntrinsic));
             }
         }
 
@@ -2417,8 +3294,32 @@ internal static class PscpSemanticAnalyzer
             };
         }
 
-        private void Error(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Error));
-        private void Warning(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Warning));
+        private void Error(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Error, DiagnosticCodes.GenericError));
+        private void Error(string code, string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Error, code));
+        private void Warning(string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Warning, DiagnosticCodes.GenericWarning));
+        private void Warning(string code, string message, TextSpan span) => Diagnostics.Add(new Diagnostic(message, span, DiagnosticSeverity.Warning, code));
+
+        // Spec §18.3: a collection of collections of collections has no automatic rendering.
+        private void CheckRenderable(TypeSyntax? type, Expression expression)
+        {
+            if (CollectionDepth(type) >= 3)
+            {
+                Error(
+                    DiagnosticCodes.DeepCollectionRendering,
+                    $"A `{DisplayType(type)}` is nested three levels deep and has no automatic output form. Print it with an explicit loop.",
+                    _spans.Get(expression));
+            }
+        }
+
+        private static int CollectionDepth(TypeSyntax? type)
+            => type switch
+            {
+                ArrayTypeSyntax array => array.Depth + CollectionDepth(array.ElementType),
+                NamedTypeSyntax { Name: "string" } => 0,
+                NamedTypeSyntax named when named.TypeArguments.Count == 1 && named.Name is "List" or "LinkedList" or "IEnumerable" or "HashSet" or "SortedSet" or "Queue" or "Stack"
+                    => 1 + CollectionDepth(named.TypeArguments[0]),
+                _ => 0,
+            };
     }
 }
 

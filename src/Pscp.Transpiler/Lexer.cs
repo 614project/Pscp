@@ -8,9 +8,9 @@ public sealed class Lexer
     private readonly string _text;
     private readonly List<Diagnostic> _diagnostics = [];
     private int _position;
-    private int _parenDepth;
-    private int _bracketDepth;
-    private int _braceDepth;
+    // Open delimiters. A line break ends a statement unless the innermost open delimiter is `(` or `[`
+    // (spec §4.2 rule 1); inside `{ ... }` (blocks, lambda bodies, switch arms) line breaks separate again.
+    private readonly List<char> _delimiters = [];
     private TokenKind _previousKind = TokenKind.NewLine;
 
     public Lexer(string text)
@@ -57,7 +57,7 @@ public sealed class Lexer
             if (ch == '\n')
             {
                 _position++;
-                if (_braceDepth > 0 || (_parenDepth == 0 && _bracketDepth == 0))
+                if (_delimiters.Count == 0 || _delimiters[^1] == '{')
                 {
                     return new Token(TokenKind.NewLine, "\n", _position - 1);
                 }
@@ -113,12 +113,34 @@ public sealed class Lexer
 
         if (Current == '$' && Peek(1) == '"')
         {
-            return ReadInterpolatedString();
+            return ReadInterpolatedString(verbatim: false, prefixLength: 2);
+        }
+
+        if ((Current == '$' && Peek(1) == '@' && Peek(2) == '"') || (Current == '@' && Peek(1) == '$' && Peek(2) == '"'))
+        {
+            return ReadInterpolatedString(verbatim: true, prefixLength: 3);
+        }
+
+        if (Current == '@' && Peek(1) == '"')
+        {
+            return ReadVerbatimString();
         }
 
         if (Current == '"')
         {
+            if (Peek(1) == '"' && Peek(2) == '"')
+            {
+                _diagnostics.Add(new Diagnostic("Raw string literals (`\"\"\"`) are a C# 11 feature and are not supported. Use a regular or verbatim (`@\"...\"`) string.", new TextSpan(tokenStart, 3)));
+            }
+
             return ReadString();
+        }
+
+        if (Current == '@' && IsIdentifierStart(Peek(1)))
+        {
+            _diagnostics.Add(new Diagnostic("Verbatim identifiers (`@name`) are not supported. Choose a name that is not a keyword.", new TextSpan(tokenStart, 1)));
+            _position++;
+            return ReadIdentifierOrKeyword();
         }
 
         if (Current == '\'')
@@ -140,12 +162,12 @@ public sealed class Lexer
             '.' => new Token(TokenKind.Dot, ".", tokenStart),
             ':' => new Token(TokenKind.Colon, ":", tokenStart),
             '?' => new Token(TokenKind.Question, "?", tokenStart),
-            '(' => OpenToken(TokenKind.OpenParen, "(", ref _parenDepth, tokenStart),
-            ')' => CloseToken(TokenKind.CloseParen, ")", ref _parenDepth, tokenStart),
-            '{' => OpenToken(TokenKind.OpenBrace, "{", ref _braceDepth, tokenStart),
-            '}' => CloseToken(TokenKind.CloseBrace, "}", ref _braceDepth, tokenStart),
-            '[' => OpenToken(TokenKind.OpenBracket, "[", ref _bracketDepth, tokenStart),
-            ']' => CloseToken(TokenKind.CloseBracket, "]", ref _bracketDepth, tokenStart),
+            '(' => OpenToken(TokenKind.OpenParen, '(', tokenStart),
+            ')' => CloseToken(TokenKind.CloseParen, '(', tokenStart),
+            '{' => OpenToken(TokenKind.OpenBrace, '{', tokenStart),
+            '}' => CloseToken(TokenKind.CloseBrace, '{', tokenStart),
+            '[' => OpenToken(TokenKind.OpenBracket, '[', tokenStart),
+            ']' => CloseToken(TokenKind.CloseBracket, '[', tokenStart),
             '<' => new Token(TokenKind.LessThan, "<", tokenStart),
             '>' => new Token(TokenKind.GreaterThan, ">", tokenStart),
             '=' => new Token(TokenKind.Equal, "=", tokenStart),
@@ -168,7 +190,20 @@ public sealed class Lexer
         token = null;
         int start = _position;
 
-        if (Match("<<="))
+        if (Match("??="))
+        {
+            token = new Token(TokenKind.QuestionQuestionEqual, "??=", start);
+        }
+        else if (Match("??"))
+        {
+            token = new Token(TokenKind.QuestionQuestion, "??", start);
+        }
+        else if (Current == '?' && Peek(1) == '.' && Peek(2) != '.' && !char.IsAsciiDigit(Peek(2)))
+        {
+            _position += 2;
+            token = new Token(TokenKind.QuestionDot, "?.", start);
+        }
+        else if (Match("<<="))
         {
             token = new Token(TokenKind.LessLessEqual, "<<=", start);
         }
@@ -417,10 +452,42 @@ public sealed class Lexer
         return new Token(TokenKind.StringLiteral, _text[start.._position], start);
     }
 
-    private Token ReadInterpolatedString()
+    // `@"..."`: backslashes are literal, `""` is a quote, line breaks are allowed.
+    private Token ReadVerbatimString()
     {
         int start = _position;
         _position += 2;
+        bool closed = false;
+        while (!IsEnd)
+        {
+            if (Current == '"')
+            {
+                if (Peek(1) == '"')
+                {
+                    _position += 2;
+                    continue;
+                }
+
+                _position++;
+                closed = true;
+                break;
+            }
+
+            _position++;
+        }
+
+        if (!closed)
+        {
+            _diagnostics.Add(new Diagnostic("Unterminated verbatim string literal.", new TextSpan(start, _position - start)));
+        }
+
+        return new Token(TokenKind.StringLiteral, _text[start.._position], start);
+    }
+
+    private Token ReadInterpolatedString(bool verbatim, int prefixLength)
+    {
+        int start = _position;
+        _position += prefixLength;
         int interpolationDepth = 0;
         bool closed = false;
 
@@ -430,6 +497,12 @@ public sealed class Lexer
 
             if (interpolationDepth == 0)
             {
+                if (ch == '"' && verbatim && Peek(1) == '"')
+                {
+                    _position += 2;
+                    continue;
+                }
+
                 if (ch == '"')
                 {
                     _position++;
@@ -437,7 +510,7 @@ public sealed class Lexer
                     break;
                 }
 
-                if (ch == '\\')
+                if (ch == '\\' && !verbatim)
                 {
                     _position++;
                     if (!IsEnd)
@@ -645,16 +718,23 @@ public sealed class Lexer
         return new Token(TokenKind.Identifier, _text[start].ToString(CultureInfo.InvariantCulture), start);
     }
 
-    private Token OpenToken(TokenKind kind, string text, ref int depth, int start)
+    private Token OpenToken(TokenKind kind, char delimiter, int start)
     {
-        depth++;
-        return new Token(kind, text, start);
+        _delimiters.Add(delimiter);
+        return new Token(kind, delimiter.ToString(), start);
     }
 
-    private Token CloseToken(TokenKind kind, string text, ref int depth, int start)
+    // Pops the innermost matching delimiter; an unbalanced closer leaves the stack alone.
+    private Token CloseToken(TokenKind kind, char opener, int start)
     {
-        depth = Math.Max(0, depth - 1);
-        return new Token(kind, text, start);
+        int index = _delimiters.LastIndexOf(opener);
+        if (index >= 0)
+        {
+            _delimiters.RemoveRange(index, _delimiters.Count - index);
+        }
+
+        char closer = opener switch { '(' => ')', '[' => ']', _ => '}' };
+        return new Token(kind, closer.ToString(), start);
     }
 
     private bool Match(string text)

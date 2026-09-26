@@ -12,6 +12,15 @@ public static class PscpIntrinsicCatalog
         "groupCount", "freq", "index", "chmin", "chmax"
     };
 
+    // Collection helpers are member calls (`xs.filter(p)`); as the head of a pipe target they get receiver
+    // insertion (`xs |> filter(p)`), spec §24.
+    public static readonly IReadOnlySet<string> CollectionHelperNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "map", "filter", "fold", "scan", "mapFold", "any", "all", "count", "find", "findIndex", "findLastIndex",
+        "sort", "sortBy", "sortWith", "distinct", "reverse", "copy", "freq", "index", "groupCount",
+        "lowerBound", "upperBound"
+    };
+
     public static readonly IReadOnlySet<string> BuiltinTypes = new HashSet<string>(StringComparer.Ordinal)
     {
         "int", "long", "double", "decimal", "bool", "char", "string", "void",
@@ -57,7 +66,7 @@ public static class PscpIntrinsicCatalog
                 "readLine", "readLines", "readWords", "readChars", "readRestOfLine",
                 "readArray", "readList", "readLinkedList", "readTuple2", "readTuple3",
                 "readTuples2", "readTuples3", "readGridInt", "readGridLong", "readCharGrid", "readWordGrid",
-                "readNestedArray",
+                "readNestedArray", "readTuple", "readGrid", "hasNext", "hasNextLine",
                 "int", "long", "double", "decimal", "bool", "char", "str", "line",
                 "lines", "words", "chars", "array", "list", "linkedList", "tuple2", "tuple3",
                 "tuples2", "tuples3", "gridInt", "gridLong", "charGrid", "wordGrid", "nestedArray"

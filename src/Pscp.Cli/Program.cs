@@ -4,7 +4,7 @@ using Pscp.Transpiler;
 
 return await PscpCli.RunAsync(args);
 
-static class PscpCli
+static partial class PscpCli
 {
     private const string DefaultNamespace = "Pscp.Generated";
     private const string DefaultSdkDirectoryName = ".pscp";
@@ -31,6 +31,7 @@ static class PscpCli
                 "transpile" => await TranspileAsync(tail),
                 "build" => await BuildAsync(tail),
                 "run" => await RunProgramAsync(tail),
+                "test" => await TestAsync(tail),
                 "lsp" => await RunLanguageServerAsync(tail),
                 "version" => ShowVersion(),
                 _ => UnknownCommand(command),
@@ -94,14 +95,26 @@ static class PscpCli
 
     private static async Task<int> CheckAsync(string[] args)
     {
-        SourceResolution source = ResolveSourceArgument(args, "pscp check [file.pscp]");
-        if (args.Length > source.OptionStart)
+        const string usage = "pscp check [file.pscp] [--json]";
+        SourceResolution source = ResolveSourceArgument(args, usage);
+        bool json = false;
+        for (int i = source.OptionStart; i < args.Length; i++)
         {
-            throw new InvalidOperationException($"Unknown option: {args[source.OptionStart]}. Usage: pscp check [file.pscp]");
+            if (args[i] != "--json")
+            {
+                throw new InvalidOperationException($"Unknown option: {args[i]}. Usage: {usage}");
+            }
+
+            json = true;
         }
 
         string text = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
-        IReadOnlyList<Diagnostic> diagnostics = PscpTranspiler.Check(text);
+        IReadOnlyList<Diagnostic> diagnostics = ReportedDiagnostics(PscpTranspiler.Check(text));
+        if (json)
+        {
+            Console.WriteLine(FormatDiagnosticsJson(diagnostics, text, source.SourcePath));
+            return HasErrors(diagnostics) ? 1 : 0;
+        }
 
         if (diagnostics.Count == 0)
         {
@@ -162,43 +175,39 @@ static class PscpCli
     private static async Task<int> ExecuteSdkCommandAsync(string[] args, bool runAfterBuild)
     {
         SourceResolution source = ResolveSourceArgument(args, runAfterBuild ? "pscp run [file.pscp]" : "pscp build [file.pscp]");
-        BackendOptions options = ParseBackendOptions(args, source.OptionStart, allowOutput: false, allowStdinFile: true);
+        BackendOptions options = ParseBackendOptions(args, source.OptionStart, allowOutput: false, allowStdinFile: runAfterBuild);
 
-        string sourceText = await File.ReadAllTextAsync(source.SourcePath, Encoding.UTF8);
-        SdkLayout layout = await EnsureSdkLayoutAsync(CreateSdkLayout(source.SourcePath), overwriteExisting: false, older: options.Older);
-        TranspilationResult result = PscpTranspiler.Transpile(
-            sourceText,
-            CreateTranspilationOptions(source.SourcePath, sourceText, options, suffix: "Program"));
-
-        foreach (string line in FormatDiagnostics(result.Diagnostics, sourceText))
+        // `pscp run` keeps standard output for the program: diagnostics and build messages go to standard error.
+        TextWriter messages = runAfterBuild ? Console.Error : Console.Out;
+        GeneratedProgram generated = await GenerateProgramAsync(source.SourcePath, options);
+        foreach (string line in FormatDiagnostics(generated.Diagnostics, generated.SourceText))
         {
-            Console.WriteLine(line);
+            messages.WriteLine(line);
         }
 
-        if (HasErrors(result.Diagnostics))
+        if (HasErrors(generated.Diagnostics))
         {
             return 1;
         }
 
-        await File.WriteAllTextAsync(layout.GeneratedProgramPath, result.CSharpCode, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        Console.WriteLine($"Generated {layout.GeneratedProgramPath}");
-
         if (!runAfterBuild)
         {
+            Console.WriteLine($"Generated {generated.Layout.GeneratedProgramPath}");
             return await RunDotnetProcessAsync(
-                $"build \"{layout.ProjectPath}\" -nologo -c {options.Configuration}",
-                layout.RootDirectory,
+                $"build \"{generated.Layout.ProjectPath}\" -nologo -c {options.Configuration}",
+                generated.Layout.RootDirectory,
                 stdIn: null);
         }
 
-        string? stdIn = options.StdinFile is not null
-            ? await File.ReadAllTextAsync(options.StdinFile, Encoding.UTF8)
-            : (Console.IsInputRedirected ? await Console.In.ReadToEndAsync() : null);
+        ProcessResult build = await BuildGeneratedProgramAsync(generated.Layout, options.Configuration);
+        if (build.ExitCode != 0)
+        {
+            Console.Error.Write(build.Output);
+            return build.ExitCode;
+        }
 
-        return await RunDotnetProcessAsync(
-            $"run --project \"{layout.ProjectPath}\" -nologo -c {options.Configuration}",
-            layout.RootDirectory,
-            stdIn);
+        using Stream? input = options.StdinFile is null ? null : File.OpenRead(options.StdinFile);
+        return await RunBuiltProgramAsync(generated.Layout, options, input);
     }
 
     private static Task<int> RunLanguageServerAsync(string[] args)
@@ -364,16 +373,20 @@ static class PscpCli
         return process.ExitCode;
     }
 
+    // `line:column: severity CODE: message` (guide §6.6). Editor-only information is not reported.
     private static IEnumerable<string> FormatDiagnostics(IReadOnlyList<Diagnostic> diagnostics, string source)
     {
         int[] lineStarts = BuildLineStarts(source);
-        foreach (Diagnostic diagnostic in diagnostics)
+        foreach (Diagnostic diagnostic in ReportedDiagnostics(diagnostics))
         {
             (int line, int column) = GetLineColumn(lineStarts, diagnostic.Span.Start);
             string severity = diagnostic.Severity == DiagnosticSeverity.Error ? "error" : "warning";
-            yield return $"{line + 1}:{column + 1}: {severity}: {diagnostic.Message}";
+            yield return $"{line + 1}:{column + 1}: {severity} {diagnostic.EffectiveCode}: {diagnostic.Message}";
         }
     }
+
+    private static IReadOnlyList<Diagnostic> ReportedDiagnostics(IReadOnlyList<Diagnostic> diagnostics)
+        => diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Info).ToArray();
 
     private static int[] BuildLineStarts(string text)
     {
@@ -508,16 +521,18 @@ static class PscpCli
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  pscp init [directory] [--force]");
-        Console.WriteLine("  pscp check [file.pscp]");
+        Console.WriteLine("  pscp check [file.pscp] [--json]");
         Console.WriteLine("  pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack]");
         Console.WriteLine("  pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
         Console.WriteLine("  pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]");
+        Console.WriteLine("  pscp test [file.pscp] [--json] [-c Debug|Release] [--timeout ms] [--float-tolerance eps]");
         Console.WriteLine("  pscp lsp");
         Console.WriteLine("  pscp version");
         Console.WriteLine();
         Console.WriteLine("When `file.pscp` is omitted, `main.pscp` in the current directory is used if present.");
         Console.WriteLine("`--compact` is the default. Use `--verbose` to keep the full helper surface in generated C#.");
         Console.WriteLine("`--large-stack` runs the program on a 256 MB stack thread (for deep recursion outside online judges).");
+        Console.WriteLine("`pscp test` builds once and runs every sample `name.in` / `name.<k>.in` next to the source, comparing with `.out`.");
         Console.WriteLine("`--older` makes the generated SDK project target net6.0 / C# 10. Transpiled C# is always C# 10 compatible.");
     }
 

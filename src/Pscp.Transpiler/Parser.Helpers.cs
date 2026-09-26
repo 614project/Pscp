@@ -42,31 +42,9 @@ public sealed partial class Parser
             TokenKind.CaretEqual => AssignmentOperator.BitwiseXorAssign,
             TokenKind.LessLessEqual => AssignmentOperator.ShiftLeftAssign,
             TokenKind.GreaterGreaterEqual => AssignmentOperator.ShiftRightAssign,
+            TokenKind.QuestionQuestionEqual => AssignmentOperator.CoalesceAssign,
             _ => AssignmentOperator.Assign,
         };
-
-    private bool TryReadAssignmentOperator(out AssignmentOperator assignmentOperator)
-    {
-        assignmentOperator = ToAssignmentOperator(Current.Kind);
-
-        if (Current.Kind is not TokenKind.Equal
-            and not TokenKind.PlusEqual
-            and not TokenKind.MinusEqual
-            and not TokenKind.StarEqual
-            and not TokenKind.SlashEqual
-            and not TokenKind.PercentEqual
-            and not TokenKind.AmpEqual
-            and not TokenKind.PipeEqual
-            and not TokenKind.CaretEqual
-            and not TokenKind.LessLessEqual
-            and not TokenKind.GreaterGreaterEqual)
-        {
-            return false;
-        }
-
-        Next();
-        return true;
-    }
 
     private bool TryReadShiftOperator(out BinaryOperator binaryOperator)
     {
@@ -121,6 +99,7 @@ public sealed partial class Parser
         }
     }
 
+    // Skips line breaks only when the next line starts with one of `allowedKinds` (spec §4.2 rule 3).
     private void SkipExpressionNewLinesBefore(params TokenKind[] allowedKinds)
     {
         int offset = 0;
@@ -140,6 +119,85 @@ public sealed partial class Parser
             SkipExpressionNewLines();
         }
     }
+
+    private void SkipNewLinesBefore(TokenKind kind)
+        => SkipExpressionNewLinesBefore(kind);
+
+    // Kind of the first token at or after `_position + offset` that is not a line break.
+    private TokenKind NextNonNewLineKind(int offset)
+    {
+        while (Peek(offset).Kind == TokenKind.NewLine)
+        {
+            offset++;
+        }
+
+        return Peek(offset).Kind;
+    }
+
+    // Index of the token closing the `(`, `[` or `{` at `openIndex`, or -1.
+    private int FindMatchingClose(int openIndex)
+    {
+        int depth = 0;
+        for (int i = openIndex; i < _tokens.Count; i++)
+        {
+            TokenKind kind = _tokens[i].Kind;
+            if (kind is TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace)
+            {
+                depth++;
+            }
+            else if (kind is TokenKind.CloseParen or TokenKind.CloseBracket or TokenKind.CloseBrace)
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    // Runs a nested parse (inside brackets, a lambda, a block) that is not part of a statement head or an indexer.
+    private T WithNestedContext<T>(Func<T> parse)
+    {
+        bool savedHead = _inStatementHead;
+        int savedIndexDepth = _indexArgumentDepth;
+        _inStatementHead = false;
+        _indexArgumentDepth = 0;
+        try
+        {
+            return parse();
+        }
+        finally
+        {
+            _inStatementHead = savedHead;
+            _indexArgumentDepth = savedIndexDepth;
+        }
+    }
+
+    // Records the source span of `node`, from the token at `startToken` to the last consumed token.
+    private T Mark<T>(T node, int startToken)
+        where T : class
+    {
+        int endToken = _position - 1;
+        while (endToken > startToken && _tokens[endToken].Kind == TokenKind.NewLine)
+        {
+            endToken--;
+        }
+
+        if (startToken >= 0 && startToken < _tokens.Count && endToken >= startToken)
+        {
+            Token first = _tokens[startToken];
+            Token last = _tokens[Math.Min(endToken, _tokens.Count - 1)];
+            _spans.Set(node, new TextSpan(first.Position, Math.Max(0, last.Position + last.Text.Length - first.Position)));
+        }
+
+        return node;
+    }
+
+    private void AddDiagnostic(string code, string message, TextSpan span, DiagnosticSeverity severity = DiagnosticSeverity.Error)
+        => _diagnostics.Add(new Diagnostic(message, span, severity, code));
 
     private bool IsStatementTerminator(TokenKind kind)
         => kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.CloseBrace or TokenKind.EndOfFile;
@@ -247,7 +305,7 @@ public sealed partial class Parser
             return Next();
         }
 
-        _diagnostics.Add(new Diagnostic(message, Current.Span));
+        AddDiagnostic(DiagnosticCodes.Syntax, message, Current.Span);
         return new Token(kind, string.Empty, Current.Position);
     }
 
@@ -258,7 +316,7 @@ public sealed partial class Parser
             return Next();
         }
 
-        _diagnostics.Add(new Diagnostic(message, Current.Span));
+        AddDiagnostic(DiagnosticCodes.Syntax, message, Current.Span);
         return new Token(TokenKind.Identifier, "object", Current.Position);
     }
 
@@ -335,6 +393,33 @@ public sealed partial class Parser
         }
 
         return ArgumentModifier.None;
+    }
+
+    // Source text of a token range with its line breaks kept (enum and interface bodies).
+    private string TokensToTextWithLineBreaks(int startInclusive, int endExclusive)
+    {
+        System.Text.StringBuilder builder = new();
+        Token? previous = null;
+        for (int i = startInclusive; i < endExclusive; i++)
+        {
+            Token token = _tokens[i];
+            if (token.Kind == TokenKind.NewLine)
+            {
+                builder.Append('\n');
+                previous = null;
+                continue;
+            }
+
+            if (previous is not null && NeedsSpace(previous, token))
+            {
+                builder.Append(' ');
+            }
+
+            builder.Append(token.Text);
+            previous = token;
+        }
+
+        return builder.ToString().Trim();
     }
 
     private string TokensToText(int startInclusive, int endExclusive)

@@ -1,4 +1,4 @@
-namespace Pscp.Transpiler;
+﻿namespace Pscp.Transpiler;
 
 internal sealed partial class CSharpEmitter
 {
@@ -41,6 +41,10 @@ internal sealed partial class CSharpEmitter
             CollectionExpression collection => EmitCollectionExpression(collection, targetTypeHint),
             AggregationExpression aggregation => EmitAggregationExpression(aggregation),
             GeneratorExpression generator => EmitBuilderEnumerable(new BuilderElement(generator.Source, generator.IndexTarget, generator.ItemTarget, generator.Body)),
+            CastExpression cast => $"(({EmitType(NormalizeSizedType(cast.Type))}){EmitExpression(cast.Operand)})",
+            AsExpression asExpression => $"({EmitExpression(asExpression.Operand)} as {EmitType(NormalizeSizedType(asExpression.Type))})",
+            NullForgivingExpression nullForgiving => $"{EmitExpression(nullForgiving.Operand)}!",
+            ThrowExpression throwExpression => $"throw {EmitExpression(throwExpression.Expression)}",
             _ => "default!"
         };
 
@@ -91,7 +95,7 @@ internal sealed partial class CSharpEmitter
             if (_semantic?.GetExpressionType(binary.Left) is TypeSyntax leftType
                 && Equals(leftType, _semantic.GetExpressionType(binary.Right)))
             {
-                return $"System.Collections.Generic.Comparer<{EmitType(leftType)}>.Default.Compare({left}, {right})";
+                return EmitDefaultOrderCompare(left, right, leftType);
             }
 
             return $"__PscpSeq.compare({left}, {right})";
@@ -117,6 +121,7 @@ internal sealed partial class CSharpEmitter
             BinaryOperator.BitwiseOr => "|",
             BinaryOperator.LogicalAnd => "&&",
             BinaryOperator.LogicalOr => "||",
+            BinaryOperator.Coalesce => "??",
             _ => "^",
         };
 
@@ -153,17 +158,9 @@ internal sealed partial class CSharpEmitter
         return $"{EmitExpression(left)}({EmitExpression(right)})";
     }
 
+    // Patterns are C# 10 pass-through text (spec §13.9).
     private string EmitIsPatternExpression(IsPatternExpression expression)
-    {
-        string pattern = expression.Pattern switch
-        {
-            TypePatternSyntax typePattern => EmitType(typePattern.Type),
-            ConstantPatternSyntax constantPattern => EmitExpression(constantPattern.Expression),
-            _ => "_"
-        };
-
-        return $"({EmitExpression(expression.Left)} is {(expression.Negated ? "not " : string.Empty)}{pattern})";
-    }
+        => $"({EmitExpression(expression.Left)} is {expression.Pattern.Text})";
 
     private static string EmitUnaryOperator(UnaryOperator op)
         => op switch
@@ -186,7 +183,7 @@ internal sealed partial class CSharpEmitter
             && unary.Operand is MemberAccessExpression { MemberName: "CompareTo" } compareToMember
             && TryGetTypeLikeText(compareToMember.Receiver, out string? comparableType))
         {
-            return $"Comparer<{comparableType}>.Create((__left, __right) => {comparableType}.CompareTo(__right, __left))";
+            return $"Comparer<{comparableType}>.Create((__pscp_l, __pscp_r) => {comparableType}.CompareTo(__pscp_r, __pscp_l))";
         }
 
         return $"({EmitUnaryOperator(unary.Operator)}{EmitExpression(unary.Operand)})";
@@ -234,13 +231,13 @@ internal sealed partial class CSharpEmitter
     private string EmitCallExpression(CallExpression call, TypeSyntax? targetTypeHint)
     {
         if (call.Callee is MemberAccessExpression stdoutMember
-            && stdoutMember.Receiver is IdentifierExpression { Name: "stdout" })
+            && stdoutMember.Receiver is IdentifierExpression { Name: PscpBinder.StdoutName })
         {
             RegisterExplicitStdoutCall(stdoutMember.MemberName, call.Arguments);
         }
 
         if (call.Callee is MemberAccessExpression stdinMember
-            && stdinMember.Receiver is IdentifierExpression { Name: "stdin" }
+            && stdinMember.Receiver is IdentifierExpression { Name: PscpBinder.StdinName }
             && TryEmitSpecializedStdinCall(stdinMember.MemberName, call.Arguments, out string? stdinCall))
         {
             return stdinCall!;
@@ -256,19 +253,43 @@ internal sealed partial class CSharpEmitter
                 && string.IsNullOrWhiteSpace(lengthArgument.Name)
                 && lengthArgument.Modifier == ArgumentModifier.None)
             {
-                return $"new {elementType}[{EmitExpression(lengthArgument.Expression)}]";
+                return NewArray(elementType, EmitExpression(lengthArgument.Expression));
             }
 
             return $"__PscpArray.zero<{elementType}>({string.Join(", ", call.Arguments.Select(argument => EmitExpressionArgument(argument)))})";
         }
 
-        if (TryEmitDirectIntrinsicCall(call, out string? intrinsic))
+        TypeSyntax? savedIntrinsicTarget = _intrinsicTarget;
+        _intrinsicTarget = targetTypeHint;
+        try
         {
-            return intrinsic!;
+            if (TryEmitDirectIntrinsicCall(call, out string? intrinsic))
+            {
+                return intrinsic!;
+            }
+        }
+        finally
+        {
+            _intrinsicTarget = savedIntrinsicTarget;
         }
 
         return EmitCallLike(call.Callee, call.Arguments);
     }
+
+    // The target type of the intrinsic call being emitted when the call is a whole target-typed expression
+    // (`long total = sum a`): `sum`, `sumBy` and integer `pow` then compute in the wider type (§22.6).
+    private TypeSyntax? _intrinsicTarget;
+
+    private TypeSyntax WidenAccumulator(TypeSyntax resultType)
+        => resultType is NamedTypeSyntax { Name: "int" or "short" or "byte" or "sbyte" or "ushort" } && _intrinsicTarget is NamedTypeSyntax { Name: "long" or "Int64" or "System.Int64" }
+            ? new NamedTypeSyntax("long", Immutable.List<TypeSyntax>())
+            : resultType;
+
+    // `total += value`, checked in Debug for integers (§22.6).
+    private static string AccumulateStatement(string target, string value, TypeSyntax accumulatorType)
+        => accumulatorType is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" }
+            ? $"{target} = __PscpSeq.add({target}, {value});"
+            : $"{target} += {value};";
 
     private bool TryEmitSpecializedStdinCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
     {
@@ -315,6 +336,24 @@ internal sealed partial class CSharpEmitter
         {
             emitted = $"new LinkedList<{linkedListTypeText!.Trim()}>({linkedListArrayRead})";
             return true;
+        }
+
+        // Spec §17.2: `readTuple<T1, ..., Tk>()` for 2 to 7 elements and `readGrid<T>(n, m)`.
+        if (TryParseMultipleGenericMembers(memberName, "readTuple", out IReadOnlyList<string>? tupleTypes)
+            && tupleTypes is { Count: >= 2 and <= 7 }
+            && arguments.Count == 0
+            && TryEmitTupleReadByTexts(tupleTypes, out string? tupleRead))
+        {
+            emitted = tupleRead;
+            return true;
+        }
+
+        if (TryParseSingleGenericMember(memberName, "readGrid", out string? gridTypeText)
+            && arguments.Count == 2
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } gridRows
+            && arguments[1] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } gridColumns)
+        {
+            return TryEmitNestedArrayRead(gridTypeText!, gridRows.Expression, gridColumns.Expression, out emitted);
         }
 
         if ((TryParseMultipleGenericMembers(memberName, "tuple2", out IReadOnlyList<string>? tuple2Types)
@@ -385,17 +424,19 @@ internal sealed partial class CSharpEmitter
 
         emitted = memberName switch
         {
-            "int" or "readInt" => "stdin.readInt()",
-            "long" or "readLong" => "stdin.readLong()",
-            "double" or "readDouble" => "stdin.readDouble()",
-            "decimal" or "readDecimal" => "stdin.readDecimal()",
-            "bool" or "readBool" => "stdin.readBool()",
-            "char" or "readChar" => "stdin.readChar()",
-            "str" or "readString" => "stdin.readString()",
-            "line" or "readLine" => "stdin.readLine()",
-            "readRestOfLine" => "stdin.readRestOfLine()",
-            "words" or "readWords" => "stdin.readWords()",
-            "chars" or "readChars" => "stdin.readChars()",
+            "int" or "readInt" => "__pscp_stdin.readInt()",
+            "long" or "readLong" => "__pscp_stdin.readLong()",
+            "double" or "readDouble" => "__pscp_stdin.readDouble()",
+            "decimal" or "readDecimal" => "__pscp_stdin.readDecimal()",
+            "bool" or "readBool" => "__pscp_stdin.readBool()",
+            "char" or "readChar" => "__pscp_stdin.readChar()",
+            "str" or "readString" => "__pscp_stdin.readString()",
+            "line" or "readLine" => "__pscp_stdin.readLine()",
+            "readRestOfLine" => "__pscp_stdin.readRestOfLine()",
+            "words" or "readWords" => "__pscp_stdin.readWords()",
+            "chars" or "readChars" => "__pscp_stdin.readChars()",
+            "hasNext" => "__pscp_stdin.hasNext()",
+            "hasNextLine" => "__pscp_stdin.hasNextLine()",
             _ => null,
         };
 
@@ -413,11 +454,11 @@ internal sealed partial class CSharpEmitter
 
         emitted = (memberName, positional.Count) switch
         {
-            ("lines" or "readLines", 1) => $"stdin.readLines({EmitExpression(positional[0].Expression)})",
-            ("charGrid" or "readCharGrid", 1) => $"stdin.readCharGrid({EmitExpression(positional[0].Expression)})",
-            ("wordGrid" or "readWordGrid", 1) => $"stdin.readWordGrid({EmitExpression(positional[0].Expression)})",
-            ("gridInt" or "readGridInt", 2) => $"stdin.readGridInt({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
-            ("gridLong" or "readGridLong", 2) => $"stdin.readGridLong({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
+            ("lines" or "readLines", 1) => $"__pscp_stdin.readLines({EmitExpression(positional[0].Expression)})",
+            ("charGrid" or "readCharGrid", 1) => $"__pscp_stdin.readCharGrid({EmitExpression(positional[0].Expression)})",
+            ("wordGrid" or "readWordGrid", 1) => $"__pscp_stdin.readWordGrid({EmitExpression(positional[0].Expression)})",
+            ("gridInt" or "readGridInt", 2) => $"__pscp_stdin.readGridInt({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
+            ("gridLong" or "readGridLong", 2) => $"__pscp_stdin.readGridLong({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
             _ => null,
         };
 
@@ -441,13 +482,13 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => "stdin.readInt()",
-            "long" => "stdin.readLong()",
-            "double" => "stdin.readDouble()",
-            "decimal" => "stdin.readDecimal()",
-            "bool" => "stdin.readBool()",
-            "char" => "stdin.readChar()",
-            "string" => "stdin.readString()",
+            "int" => "__pscp_stdin.readInt()",
+            "long" => "__pscp_stdin.readLong()",
+            "double" => "__pscp_stdin.readDouble()",
+            "decimal" => "__pscp_stdin.readDecimal()",
+            "bool" => "__pscp_stdin.readBool()",
+            "char" => "__pscp_stdin.readChar()",
+            "string" => "__pscp_stdin.readString()",
             _ => null,
         };
 
@@ -469,13 +510,13 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => $"stdin.readArrayInt({EmitExpression(lengthExpression)})",
-            "long" => $"stdin.readArrayLong({EmitExpression(lengthExpression)})",
-            "double" => $"stdin.readArrayDouble({EmitExpression(lengthExpression)})",
-            "decimal" => $"stdin.readArrayDecimal({EmitExpression(lengthExpression)})",
-            "bool" => $"stdin.readArrayBool({EmitExpression(lengthExpression)})",
-            "char" => $"stdin.readArrayChar({EmitExpression(lengthExpression)})",
-            "string" => $"stdin.readArrayString({EmitExpression(lengthExpression)})",
+            "int" => $"__pscp_stdin.readArrayInt({EmitExpression(lengthExpression)})",
+            "long" => $"__pscp_stdin.readArrayLong({EmitExpression(lengthExpression)})",
+            "double" => $"__pscp_stdin.readArrayDouble({EmitExpression(lengthExpression)})",
+            "decimal" => $"__pscp_stdin.readArrayDecimal({EmitExpression(lengthExpression)})",
+            "bool" => $"__pscp_stdin.readArrayBool({EmitExpression(lengthExpression)})",
+            "char" => $"__pscp_stdin.readArrayChar({EmitExpression(lengthExpression)})",
+            "string" => $"__pscp_stdin.readArrayString({EmitExpression(lengthExpression)})",
             _ => null,
         };
 
@@ -531,8 +572,9 @@ internal sealed partial class CSharpEmitter
         typeText = typeText.Trim();
         emitted = typeText switch
         {
-            "int" => $"stdin.readGridInt({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
-            "long" => $"stdin.readGridLong({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "int" => $"__pscp_stdin.readGridInt({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "long" => $"__pscp_stdin.readGridLong({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
+            "char" => $"__pscp_stdin.readGridChar({EmitExpression(rowCountExpression)}, {EmitExpression(columnCountExpression)})",
             _ => null,
         };
 
@@ -549,7 +591,7 @@ internal sealed partial class CSharpEmitter
         string rowCountName = NextTemporary("rows");
         string resultName = NextTemporary("result");
         string indexName = NextTemporary("i");
-        emitted = EmitValueBlock($"int {rowCountName} = {EmitExpression(rowCountExpression)}; {typeText}[][] {resultName} = new {typeText}[{rowCountName}][]; for (int {indexName} = 0; {indexName} < {rowCountName}; {indexName}++) {{ {resultName}[{indexName}] = {rowRead}; }} return {resultName};");
+        emitted = EmitValueBlock($"int {rowCountName} = {EmitExpression(rowCountExpression)}; {typeText}[][] {resultName} = {NewArray(typeText + "[]", rowCountName)}; for (int {indexName} = 0; {indexName} < {rowCountName}; {indexName}++) {{ {resultName}[{indexName}] = {rowRead}; }} return {resultName};");
         return true;
     }
 
@@ -724,13 +766,12 @@ internal sealed partial class CSharpEmitter
     {
         if ((member.MemberName == "asc" || member.MemberName == "desc") && TryGetTypeLikeText(member.Receiver, out string? typeText))
         {
-            string comparer = $"Comparer<{typeText}>.Default";
-            return member.MemberName == "asc"
-                ? comparer
-                : $"Comparer<{typeText}>.Create((__left, __right) => {comparer}.Compare(__right, __left))";
+            // Spec §25.2: the default order and its reverse, cached by `__PscpOrder<T>`.
+            return member.MemberName == "asc" ? $"__PscpOrder<{typeText}>.Asc" : $"__PscpOrder<{typeText}>.Desc";
         }
 
-        return $"{EmitMemberReceiverExpression(member.Receiver)}.{EmitMemberName(member.Receiver, member.MemberName)}";
+        string access = member.IsNullConditional ? "?." : ".";
+        return $"{EmitMemberReceiverExpression(member.Receiver)}{access}{EmitMemberName(member.Receiver, member.MemberName)}";
     }
 
     private bool TryGetTypeLikeText(Expression expression, out string? typeText)
@@ -751,7 +792,7 @@ internal sealed partial class CSharpEmitter
 
     private string EmitMemberName(Expression receiver, string name)
     {
-        if (receiver is IdentifierExpression { Name: "stdin" })
+        if (receiver is IdentifierExpression { Name: PscpBinder.StdinName })
         {
             string root = name.Split('<')[0];
             if (root is "int")
@@ -850,7 +891,7 @@ internal sealed partial class CSharpEmitter
     {
         if (newArray.Dimensions.Count == 1)
         {
-            return $"new {EmitType(newArray.ElementType)}[{EmitExpression(newArray.Dimensions[0])}]";
+            return NewArray(EmitType(newArray.ElementType), EmitExpression(newArray.Dimensions[0]));
         }
 
         return EmitJaggedArrayAllocation(EmitType(newArray.ElementType), newArray.Dimensions);
@@ -890,7 +931,7 @@ internal sealed partial class CSharpEmitter
             {
                 NamedTypeSyntax named when IsListType(named) => $"new {EmitType(named)}()",
                 NamedTypeSyntax named when IsLinkedListType(named) => $"new {EmitType(named)}()",
-                NamedTypeSyntax named when IsKnownAutoConstructType(named) => $"new {EmitType(named)}()",
+                NamedTypeSyntax named when IsKnownAutoConstructType(named) => EmitAutoConstruction(named, targetTyped: false),
                 _ => $"Array.Empty<{EmitType(elementHint ?? new NamedTypeSyntax("object", Immutable.List<TypeSyntax>()))}>()",
             };
         }
@@ -942,17 +983,6 @@ internal sealed partial class CSharpEmitter
         return sequence.StartsWith("__PscpSeq.arrayOf(", StringComparison.Ordinal)
             ? sequence
             : $"__PscpSeq.toArray({sequence})";
-    }
-
-    private string EmitRangeEnumerable(RangeExpression range, TypeSyntax? targetTypeHint)
-    {
-        bool useLong = IsLongRange(range, targetTypeHint);
-        string helper = useLong ? "__PscpSeq.rangeLong" : "__PscpSeq.rangeInt";
-        string inclusive = range.Kind == RangeKind.RightExclusive ? "false" : "true";
-
-        return range.Step is null
-            ? $"{helper}({EmitExpression(range.Start)}, {EmitExpression(range.End)}, {inclusive})"
-            : $"{helper}({EmitExpression(range.Start)}, {EmitExpression(range.End)}, {EmitExpression(range.Step)}, {inclusive})";
     }
 
     private string EmitBuilderEnumerable(BuilderElement builder)
@@ -1007,7 +1037,7 @@ internal sealed partial class CSharpEmitter
         return lambda.Body switch
         {
             LambdaExpressionBody expressionBody => $"{parameters} => {EmitExpression(expressionBody.Expression)}",
-            LambdaBlockBody blockBody => $"{parameters} => {{ {EmitInlineBlock(blockBody.Block, isVoidLike: false)} }}",
+            LambdaBlockBody blockBody => $"{parameters} => {{ {WithReturnType(null, () => EmitInlineBlock(blockBody.Block, isVoidLike: !LambdaBlockReturnsValue(blockBody.Block)))} }}",
             _ => $"{parameters} => default!"
         };
     }
@@ -1041,27 +1071,81 @@ internal sealed partial class CSharpEmitter
     private string EmitInlineBlockCore(BlockStatement block, bool isVoidLike)
     {
         List<string> parts = [];
-        Expression? implicitReturn = GetImplicitReturnExpression(block);
-        int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
-
-        for (int i = 0; i < regularCount; i++)
+        for (int i = 0; i < block.Statements.Count - 1; i++)
         {
             parts.Add(EmitInlineStatement(block.Statements[i]));
         }
 
-        if (implicitReturn is not null)
+        if (block.Statements.Count > 0)
         {
-            parts.Add(isVoidLike
-                ? $"{EmitExpression(implicitReturn)};"
-                : $"return {EmitExpression(implicitReturn)};");
-        }
-        else if (!isVoidLike && !ContainsExplicitReturn(block))
-        {
-            parts.Add("return default!;");
+            parts.Add(isVoidLike ? EmitInlineStatement(block.Statements[^1]) : EmitInlineTailStatement(block.Statements[^1]));
         }
 
         return string.Join(" ", parts);
     }
+
+    // Tail position inside an inline block (spec §10.5), see EmitTailStatement.
+    private string EmitInlineTailStatement(Statement statement)
+        => statement switch
+        {
+            ExpressionStatement expressionStatement when IsTailReturnEligible(expressionStatement.Expression) => $"return {EmitExpression(expressionStatement.Expression, CurrentReturnType)};",
+            BlockStatement block => $"{{ {EmitInlineBlockCore(block, isVoidLike: false)} }}",
+            IfStatement { ElseBranch: not null } ifStatement
+                => $"if ({EmitExpression(ifStatement.Condition)}) {{ {EmitInlineTailStatement(ifStatement.ThenBranch)} }} else {{ {EmitInlineTailStatement(ifStatement.ElseBranch)} }}",
+            _ => EmitInlineStatement(statement),
+        };
+
+    // A block lambda returns a value when it has `return value` or a tail expression with a value. Without the
+    // delegate type a tail call of unknown type is taken as a statement (`xs.ForEach(x => { sb.Append(x) })`).
+    private bool LambdaBlockReturnsValue(BlockStatement block)
+    {
+        if (ContainsValueReturn(block))
+        {
+            return true;
+        }
+
+        List<Expression> tails = [];
+        CollectTailExpressions(block, tails);
+        return tails.Any(tail => _semantic?.GetExpressionType(tail) switch
+        {
+            NamedTypeSyntax { Name: "void" } => false,
+            null => tail is not CallExpression,
+            _ => true,
+        });
+    }
+
+    private void CollectTailExpressions(Statement statement, List<Expression> tails)
+    {
+        switch (statement)
+        {
+            case ExpressionStatement expressionStatement when IsTailReturnEligible(expressionStatement.Expression):
+                tails.Add(expressionStatement.Expression);
+                break;
+            case BlockStatement { Statements.Count: > 0 } block:
+                CollectTailExpressions(block.Statements[^1], tails);
+                break;
+            case IfStatement { ElseBranch: not null } ifStatement:
+                CollectTailExpressions(ifStatement.ThenBranch, tails);
+                CollectTailExpressions(ifStatement.ElseBranch, tails);
+                break;
+        }
+    }
+
+    private static bool ContainsValueReturn(Statement statement)
+        => statement switch
+        {
+            ReturnStatement { Expression: not null } => true,
+            BlockStatement block => block.Statements.Any(ContainsValueReturn),
+            IfStatement ifStatement => ContainsValueReturn(ifStatement.ThenBranch) || (ifStatement.ElseBranch is not null && ContainsValueReturn(ifStatement.ElseBranch)),
+            WhileStatement whileStatement => ContainsValueReturn(whileStatement.Body),
+            ForInStatement forIn => ContainsValueReturn(forIn.Body),
+            CStyleForStatement cStyleFor => ContainsValueReturn(cStyleFor.Body),
+            FastForStatement fastFor => ContainsValueReturn(fastFor.Body),
+            TryStatement tryStatement => ContainsValueReturn(tryStatement.Body)
+                || tryStatement.Catches.Any(catchClause => ContainsValueReturn(catchClause.Body))
+                || (tryStatement.Finally is not null && ContainsValueReturn(tryStatement.Finally)),
+            _ => false,
+        };
 
     private string EmitInlineStatement(Statement statement)
         => statement switch
@@ -1080,7 +1164,7 @@ internal sealed partial class CSharpEmitter
             ForInStatement forIn => $"foreach (var {EmitBindingPattern(forIn.Iterator)} in {EmitEnumerable(forIn.Source)}) {EmitInlineEmbeddedStatement(forIn.Body)}",
             CStyleForStatement cStyleFor => $"for ({cStyleFor.HeaderText}) {EmitInlineEmbeddedStatement(cStyleFor.Body)}",
             FastForStatement fastFor => EmitInlineFastFor(fastFor),
-            ReturnStatement returnStatement => returnStatement.Expression is null ? "return;" : $"return {EmitExpression(returnStatement.Expression)};",
+            ReturnStatement returnStatement => returnStatement.Expression is null ? "return;" : $"return {EmitExpression(returnStatement.Expression, CurrentReturnType)};",
             BreakStatement => "break;",
             ContinueStatement => "continue;",
             LocalFunctionStatement localFunction => $"{EmitInlineFunction(localFunction.Function)}",
@@ -1090,7 +1174,8 @@ internal sealed partial class CSharpEmitter
     private string EmitInlineFunction(FunctionDeclaration function)
     {
         string parameters = string.Join(", ", function.Parameters.Select(EmitParameter));
-        return $"{EmitType(function.ReturnType)} {function.Name}({parameters}) {{ {EmitInlineBlock(function.Body, isVoidLike: GetIsVoid(function.ReturnType))} }}";
+        string body = WithReturnType(function.ReturnType, () => EmitInlineBlock(function.Body, isVoidLike: GetIsVoid(function.ReturnType)));
+        return $"{EmitType(function.ReturnType)} {function.Name}({parameters}) {{ {body} }}";
     }
 
     private string EmitInlineEmbeddedStatement(Statement statement)
@@ -1182,6 +1267,7 @@ internal sealed partial class CSharpEmitter
             AssignmentOperator.BitwiseXorAssign => "^=",
             AssignmentOperator.ShiftLeftAssign => "<<=",
             AssignmentOperator.ShiftRightAssign => ">>=",
+            AssignmentOperator.CoalesceAssign => "??=",
             _ => throw new InvalidOperationException($"Unknown assignment operator {op}."),
         };
 
@@ -1262,7 +1348,7 @@ internal sealed partial class CSharpEmitter
         if (sized.Dimensions.Count == 1)
         {
             _writer.WriteLine($"int {lengthName} = {EmitExpression(sized.Dimensions[0])};");
-            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = new {elementTypeText}[{lengthName}];");
+            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = {NewArray(elementTypeText, lengthName)};");
             _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
             _writer.WriteLine("{");
             _writer.Indent();
@@ -1278,11 +1364,11 @@ internal sealed partial class CSharpEmitter
             string innerIndexName = NextTemporary("j");
             _writer.WriteLine($"int {lengthName} = {EmitExpression(sized.Dimensions[0])};");
             _writer.WriteLine($"int {innerLengthName} = {EmitExpression(sized.Dimensions[1])};");
-            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = new {elementTypeText}[{lengthName}][];");
+            _writer.WriteLine($"{declarationPrefix}{normalizedTargetName} = {NewArray(elementTypeText + "[]", lengthName)};");
             _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
             _writer.WriteLine("{");
             _writer.Indent();
-            _writer.WriteLine($"{normalizedTargetName}[{indexName}] = new {elementTypeText}[{innerLengthName}];");
+            _writer.WriteLine($"{normalizedTargetName}[{indexName}] = {NewArray(elementTypeText, innerLengthName)};");
             _writer.WriteLine($"for (int {innerIndexName} = 0; {innerIndexName} < {innerLengthName}; {innerIndexName}++)");
             _writer.WriteLine("{");
             _writer.Indent();
@@ -1312,13 +1398,13 @@ internal sealed partial class CSharpEmitter
     {
         return named.Name switch
         {
-            "int" => "stdin.readInt()",
-            "long" => "stdin.readLong()",
-            "double" => "stdin.readDouble()",
-            "decimal" => "stdin.readDecimal()",
-            "bool" => "stdin.readBool()",
-            "char" => "stdin.readChar()",
-            "string" => "stdin.readString()",
+            "int" => "__pscp_stdin.readInt()",
+            "long" => "__pscp_stdin.readLong()",
+            "double" => "__pscp_stdin.readDouble()",
+            "decimal" => "__pscp_stdin.readDecimal()",
+            "bool" => "__pscp_stdin.readBool()",
+            "char" => "__pscp_stdin.readChar()",
+            "string" => "__pscp_stdin.readString()",
             _ => "default!"
         };
     }
@@ -1339,13 +1425,13 @@ internal sealed partial class CSharpEmitter
         {
             return sized.ElementType switch
             {
-                NamedTypeSyntax { Name: "int" } => $"stdin.readArrayInt({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "long" } => $"stdin.readArrayLong({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "double" } => $"stdin.readArrayDouble({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "decimal" } => $"stdin.readArrayDecimal({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "bool" } => $"stdin.readArrayBool({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "char" } => $"stdin.readArrayChar({EmitExpression(sized.Dimensions[0])})",
-                NamedTypeSyntax { Name: "string" } => $"stdin.readArrayString({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "int" } => $"__pscp_stdin.readArrayInt({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "long" } => $"__pscp_stdin.readArrayLong({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "double" } => $"__pscp_stdin.readArrayDouble({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "decimal" } => $"__pscp_stdin.readArrayDecimal({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "bool" } => $"__pscp_stdin.readArrayBool({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "char" } => $"__pscp_stdin.readArrayChar({EmitExpression(sized.Dimensions[0])})",
+                NamedTypeSyntax { Name: "string" } => $"__pscp_stdin.readArrayString({EmitExpression(sized.Dimensions[0])})",
                 _ => "default!",
             };
         }
@@ -1354,8 +1440,8 @@ internal sealed partial class CSharpEmitter
         {
             return sized.ElementType switch
             {
-                NamedTypeSyntax { Name: "int" } => $"stdin.readGridInt({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
-                NamedTypeSyntax { Name: "long" } => $"stdin.readGridLong({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
+                NamedTypeSyntax { Name: "int" } => $"__pscp_stdin.readGridInt({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
+                NamedTypeSyntax { Name: "long" } => $"__pscp_stdin.readGridLong({EmitExpression(sized.Dimensions[0])}, {EmitExpression(sized.Dimensions[1])})",
                 _ => "default!",
             };
         }
@@ -1370,16 +1456,16 @@ internal sealed partial class CSharpEmitter
 
         if (sizedType.Dimensions.Count == 1)
         {
-            _writer.WriteLine($"{arrayType} {name} = new {elementType}[{EmitExpression(sizedType.Dimensions[0])}];");
+            _writer.WriteLine($"{arrayType} {name} = {NewArray(elementType, EmitExpression(sizedType.Dimensions[0]))};");
             return;
         }
 
-        _writer.WriteLine($"{arrayType} {name} = new {elementType}[{EmitExpression(sizedType.Dimensions[0])}][];");
+        _writer.WriteLine($"{arrayType} {name} = {NewArray(elementType + "[]", EmitExpression(sizedType.Dimensions[0]))};");
         string index = NextTemporary("i");
         _writer.WriteLine($"for (int {index} = 0; {index} < {EmitExpression(sizedType.Dimensions[0])}; {index}++)");
         _writer.WriteLine("{");
         _writer.Indent();
-        _writer.WriteLine($"{name}[{index}] = new {elementType}[{EmitExpression(sizedType.Dimensions[1])}];");
+        _writer.WriteLine($"{name}[{index}] = {NewArray(elementType, EmitExpression(sizedType.Dimensions[1]))};");
         _writer.Unindent();
         _writer.WriteLine("}");
     }
@@ -1388,7 +1474,7 @@ internal sealed partial class CSharpEmitter
     {
         if (sizedType.Dimensions.Count == 1)
         {
-            return $"new {EmitType(sizedType.ElementType)}[{EmitExpression(sizedType.Dimensions[0])}]";
+            return NewArray(EmitType(sizedType.ElementType), EmitExpression(sizedType.Dimensions[0]));
         }
 
         return EmitJaggedArrayAllocation(EmitType(sizedType.ElementType), sizedType.Dimensions);
@@ -1417,7 +1503,17 @@ internal sealed partial class CSharpEmitter
             && _declaredValueNames.Contains(identifier.Name)
                 ? identifier.Name
                 : EmitExpression(index.Receiver);
-        return $"{receiver}[{string.Join(", ", index.Arguments.Select(EmitIndexArgument))}]";
+
+        // Spec §15.3: `List<T>` has no range indexer; its slices use `GetRange`.
+        if (index.Arguments.Count == 1
+            && index.Arguments[0] is SliceExpression listSlice
+            && UnwrapNullableType(_semantic?.GetExpressionType(index.Receiver)) is NamedTypeSyntax { Name: "List" or "System.Collections.Generic.List" })
+        {
+            return EmitListSlice(index.Receiver, listSlice);
+        }
+
+        string open = index.IsNullConditional ? "?[" : "[";
+        return $"{receiver}{open}{string.Join(", ", index.Arguments.Select(EmitIndexArgument))}]";
     }
 
     private string EmitIndexArgument(Expression expression)
@@ -1428,13 +1524,58 @@ internal sealed partial class CSharpEmitter
             _ => EmitExpression(expression)
         };
 
+    // `a..<b` is C# `a..b`; `a..=b` is `a..(b + 1)`, and an inclusive end `^k` is `^(k - 1)` (spec §15.3).
     private string EmitSliceExpression(SliceExpression slice)
     {
         string start = slice.Start is null ? string.Empty : EmitIndexArgument(slice.Start);
-        string end = slice.End is null ? string.Empty : EmitIndexArgument(slice.End);
+        string end = slice.End is null ? string.Empty : EmitSliceEnd(slice.End, slice.Kind == SliceKind.Inclusive);
         return $"{start}..{end}";
     }
 
+    private string EmitSliceEnd(Expression end, bool inclusive)
+    {
+        if (!inclusive)
+        {
+            return EmitIndexArgument(end);
+        }
+
+        if (end is FromEndExpression fromEnd)
+        {
+            return PscpSyntaxFacts.TryEvaluateIntegerConstant(fromEnd.Operand, out long fromEndValue)
+                ? (fromEndValue == 1 ? string.Empty : $"^{fromEndValue - 1}")
+                : $"^({EmitExpression(fromEnd.Operand)} - 1)";
+        }
+
+        return PscpSyntaxFacts.TryEvaluateIntegerConstant(end, out long endValue)
+            ? (endValue + 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : $"({EmitExpression(end)} + 1)";
+    }
+
+    // `list[a..<b]` → `list.GetRange(a, b - a)`.
+    private string EmitListSlice(Expression receiver, SliceExpression slice)
+    {
+        string list = EmitExpression(receiver);
+        string start = slice.Start is null ? "0" : EmitListIndex(list, slice.Start);
+        string end = slice.End is null
+            ? $"{list}.Count"
+            : slice.Kind == SliceKind.Inclusive ? $"({EmitListIndex(list, slice.End)} + 1)" : EmitListIndex(list, slice.End);
+        if (!IsSideEffectFreeReceiver(receiver) || slice.Start is not null && !IsSimpleIndexExpression(slice.Start))
+        {
+            return $"__PscpSeq.sliceList({list}, {start}, {end})";
+        }
+
+        return start == "0" ? $"{list}.GetRange(0, {end})" : $"{list}.GetRange({start}, {end} - {start})";
+    }
+
+    private string EmitListIndex(string list, Expression index)
+        => index is FromEndExpression fromEnd ? $"({list}.Count - {EmitExpression(fromEnd.Operand)})" : EmitExpression(index);
+
+    private static bool IsSimpleIndexExpression(Expression expression)
+        => expression is LiteralExpression or IdentifierExpression || expression is FromEndExpression { Operand: LiteralExpression or IdentifierExpression };
+
+    // Spec §19: holes without a format follow the rendering rules (§18.3); formatted holes use C# formatting with
+    // the invariant culture, so the whole string is created with `CultureInfo.InvariantCulture` when a hole
+    // could depend on the culture.
     private string EmitInterpolatedStringExpression(InterpolatedStringExpression interpolated)
     {
         if (interpolated.Parts.Count == 0)
@@ -1442,6 +1583,7 @@ internal sealed partial class CSharpEmitter
             return "\"\"";
         }
 
+        bool cultureSensitive = false;
         System.Text.StringBuilder builder = new("$\"");
         foreach (InterpolatedStringPart part in interpolated.Parts)
         {
@@ -1451,13 +1593,99 @@ internal sealed partial class CSharpEmitter
                     builder.Append(EscapeCSharpInterpolatedText(textPart.Text));
                     break;
                 case InterpolatedStringInterpolationPart interpolationPart:
-                    builder.Append('{').Append(EmitExpression(interpolationPart.Expression)).Append('}');
+                {
+                    TypeSyntax? type = _semantic?.GetExpressionType(interpolationPart.Expression);
+                    string value = EmitExpression(interpolationPart.Expression);
+                    if (interpolationPart.Format is null)
+                    {
+                        (value, bool rendered) = EmitRenderedHole(value, type);
+                        cultureSensitive |= !rendered;
+                    }
+                    else
+                    {
+                        cultureSensitive = true;
+                    }
+
+                    builder.Append('{').Append(ParenthesizeInterpolationHole(value));
+                    if (interpolationPart.Alignment is not null)
+                    {
+                        builder.Append(',').Append(interpolationPart.Alignment);
+                    }
+
+                    if (interpolationPart.Format is not null)
+                    {
+                        builder.Append(':').Append(interpolationPart.Format);
+                    }
+
+                    builder.Append('}');
                     break;
+                }
             }
         }
 
         builder.Append('"');
-        return builder.ToString();
+        return cultureSensitive
+            ? $"string.Create(CultureInfo.InvariantCulture, {builder})"
+            : builder.ToString();
+    }
+
+    // The hole as a rendered string when C# formatting differs from §18.3 (`double`, `float`, `bool`, tuples,
+    // collections, values of unknown type). `Rendered` is false when C# formats the value itself.
+    private static (string Value, bool Rendered) EmitRenderedHole(string value, TypeSyntax? type)
+        => type switch
+        {
+            NamedTypeSyntax { Name: "string" or "char" } => (value, true),
+            NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "short" or "byte" or "sbyte" or "uint" or "ulong" or "ushort" or "decimal" } => (value, false),
+            NamedTypeSyntax { Name: "double" } => ($"__PscpRender.formatDouble({value})", true),
+            NamedTypeSyntax { Name: "float" } => ($"__PscpRender.formatFloat({value})", true),
+            NamedTypeSyntax { Name: "bool" } => ($"({value} ? \"true\" : \"false\")", true),
+            _ => ($"__PscpRender.format({value})", true),
+        };
+
+    // A top-level `:` or `?` in a hole would start a format specifier; parentheses keep the expression whole.
+    private static string ParenthesizeInterpolationHole(string value)
+    {
+        int depth = 0;
+        bool inString = false;
+        bool inChar = false;
+        for (int i = 0; i < value.Length; i++)
+        {
+            char ch = value[i];
+            if (inString || inChar)
+            {
+                if (ch == '\\')
+                {
+                    i++;
+                }
+                else if ((inString && ch == '"') || (inChar && ch == '\''))
+                {
+                    inString = false;
+                    inChar = false;
+                }
+
+                continue;
+            }
+
+            switch (ch)
+            {
+                case '"':
+                    inString = true;
+                    break;
+                case '\'':
+                    inChar = true;
+                    break;
+                case '(' or '[' or '{':
+                    depth++;
+                    break;
+                case ')' or ']' or '}':
+                    depth--;
+                    break;
+                case ':' or '?' or ',' when depth == 0:
+                    return $"({value})";
+            }
+        }
+
+        return value;
     }
 
     private static string EscapeCSharpStringLiteral(string value)
@@ -1513,7 +1741,7 @@ internal sealed partial class CSharpEmitter
             "decimal" => EmitNumericConversion("decimal", "decimal.Parse", "Convert.ToDecimal", operand, sourceType),
             "bool" => EmitBooleanConversion(operand, sourceType),
             "char" => EmitCharConversion(operand, sourceType),
-            "string" => $"(Convert.ToString({operand}, CultureInfo.InvariantCulture) ?? string.Empty)",
+            "string" => EmitStringConversion(operand, sourceType),
             _ => null,
         };
         return emitted is not null;
@@ -1550,6 +1778,13 @@ internal sealed partial class CSharpEmitter
             return $"({operand} ? {oneLiteral} : {zeroLiteral})";
         }
 
+        // Spec §21: a real number converts to an integer by truncation toward zero. A value out of the target's
+        // range is a precondition violation, reported by the checked cast.
+        if (targetType is "int" or "long" && sourceType is NamedTypeSyntax { Name: "double" or "float" })
+        {
+            return $"checked(({targetType})({operand}))";
+        }
+
         if (IsNumericType(sourceType) || IsCharType(sourceType))
         {
             return $"(({targetType})({operand}))";
@@ -1558,11 +1793,26 @@ internal sealed partial class CSharpEmitter
         return $"{convertMethod}({operand}, CultureInfo.InvariantCulture)";
     }
 
+    // Spec §21.1: `string x` renders `x` like output does (§18.3).
+    private static string EmitStringConversion(string operand, TypeSyntax? sourceType)
+        => sourceType switch
+        {
+            NamedTypeSyntax { Name: "string" } => operand,
+            NamedTypeSyntax { Name: "char" } => $"{operand}.ToString()",
+            NamedTypeSyntax { Name: "int" or "long" or "short" or "byte" or "sbyte" or "uint" or "ulong" or "ushort" or "decimal" } => $"{operand}.ToString(CultureInfo.InvariantCulture)",
+            NamedTypeSyntax { Name: "double" } => $"__PscpRender.formatDouble({operand})",
+            NamedTypeSyntax { Name: "float" } => $"__PscpRender.formatFloat({operand})",
+            NamedTypeSyntax { Name: "bool" } => $"({operand} ? \"true\" : \"false\")",
+            ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { Name: "char" } } => $"new string({operand})",
+            _ => $"__PscpRender.format({operand})",
+        };
+
     private string EmitBooleanConversion(string operand, TypeSyntax? sourceType)
     {
+        // Spec §21.1: the same parsing as `stdin.readBool()`.
         if (IsStringType(sourceType))
         {
-            return $"(!string.IsNullOrEmpty({operand}))";
+            return $"__PscpRender.parseBool({operand})";
         }
 
         if (IsNumericType(sourceType))
@@ -1582,7 +1832,7 @@ internal sealed partial class CSharpEmitter
     {
         if (IsStringType(sourceType))
         {
-            return $"(string.IsNullOrEmpty({operand}) ? '\\0' : {operand}[0])";
+            return $"__PscpRender.parseChar({operand})";
         }
 
         return $"((char)({operand}))";
@@ -1671,7 +1921,7 @@ internal sealed partial class CSharpEmitter
         IEnumerable<string> arms = switchExpression.Arms.Select(arm =>
         {
             string guard = arm.Guard is null ? string.Empty : $" when {EmitExpression(arm.Guard)}";
-            return $"{arm.PatternText}{guard} => {EmitExpression(arm.Result)}";
+            return $"{arm.Pattern.Text}{guard} => {EmitExpression(arm.Result)}";
         });
         return $"{receiver} switch {{ {string.Join(", ", arms)} }}";
     }
@@ -1729,7 +1979,7 @@ internal sealed partial class CSharpEmitter
         if (dimensions.Count == 1)
         {
             string trailingRanks = string.Concat(Enumerable.Repeat("[]", Math.Max(0, arrayType.Depth - 1)));
-            return $"new {EmitType(arrayType.ElementType)}[{EmitExpression(dimensions[0])}]{trailingRanks}";
+            return NewArray(EmitType(arrayType.ElementType) + trailingRanks, EmitExpression(dimensions[0]));
         }
 
         return EmitJaggedArrayAllocation(EmitType(arrayType.ElementType), dimensions);
@@ -1765,13 +2015,14 @@ internal sealed partial class CSharpEmitter
             or "HashSet" or "System.Collections.Generic.HashSet"
             or "Dictionary" or "System.Collections.Generic.Dictionary"
             or "SortedSet" or "System.Collections.Generic.SortedSet"
+            or "SortedDictionary" or "System.Collections.Generic.SortedDictionary"
             or "PriorityQueue" or "System.Collections.Generic.PriorityQueue";
 
     private static TypeSyntax? GetCollectionElementType(TypeSyntax type)
         => type switch
         {
-            ArrayTypeSyntax array => array.ElementType,
-            SizedArrayTypeSyntax sized => sized.ElementType,
+            ArrayTypeSyntax array => array.Depth > 1 ? new ArrayTypeSyntax(array.ElementType, array.Depth - 1) : array.ElementType,
+            SizedArrayTypeSyntax sized => sized.Dimensions.Count > 1 ? new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count - 1) : sized.ElementType,
             NamedTypeSyntax { Name: "string" } => new NamedTypeSyntax("char", Immutable.List<TypeSyntax>()),
             NamedTypeSyntax named when named.TypeArguments.Count == 1 && (IsListType(named) || IsLinkedListType(named)) => named.TypeArguments[0],
             NamedTypeSyntax named when named.TypeArguments.Count == 1 && named.Name is "IEnumerable" or "System.Collections.Generic.IEnumerable" or "Queue" or "System.Collections.Generic.Queue" or "Stack" or "System.Collections.Generic.Stack" or "HashSet" or "System.Collections.Generic.HashSet" or "SortedSet" or "System.Collections.Generic.SortedSet" => named.TypeArguments[0],
@@ -2005,82 +2256,11 @@ internal sealed partial class CSharpEmitter
         };
     }
 
-    private string EmitRangeStepExpression(RangeExpression range, string startName, string endName, bool useLong)
-    {
-        if (range.Step is not null)
-        {
-            return EmitExpression(range.Step);
-        }
-
-        return useLong ? "1L" : "1";
-    }
-
-    // A range bound is evaluated once, before the first iteration. It may only be repeated inside the generated
-    // `for` condition when re-evaluating it cannot observe a different value: literals, and names that are never
-    // reassigned. Member accesses such as `q.Count` and indexers can change while the loop body runs, so they
-    // are captured in a temporary first.
-    private bool CanInlineDirectRangeExpression(Expression expression)
-        => expression switch
-        {
-            LiteralExpression => true,
-            IdentifierExpression identifier => _semantic is not null && !_semantic.MutatedNames.Contains(identifier.Name),
-            _ => false,
-        };
-
     private string EmitLoopOverSource(Expression source, string itemName, string bodyStatements, string? indexName = null)
     {
         if (source is RangeExpression range)
         {
-            bool useLong = IsLongRange(range, null);
-            string numericType = useLong ? "long" : "int";
-            string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-
-            if (range.Step is null)
-            {
-                if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
-                {
-                    string directStart = EmitExpression(range.Start);
-                    string directEnd = EmitExpression(range.End);
-                    string directHeader = indexName is null
-                        ? $"for ({numericType} {itemName} = {directStart}; {itemName} {comparison} {directEnd}; {itemName}++)"
-                        : $"for ({numericType} {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++)";
-                    return $"{{ {directHeader} {{ {bodyStatements} }} }}";
-                }
-
-                // The start is read once by the loop initializer anyway; only the end needs a temporary.
-                string rangeStart = EmitExpression(range.Start);
-                string rangeEndName = NextTemporary("end");
-                string rangeIndexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
-                string update = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
-                if (CanInlineDirectRangeExpression(range.End))
-                {
-                    return $"{{ {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStart}; {itemName} {comparison} {EmitExpression(range.End)}; {update}) {{ {bodyStatements} }} }}";
-                }
-
-                string rangeStartName = NextTemporary("start");
-                return $"{{ {numericType} {rangeStartName} = {rangeStart}; {numericType} {rangeEndName} = {EmitExpression(range.End)}; {rangeIndexPrefix}for ({numericType} {itemName} = {rangeStartName}; {itemName} {comparison} {rangeEndName}; {update}) {{ {bodyStatements} }} }}";
-            }
-
-            string steppedStartName = NextTemporary("start");
-            string steppedEndName = NextTemporary("end");
-            string stepName = NextTemporary("step");
-            string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
-            string updateWithStep = indexName is null ? $"{itemName} += {stepName}" : $"{itemName} += {stepName}, {indexName}++";
-            string steppedIndexPrefix = indexName is null ? string.Empty : $"int {indexName} = 0; ";
-            return $$"""
-                {
-                    {{numericType}} {{steppedStartName}} = {{EmitExpression(range.Start)}};
-                    {{numericType}} {{steppedEndName}} = {{EmitExpression(range.End)}};
-                    {{numericType}} {{stepName}} = {{EmitExpression(range.Step)}};
-                #if DEBUG
-                    if ({{stepName}} == 0) throw new InvalidOperationException("Range step cannot be zero.");
-                #endif
-                    {{steppedIndexPrefix}}for ({{numericType}} {{itemName}} = {{steppedStartName}}; {{stepName}} > 0 ? {{itemName}} {{comparison}} {{steppedEndName}} : {{itemName}} {{backwardOp}} {{steppedEndName}}; {{updateWithStep}})
-                    {
-                        {{bodyStatements}}
-                    }
-                }
-                """;
+            return EmitRangeLoopText(range, itemName, bodyStatements, indexName);
         }
 
         if (indexName is null)
@@ -2091,13 +2271,37 @@ internal sealed partial class CSharpEmitter
         return $"{{ int {indexName} = 0; foreach (var {itemName} in {EmitEnumerable(source)}) {{ {bodyStatements} {indexName}++; }} }}";
     }
 
+    // `new T[n]` for an element type T. The ranks of an array element type follow the length: `new int[n][]`.
+    private static string NewArray(string elementType, string length)
+    {
+        int split = elementType.Length;
+        while (split > 0)
+        {
+            if (split >= 2 && elementType[split - 1] == ']' && elementType[split - 2] == '[')
+            {
+                split -= 2;
+            }
+            else if (split >= 2 && elementType[split - 1] == '?' && elementType[split - 2] == ']')
+            {
+                split--;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return $"new {elementType[..split]}[{length}]{elementType[split..].Replace("?", string.Empty, StringComparison.Ordinal)}";
+    }
+
     private string EmitAutoConstructArrayAllocation(TypeSyntax elementType, Expression lengthExpression)
     {
         string lengthName = NextTemporary("length");
         string resultName = NextTemporary("result");
         string indexName = NextTemporary("i");
         string elementTypeText = EmitType(elementType);
-        return EmitValueBlock($"int {lengthName} = {EmitExpression(lengthExpression)}; {elementTypeText}[] {resultName} = new {elementTypeText}[{lengthName}]; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = new {elementTypeText}(); }} return {resultName};");
+        string construction = elementType is NamedTypeSyntax named ? EmitAutoConstruction(named, targetTyped: false) : $"new {elementTypeText}()";
+        return EmitValueBlock($"int {lengthName} = {EmitExpression(lengthExpression)}; {elementTypeText}[] {resultName} = {NewArray(elementTypeText, lengthName)}; for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++) {{ {resultName}[{indexName}] = {construction}; }} return {resultName};");
     }
 
     private string EmitJaggedArrayAllocation(string elementType, IReadOnlyList<Expression> dimensions)
@@ -2108,7 +2312,7 @@ internal sealed partial class CSharpEmitter
             string innerLength = NextTemporary("innerLength");
             string resultName = NextTemporary("result");
             string indexName = NextTemporary("i");
-            return EmitValueBlock($"int {outerLength} = {EmitExpression(dimensions[0])}; int {innerLength} = {EmitExpression(dimensions[1])}; {elementType}[][] {resultName} = new {elementType}[{outerLength}][]; for (int {indexName} = 0; {indexName} < {outerLength}; {indexName}++) {{ {resultName}[{indexName}] = new {elementType}[{innerLength}]; }} return {resultName};");
+            return EmitValueBlock($"int {outerLength} = {EmitExpression(dimensions[0])}; int {innerLength} = {EmitExpression(dimensions[1])}; {elementType}[][] {resultName} = {NewArray(elementType + "[]", outerLength)}; for (int {indexName} = 0; {indexName} < {outerLength}; {indexName}++) {{ {resultName}[{indexName}] = {NewArray(elementType, innerLength)}; }} return {resultName};");
         }
 
         return $"__PscpArray.jagged<{elementType}>({string.Join(", ", dimensions.Select(dimension => EmitExpression(dimension)))})";
@@ -2138,9 +2342,7 @@ internal sealed partial class CSharpEmitter
     private bool TryEmitMaterializedRange(RangeExpression range, TypeSyntax? targetTypeHint, TypeSyntax? elementHint, out string? emitted)
     {
         emitted = null;
-        if (!IsArrayMaterializationTarget(targetTypeHint)
-            || elementHint is null
-            || IsLongRange(range, targetTypeHint))
+        if (!IsArrayMaterializationTarget(targetTypeHint) || elementHint is null)
         {
             return false;
         }
@@ -2155,8 +2357,7 @@ internal sealed partial class CSharpEmitter
         emitted = null;
         if (!IsArrayMaterializationTarget(targetTypeHint)
             || elementHint is null
-            || builder.Source is not RangeExpression range
-            || IsLongRange(range, targetTypeHint))
+            || builder.Source is not RangeExpression range)
         {
             return false;
         }
@@ -2169,90 +2370,7 @@ internal sealed partial class CSharpEmitter
     }
 
     private string EmitRangeArrayMaterialization(RangeExpression range, TypeSyntax elementType, string itemName, string? indexName, string valueExpression)
-    {
-        string resultName = NextTemporary("result");
-        string slotName = NextTemporary("slot");
-        string startName = NextTemporary("start");
-        string endName = NextTemporary("end");
-        string countName = NextTemporary("count");
-        string elementTypeText = EmitType(elementType);
-        string indexInit = indexName is null ? string.Empty : $"int {indexName} = 0; ";
-        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-        if (range.Step is null)
-        {
-            if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
-            {
-                string directStart = EmitExpression(range.Start);
-                string directEnd = EmitExpression(range.End);
-                string directCount = EmitDefaultRangeCountExpression(directStart, directEnd, range.Kind);
-                string directLoop = indexName is null
-                    ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++) {{ {resultName}[{slotName}] = {valueExpression}; }}"
-                    : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++) {{ {resultName}[{indexName}] = {valueExpression}; }}";
-                return EmitValueBlock($"{elementTypeText}[] {resultName} = new {elementTypeText}[{directCount}]; {directLoop} return {resultName};");
-            }
-
-            string countExpression = EmitDefaultRangeCountExpression(startName, endName, range.Kind);
-            string loopUpdate = indexName is null ? $"{itemName}++" : $"{itemName}++, {indexName}++";
-            return EmitValueBlock($"int {startName} = {EmitExpression(range.Start)}; int {endName} = {EmitExpression(range.End)}; int {countName} = {countExpression}; {elementTypeText}[] {resultName} = new {elementTypeText}[{countName}]; int {slotName} = 0; {indexInit}for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {loopUpdate}) {{ {resultName}[{slotName}++] = {valueExpression}; }} return {resultName};");
-        }
-
-        string stepName = NextTemporary("step");
-        string absStepName = NextTemporary("absStep");
-        string forwardCount = range.Kind == RangeKind.RightExclusive
-            ? $"{startName} < {endName} ? (({endName} - {startName} - 1) / {stepName}) + 1 : 0"
-            : $"{startName} <= {endName} ? (({endName} - {startName}) / {stepName}) + 1 : 0";
-        string backwardCount = range.Kind == RangeKind.RightExclusive
-            ? $"{startName} > {endName} ? (({startName} - {endName} - 1) / {absStepName}) + 1 : 0"
-            : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
-        string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
-        string loopUpdateWithStep = indexName is null ? $"{itemName} += {stepName}" : $"{itemName} += {stepName}, {indexName}++";
-        return EmitValueBlock(
-            $$"""
-            int {{startName}} = {{EmitExpression(range.Start)}};
-            int {{endName}} = {{EmitExpression(range.End)}};
-            int {{stepName}} = {{EmitExpression(range.Step)}};
-            #if DEBUG
-            if ({{stepName}} == 0) throw new InvalidOperationException("Range step cannot be zero.");
-            #endif
-            int {{absStepName}} = {{stepName}} > 0 ? {{stepName}} : -{{stepName}};
-            int {{countName}} = {{stepName}} > 0 ? {{forwardCount}} : {{backwardCount}};
-            {{elementTypeText}}[] {{resultName}} = new {{elementTypeText}}[{{countName}}];
-            int {{slotName}} = 0;
-            {{indexInit}}for (int {{itemName}} = {{startName}}; {{stepName}} > 0 ? {{itemName}} {{comparison}} {{endName}} : {{itemName}} {{backwardOp}} {{endName}}; {{loopUpdateWithStep}})
-            {
-                {{resultName}}[{{slotName}}++] = {{valueExpression}};
-            }
-            return {{resultName}};
-            """);
-    }
-
-    private static string EmitDefaultRangeCountExpression(string start, string end, RangeKind kind)
-    {
-        // `a..b` with `a > b` is an empty range (no implicit descending step), so the count never goes negative.
-        // Literal bounds are checked here instead of at run time.
-        if (PscpNumericLiterals.TryGetInt32Value(start, out int startValue) && PscpNumericLiterals.TryGetInt32Value(end, out int endValue))
-        {
-            long count = (long)endValue - startValue + (kind == RangeKind.RightExclusive ? 0 : 1);
-            if (count <= 0)
-            {
-                return "0";
-            }
-
-            if (kind == RangeKind.RightExclusive)
-            {
-                return startValue == 0 ? end : $"{end} - {start}";
-            }
-
-            return startValue == 0 ? $"{end} + 1" : $"({end} - {start}) + 1";
-        }
-
-        if (kind == RangeKind.RightExclusive)
-        {
-            return IsZeroExpressionText(start) ? $"System.Math.Max(0, {end})" : $"System.Math.Max(0, {end} - {start})";
-        }
-
-        return IsZeroExpressionText(start) ? $"System.Math.Max(0, {end} + 1)" : $"System.Math.Max(0, ({end} - {start}) + 1)";
-    }
+        => EmitRangeArrayValueBlock(PlanRange(range, new ArrayTypeSyntax(elementType, 1)), EmitType(elementType), itemName, indexName, valueExpression);
 
     private static bool IsZeroExpressionText(string text)
         => string.Equals(text.Trim(), "0", StringComparison.Ordinal)
@@ -2387,7 +2505,7 @@ internal sealed partial class CSharpEmitter
         return true;
     }
 
-    private static bool TryGetTerminalValueExpression(BlockStatement block, out Expression? expression, out int regularCount)
+    private bool TryGetTerminalValueExpression(BlockStatement block, out Expression? expression, out int regularCount)
     {
         expression = GetImplicitReturnExpression(block);
         if (expression is not null)
@@ -2498,6 +2616,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
+        resultType = WidenAccumulator(resultType);
         string sumType = EmitType(resultType);
         string sumName = NextTemporary("sum");
         string loop;
@@ -2506,12 +2625,12 @@ internal sealed partial class CSharpEmitter
             string itemName = ChooseBindingName(generator.ItemTarget, "item");
             string? indexName = generator.IndexTarget is null ? null : ChooseBindingName(generator.IndexTarget, "index");
             string valueExpression = EmitLambdaBodyExpression(generator.Body, generator.IndexTarget, indexName, generator.ItemTarget, itemName);
-            loop = EmitLoopOverSource(generator.Source, itemName, $"{sumName} += {valueExpression};", indexName);
+            loop = EmitLoopOverSource(generator.Source, itemName, AccumulateStatement(sumName, valueExpression, resultType), indexName);
         }
         else
         {
             string itemName = NextTemporary("item");
-            loop = EmitLoopOverSource(source!, itemName, $"{sumName} += {itemName};");
+            loop = EmitLoopOverSource(source!, itemName, AccumulateStatement(sumName, itemName, resultType));
         }
         emitted = EmitValueBlock($"{sumType} {sumName} = default; {loop} return {sumName};");
         return true;
@@ -2531,11 +2650,12 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
+        resultType = WidenAccumulator(resultType);
         string sumType = EmitType(resultType);
         string sumName = NextTemporary("sum");
         string itemName = ChooseBindingName(selector!.Parameters[0].Target, "item");
         string selectorExpression = EmitLambdaBodyExpression(selector.Body, null, null, selector.Parameters[0].Target, itemName);
-        string loop = EmitLoopOverSource(source!, itemName, $"{sumName} += {selectorExpression};");
+        string loop = EmitLoopOverSource(source!, itemName, AccumulateStatement(sumName, selectorExpression, resultType));
         emitted = EmitValueBlock($"{sumType} {sumName} = default; {loop} return {sumName};");
         return true;
     }
@@ -2605,6 +2725,8 @@ internal sealed partial class CSharpEmitter
         return true;
     }
 
+    // Spec §23. Integer `pow` is exact (never `Math.Pow`), `round` rounds half away from zero, and the two-argument
+    // `floor`/`ceil` are floor and ceiling division.
     private bool TryEmitDirectMathIntrinsic(string name, IReadOnlyList<ArgumentSyntax> arguments, out string? emitted)
     {
         emitted = null;
@@ -2614,22 +2736,53 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        emitted = name switch
+        Expression[] values = positional.Select(argument => argument.Expression).ToArray();
+        emitted = (name, values.Length) switch
         {
-            "abs" when positional.Count == 1 => $"System.Math.Abs({EmitExpression(positional[0].Expression)})",
-            "sqrt" when positional.Count == 1 => $"System.Math.Sqrt({EmitExpression(positional[0].Expression)})",
-            "floor" when positional.Count == 1 => $"System.Math.Floor({EmitExpression(positional[0].Expression)})",
-            "ceil" when positional.Count == 1 => $"System.Math.Ceiling({EmitExpression(positional[0].Expression)})",
-            "round" when positional.Count == 1 => $"System.Math.Round({EmitExpression(positional[0].Expression)})",
-            "pow" when positional.Count == 2 => $"System.Math.Pow({EmitExpression(positional[0].Expression)}, {EmitExpression(positional[1].Expression)})",
-            "clamp" when positional.Count == 3 => EmitClampIntrinsic(positional),
-            "gcd" when positional.Count == 2 => EmitIntegralMathHelperCall("gcd", positional[0].Expression, positional[1].Expression),
-            "lcm" when positional.Count == 2 => EmitIntegralMathHelperCall("lcm", positional[0].Expression, positional[1].Expression),
-            "popcount" when positional.Count == 1 => EmitIntegralMathHelperCall("popcount", positional[0].Expression),
-            "bitLength" when positional.Count == 1 => EmitIntegralMathHelperCall("bitLength", positional[0].Expression),
+            ("abs", 1) => $"System.Math.Abs({EmitExpression(values[0])})",
+            ("sqrt", 1) => $"System.Math.Sqrt({EmitExpression(values[0])})",
+            ("floor", 1) => $"System.Math.Floor({EmitFloatingMathArgument(values[0])})",
+            ("ceil", 1) => $"System.Math.Ceiling({EmitFloatingMathArgument(values[0])})",
+            ("floor", 2) => EmitIntegralMathHelperCall("floorDiv", values),
+            ("ceil", 2) => EmitIntegralMathHelperCall("ceilDiv", values),
+            ("round", 1) => $"System.Math.Round({EmitFloatingMathArgument(values[0])}, MidpointRounding.AwayFromZero)",
+            ("round", 2) => $"System.Math.Round({EmitFloatingMathArgument(values[0])}, {EmitExpression(values[1])}, MidpointRounding.AwayFromZero)",
+            ("pow", 2) => EmitPowIntrinsic(values[0], values[1]),
+            ("pow", 3) => $"__PscpSeq.powMod({EmitExpression(values[0])}, {EmitExpression(values[1])}, {EmitExpression(values[2])})",
+            ("clamp", 3) => EmitClampIntrinsic(positional),
+            ("gcd", 2) => EmitIntegralMathHelperCall("gcd", values),
+            ("lcm", 2) => EmitIntegralMathHelperCall("lcm", values),
+            ("popcount", 1) => EmitIntegralMathHelperCall("popcount", values),
+            ("bitLength", 1) => EmitIntegralMathHelperCall("bitLength", values),
             _ => null,
         };
         return emitted is not null;
+    }
+
+    // `floor`, `ceil` and `round` of an integer operate on its `double` value.
+    private string EmitFloatingMathArgument(Expression expression)
+        => _semantic?.GetExpressionType(expression) is NamedTypeSyntax { Name: "int" or "long" }
+            ? $"(double)({EmitExpression(expression)})"
+            : EmitExpression(expression);
+
+    private string EmitPowIntrinsic(Expression value, Expression exponent)
+    {
+        TypeSyntax? valueType = _semantic?.GetExpressionType(value);
+        TypeSyntax? exponentType = _semantic?.GetExpressionType(exponent);
+        bool integral = PscpIntrinsicCatalog.IsIntegralMathCompatible(valueType) && PscpIntrinsicCatalog.IsIntegralMathCompatible(exponentType);
+        if (!integral)
+        {
+            return $"System.Math.Pow({EmitExpression(value)}, {EmitExpression(exponent)})";
+        }
+
+        TypeSyntax resultType = WidenAccumulator(valueType!);
+        string valueText = EmitExpression(value);
+        if (!Equals(resultType, valueType))
+        {
+            valueText = $"(long)({valueText})";
+        }
+
+        return $"__PscpSeq.pow({valueText}, {EmitExpression(exponent)})";
     }
 
     private string? EmitClampIntrinsic(IReadOnlyList<ExpressionArgumentSyntax> positional)
@@ -2845,21 +2998,15 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
+        // Left to right, keeping the earlier value on ties; the runtime helper uses the default order (§25.1)
+        // and evaluates each argument once.
         string current = EmitExpression(positional[0].Expression);
         for (int i = 1; i < positional.Count; i++)
         {
             string candidate = EmitExpression(positional[i].Expression);
-            if (PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType))
-            {
-                current = $"System.Math.{char.ToUpperInvariant(name[0]) + name[1..]}({current}, {candidate})";
-            }
-            else
-            {
-                string compare = EmitPreferredComparison(current, candidate, commonType, preferLower: name == "min");
-                current = name == "min"
-                    ? $"({compare} ? {current} : {candidate})"
-                    : $"({compare} ? {current} : {candidate})";
-            }
+            current = PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType)
+                ? $"System.Math.{char.ToUpperInvariant(name[0]) + name[1..]}({current}, {candidate})"
+                : $"__PscpSeq.{name}({current}, {candidate})";
         }
 
         emitted = current;
@@ -2954,18 +3101,6 @@ internal sealed partial class CSharpEmitter
 
         string selector = $"{itemName} => {EmitExpression(aggregation.Body)}";
         return EmitAggregationTerminal(aggregation.AggregatorName, sequence, selector);
-    }
-
-    private string EmitPreferredComparison(string left, string right, TypeSyntax type, bool preferLower)
-    {
-        string op = preferLower ? "<" : ">";
-        if (PscpIntrinsicCatalog.IsMathMinMaxCompatible(type)
-            || type is NamedTypeSyntax { Name: "char" })
-        {
-            return $"{left} {op} {right}";
-        }
-
-        return $"System.Collections.Generic.Comparer<{EmitType(type)}>.Default.Compare({left}, {right}) {op} 0";
     }
 
     private static TypeSyntax? MergeTypes(TypeSyntax? left, TypeSyntax? right)
