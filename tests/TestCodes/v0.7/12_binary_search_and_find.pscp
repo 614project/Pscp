@@ -1,0 +1,21 @@
+// [PSCP v0.7 적합성 테스트] lowerBound/upperBound와 find fallback
+// 관련 변경: D7 lowerBound/upperBound, B15 find(pred, fallback), C8 `is int v then` 패턴 문맥  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: 13:37 Unexpected token 'then' (`is int v then`)
+//   - 그 밖에 lowerBound/upperBound/find(pred, fallback) 없음
+// 0.7 기대: 입력 12_binary_search_and_find.in → 출력 12_binary_search_and_find.out
+
+int n, q =
+int[n] a =
+
+let sorted = a.sort()
+let coord = sorted.distinct().index()
+
+for _ in 0..<q {
+    int l, r =
+    += sorted.upperBound(r) - sorted.lowerBound(l)
+}
+
++= a.find(x => x > 100, -1)
+if a.find(x => x % 7 == 0) is int v then += v else += "none"
++= coord[sorted[^1]]

@@ -1,0 +1,29 @@
+// [PSCP v0.7 적합성 테스트] 관계 패턴, char range, stepped range, 실행 중 step 0
+// 관련 변경: C8 패턴 문맥, B10 char range/`..s..<`/`..s..=`/실행 중 step 0  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: 8:17 Unexpected token '<' (switch arm의 관계 패턴)
+// 0.7 기대: 입력 13_patterns_and_ranges.in → 출력 13_patterns_and_ranges.out
+
+int n =
+int[n] a =
+
+a -> x {
+    let kind = x switch {
+        < 0 => "neg"
+        0 => "zero"
+        > 0 and < 10 => "digit"
+        _ => "big"
+    }
+    += kind
+}
+
++= a.count(x => x is >= 0 and <= 9)
+
+for c in 'a'..'e' do = c
++= ""
+
++= [0..3..<n * 3]
++= [10..-3..=0]
+
+mut int step = 0
++= [0..step..5].Length

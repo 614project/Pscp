@@ -1,0 +1,18 @@
+// [PSCP v0.7 적합성 테스트] 변환 키워드와 readBool
+// 관련 변경: B6 string → bool 파싱, 실수 → 정수 버림, char 연산, B4 string 변환 렌더링, B5 round  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - 출력이 다름: `bool "0"`/`bool "FALSE"`가 True (비어 있지 않으면 참)
+//   - `string true`는 True, `long (round 2.5)`는 2
+// 0.7 기대: 입력 16_conversions.in → 출력 16_conversions.out
+
+string[3] flags =
++= [flags -> s do bool s]
++= stdin.readBool()
+
++= int 3.7
++= int (-3.7)
++= '7' - '0'
++= char ('a' + 2)
++= string 0.5
++= string true
++= long (round 2.5)

@@ -1,0 +1,34 @@
+// [PSCP v0.7 적합성 테스트] pipe로 helper 호출, pipe 우선순위, 줄 앞 `.` 이어짐
+// 관련 변경: A2 pipe → collection helper, C4 pipe 우선순위, C7 줄 이어짐  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: 16:5 Unexpected token '.' (줄 앞 `.` 이어짐)
+//   - 그 밖에 `a |> filter(...)`는 Undefined name, `a |> sum == k`는 C# 오류
+// 0.7 기대: 입력 04_pipe_and_line_continuation.in → 출력 04_pipe_and_line_continuation.out
+
+int n, k =
+int[n] a =
+
+let evens = a |> filter(x => x % 2 == 0)
++= evens
+
+let ok = a |> sum == k
++= ok
+
+let bigCount = a
+    |> filter(x => x > 3)
+    |> count()
++= bigCount
+
+let small = a
+    .map(x => x * x)
+    .filter(x => x < 20)
+    .sum()
++= small
+
++= 0..<n |> sum
++= -7 |> Math.Abs
+
+if a |> any(x => x < 0) or a |> sum > 100 then
+    += "odd"
+else
+    += "fine"

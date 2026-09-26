@@ -1,0 +1,18 @@
+// [PSCP v0.7 적합성 테스트] space-call 괄호 그룹과 음수 인자
+// 관련 변경: C2 괄호 그룹 인자 결합, C3 부호와 space-call, C6 후위 연산 원자  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - C# 오류: CS0411 min<T>(IEnumerable<T>) 추론 실패 (`min (a, b)`가 튜플 하나)
+//   - C# 오류: CS0117 clamp 없음 (`clamp (c, 0, 10)`이 튜플 하나)
+// 0.7 기대: 입력 05_space_call_groups.in → 출력 05_space_call_groups.out
+
+long twice(long x) { x * 2 }
+
+int a, b, c =
++= min (a, b)
++= max (a, b) c
++= twice (-1)
++= min a (-5)
++= twice (a + b) + 1
+let p = (a, b)
++= max p.1 p.2
++= clamp (c, 0, 10)

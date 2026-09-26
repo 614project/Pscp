@@ -1,0 +1,17 @@
+// [PSCP v0.7 적합성 테스트] 입력 끝까지 토큰 읽기
+// 관련 변경: B3 stdin.hasNext()  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: Unknown intrinsic member `stdin.hasNext`
+// 0.7 기대: 입력 09_read_tokens_until_eof.in → 출력 09_read_tokens_until_eof.out
+
+string title = stdin.readLine()
+
+mut long total = 0
+mut int count = 0
+while stdin.hasNext() {
+    long x =
+    total += x
+    count += 1
+}
+
++= $"{title}: {count} {total}"

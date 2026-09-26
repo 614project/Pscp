@@ -1,7 +1,7 @@
 # PSCP v0.7 통합 언어 / API / 트랜스파일 사양서 (초안)
 
 - 상태: **초안(Draft)** — 구현(트랜스파일러 0.6.7)에는 아직 반영되지 않았다.
-- 기준 문서: `pscp_v_0_6_spec.md`
+- 기준 문서: `deprecated/pscp_v_0_6_spec.md`
 - 동반 문서: `pscp_v_0_7_changes.md` (v0.6 → v0.7 변경 해설, 항목별 before/after 코드)
 - 작성일: 2026-09-26
 

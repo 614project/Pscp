@@ -1,0 +1,33 @@
+// [PSCP v0.7 적합성 테스트] 격자 BFS: 공백 없는 문자 격자 입력과 2차원 출력
+// 관련 변경: B1 readChar 문자 단위, B4 2차원 렌더링, §16.2 중첩 builder  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - C# 오류: CS0029 'char[]'/'int[]'를 'char[][]'/'int[][]'로 변환할 수 없음 (중첩 builder lowering)
+//   - builder 문제를 피해도 입력이 틀림: char[h][w]가 토큰 단위로 읽혀 `#.#` 줄에서 '#' 하나만 가져감
+// 0.7 기대: 입력 01_grid_bfs_char_board.in → 출력 01_grid_bfs_char_board.out
+
+int h, w =
+char[h][w] board =
+
+int[][] dist = [0..<h -> _ do [0..<w -> _ do -1]]
+Queue<(int, int)> q
+dist[0][0] = 0
+q += (0, 0)
+
+let dr = [1, -1, 0, 0]
+let dc = [0, 0, 1, -1]
+
+while q.Count > 0 {
+    let r, c = --q
+    0..<4 -> k {
+        let nr = r + dr[k]
+        let nc = c + dc[k]
+        if nr < 0 or nr >= h or nc < 0 or nc >= w then continue
+        if board[nr][nc] == '#' or dist[nr][nc] >= 0 then continue
+        dist[nr][nc] = dist[r][c] + 1
+        q += (nr, nc)
+    }
+}
+
++= dist[h - 1][w - 1]
+char[][] marked = [0..<h -> r do [0..<w -> c do if dist[r][c] >= 0 then '*' else board[r][c]]]
++= marked

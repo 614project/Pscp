@@ -1,0 +1,21 @@
+// [PSCP v0.7 적합성 테스트] 새 입력 API와 chmax 반환값
+// 관련 변경: D1 readGrid<T>/readTuple<...>, B16 chmax → bool, §17.4 readCharGrid 공백 보존  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: Unknown intrinsic member `stdin.readGrid`, `stdin.readTuple`
+// 0.7 기대: 입력 17_new_input_api.in → 출력 17_new_input_api.out
+
+int n, m =
+let g = stdin.readGrid<int>(n, m)
+let t = stdin.readTuple<int, string, long>()
++= t
+
+mut int bestRow = 0
+mut int bestSum = int.MinValue
+for i in 0..<n {
+    if chmax(ref bestSum, sum g[i]) then bestRow = i
+}
++= (bestRow, bestSum)
+
+let spaced = stdin.readCharGrid(2)
++= spaced[0]
++= spaced[1].Length

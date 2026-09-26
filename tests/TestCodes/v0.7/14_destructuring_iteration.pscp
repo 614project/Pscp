@@ -1,0 +1,37 @@
+// [PSCP v0.7 적합성 테스트] 구조 분해 순회와 이름마다 초기화하는 선언
+// 관련 변경: B11 `-> (u, v)`, `for (u, v) in`, `-> i, (u, v)`, `dict -> (_, d)`, C13 `int a = 1, b = 2`  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: 11:12 Unexpected token 'in' (`for (u, v) in edges`)
+// 0.7 기대: 입력 14_destructuring_iteration.in → 출력 14_destructuring_iteration.out
+
+int n, m =
+(int, int)[m] edges =
+
+List<int>[] g = new![n]
+edges -> (u, v) {
+    g[u] += v
+    g[v] += u
+}
+
+Dictionary<int, int> degree
+for (u, v) in edges {
+    degree[u] = degree.GetValueOrDefault(u) + 1
+    degree[v] = degree.GetValueOrDefault(v) + 1
+}
+
+degree.Keys.sort() -> key {
+    += $"{key} {degree[key]}"
+}
+
+mut int total = 0
+degree -> (_, d) { total += d }
++= total
+
+edges -> i, (u, v) {
+    if u > v then += $"edge {i} reversed"
+}
+
++= g[1]
+
+int a = 1, b = 2
++= a + b

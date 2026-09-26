@@ -1,0 +1,44 @@
+// [PSCP v0.7 적합성 테스트] 타입 안의 최상위 상수, 필드 기본 public, operator<=>
+// 관련 변경: B17 타입 안의 최상위 상수, A6 기본 public/mut 필드/auto-construction 필드, D6 operator<=> 관계 연산자, B12 안정 정렬  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - C# 오류: CS0103 'MOD' 없음, CS0122 'Counter.hits'/'Counter.log' 접근 불가
+// 0.7 기대: 입력 11_types_constants_ordering.in → 출력 11_types_constants_ordering.out
+
+let MOD = 1_000_000_007
+
+record struct ModInt(long V) {
+    ModInt add(ModInt o) { new ModInt((V + o.V) % MOD) }
+    ModInt mul(ModInt o) { new ModInt(V * o.V % MOD) }
+}
+
+class Counter {
+    mut int hits
+    List<string> log
+
+    void hit(string who) {
+        hits += 1
+        log += who
+    }
+}
+
+record struct Job(int Id, long Time) {
+    operator<=>(other) => Time <=> other.Time
+}
+
+int n =
+Job[] jobs = [0..<n -> i do new Job(i + 1, stdin.readLong())]
+
+let order = jobs.sort()
++= [order -> j do j.Id]
++= jobs.min().Id
++= if jobs[0] < jobs[1] then "first earlier" else "second earlier or same"
+
+mut ModInt acc = new ModInt(1)
+jobs -> j { acc = acc.mul(new ModInt(j.Time)) }
++= acc.V
++= new ModInt(MOD - 1).add(new ModInt(5)).V
+
+let c = new Counter()
+c.hit("a"); c.hit("b")
++= c.hits
++= c.log
