@@ -1,0 +1,19 @@
+// [PSCP v0.7 적합성 테스트] 문자열 기본 순서는 ordinal
+// 관련 변경: B13 문자열 ordinal, B12 안정 정렬, §25.4 auto-construction 비교자  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - 출력이 다름: 정렬이 culture 순서 `_x apple Apple banana Banana cherry`
+//   - `min names`는 `_x`, `max "Zeta" "alpha"`는 `Zeta`, SortedSet.Min은 `_x`
+// 0.7 기대: 입력 06_string_ordinal_order.in → 출력 06_string_ordinal_order.out
+
+int n =
+string[n] names =
+
++= names.sort()
++= min names
++= max "Zeta" "alpha"
+
+stdout.lines(names.sortBy(s => s.Length))
+
+SortedSet<string> uniq
+names -> s { uniq += s }
++= uniq.Min

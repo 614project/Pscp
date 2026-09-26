@@ -1,0 +1,31 @@
+// [PSCP v0.7 적합성 테스트] 이름 해석: stdin 가리기, sum 가리기, 사용자 gcd, 떨어진 rec
+// 관련 변경: A4 생성 이름 예약, C11 member alias, §5.3 intrinsic 가리기, A5 호출 그래프 기반 rec  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - C# 오류: CS1061 'int'에 readInt 없음 (생성 코드가 사용자 변수 stdin을 가리킴)
+// 0.7 기대: 입력 15_name_resolution.in → 출력 15_name_resolution.out
+
+let stdin = 3
+int n =
++= n + stdin
+
+var sum = 0
+int[n] a =
+for i in 0..<n do sum += a[i]
++= sum == a.sum()
+
+rec int gcd(int x, int y) {
+    if y == 0 then x else gcd(y, x % y)
+}
++= gcd(84, 36)
+
+rec bool isEven(int k) {
+    if k == 0 then true else isOdd(k - 1)
+}
+
+int unrelated() { 42 }
+
+rec bool isOdd(int k) {
+    if k == 0 then false else isEven(k - 1)
+}
+
++= isEven(10) and not isOdd(10)

@@ -1,0 +1,15 @@
+// [PSCP v0.7 적합성 테스트] 토큰 뒤 readLine, CRLF 줄, 줄 단위 EOF
+// 관련 변경: B2 readLine cursor 모델, §17.4 CRLF, B3 stdin.hasNextLine()  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: Unknown intrinsic member `stdin.hasNextLine`
+//   - 입력 파일은 CRLF 줄 끝이다
+// 0.7 기대: 입력 10_read_lines_crlf.in → 출력 10_read_lines_crlf.out
+
+int k =
+string rest = stdin.readLine()
++= $"[{rest}]"
+
+while stdin.hasNextLine() {
+    let words = stdin.readWords()
+    += words.Length
+}

@@ -1,0 +1,45 @@
+// [PSCP v0.7 적합성 테스트] 호출과 DS 연산으로 끝나는 함수의 암묵적 반환
+// 관련 변경: A1 호출 식 반환, C12 DS `+=`/`--q` 반환, §10.2 로컬 함수 전방 참조  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - PSCP 오류: `mark`, `nextJob`, `solve` must end with a return value
+// 0.7 기대: 입력 03_implicit_return_calls.in → 출력 03_implicit_return_calls.out
+
+HashSet<int> seen
+Queue<int> pending
+
+bool mark(int v) {
+    seen += v
+}
+
+int nextJob() {
+    --pending
+}
+
+int solve(int x) {
+    int inner(int y) { deep(y) + x }
+    int deep(int z) { z * 2 }
+    inner(x)
+}
+
+int classify(int v) {
+    if v > 0 {
+        1
+    } else if v < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+int n =
+int[n] xs =
+xs -> x {
+    if mark(x) then pending += x
+}
+
+mut int total = 0
+while pending.Count > 0 {
+    total += solve(nextJob())
+}
++= total
++= [xs -> x do classify(x)]

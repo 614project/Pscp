@@ -1,0 +1,26 @@
+// [PSCP v0.7 적합성 테스트] 정수 math: 정확한 pow, 모듈러 pow, 내림/올림 나눗셈, round
+// 관련 변경: B8 정수 pow, D7 floor(a,b)/ceil(a,b)/pow(a,e,m), B5 round, B7 target-typed sum  (docs/pscp_v_0_7_changes.md)
+// 0.6.7 결과:
+//   - C# 오류: CS0117 __PscpSeq에 ceil/floor/pow 없음 (2·3인자 형태)
+//   - 참고: 0.6.7에서 pow(3L, 39)는 4.052555153018976E+18, round 2.5는 2
+// 0.7 기대: 입력 08_integer_math.in → 출력 08_integer_math.out
+
++= pow(3L, 39)
++= pow(2, 10)
++= pow(2, 100, 1_000_000_007)
++= floor(-7, 2)
++= ceil(-7, 2)
++= ceil(7, 2)
++= round 2.5
++= round (-2.5)
++= round(1.25, 1)
++= long (round 3.5)
++= gcd 12 18
++= lcm 4 6
++= popcount 255
++= bitLength 5
+
+int n =
+int[n] a =
+long total = sum a
++= total
