@@ -843,7 +843,8 @@ internal sealed partial class CSharpEmitter
     private string EmitNewExpression(NewExpression creation, TypeSyntax? targetTypeHint)
     {
         TypeSyntax? effectiveType = UnwrapNullableType(NormalizeSizedTypeOrNull(creation.Type ?? targetTypeHint));
-        if (effectiveType is not null
+        if (creation.Initializer is null
+            && effectiveType is not null
             && TryGetDeclaredTypeShape(effectiveType, out DeclaredTypeShape? shape)
             && TryEmitObjectInitializerNewExpression(shape!, effectiveType, creation.Arguments, out string? objectInitializer))
         {
@@ -851,9 +852,18 @@ internal sealed partial class CSharpEmitter
         }
 
         string arguments = string.Join(", ", creation.Arguments.Select(EmitArgument));
-        return effectiveType is null
+        string emitted = effectiveType is null
             ? $"new({arguments})"
             : $"new {EmitType(effectiveType)}({arguments})";
+        if (creation.Initializer is { } initializer)
+        {
+            // An object initializer: `new Edge { to = 3, w = 10 }`.
+            emitted += initializer.Count == 0
+                ? " { }"
+                : $" {{ {string.Join(", ", initializer.Select(assignment => $"{assignment.MemberName} = {EmitExpression(assignment.Value)}"))} }}";
+        }
+
+        return emitted;
     }
 
     private bool TryEmitObjectInitializerNewExpression(
@@ -1169,14 +1179,32 @@ internal sealed partial class CSharpEmitter
             BreakStatement => "break;",
             ContinueStatement => "continue;",
             LocalFunctionStatement localFunction => $"{EmitInlineFunction(localFunction.Function)}",
+            TryStatement tryStatement => EmitInlineTryStatement(tryStatement),
+            ThrowStatement throwStatement => throwStatement.Expression is null ? "throw;" : $"throw {EmitExpression(throwStatement.Expression)};",
             _ => string.Empty
         };
+
+    private string EmitInlineTryStatement(TryStatement tryStatement)
+    {
+        System.Text.StringBuilder builder = new($"try {{ {EmitInlineBlock(tryStatement.Body, isVoidLike: true)} }}");
+        foreach (CatchClause catchClause in tryStatement.Catches)
+        {
+            builder.Append($" {EmitCatchHeader(catchClause)} {{ {EmitInlineBlock(catchClause.Body, isVoidLike: true)} }}");
+        }
+
+        if (tryStatement.Finally is not null)
+        {
+            builder.Append($" finally {{ {EmitInlineBlock(tryStatement.Finally, isVoidLike: true)} }}");
+        }
+
+        return builder.ToString();
+    }
 
     private string EmitInlineFunction(FunctionDeclaration function)
     {
         string parameters = string.Join(", ", function.Parameters.Select(EmitParameter));
         string body = WithReturnType(function.ReturnType, () => EmitInlineBlock(function.Body, isVoidLike: GetIsVoid(function.ReturnType)));
-        return $"{EmitType(function.ReturnType)} {function.Name}({parameters}) {{ {body} }}";
+        return $"{EmitType(function.ReturnType)} {function.Name}{function.TypeParameterText}({parameters}){(function.ConstraintText is null ? string.Empty : " " + function.ConstraintText)} {{ {body} }}";
     }
 
     private string EmitInlineEmbeddedStatement(Statement statement)

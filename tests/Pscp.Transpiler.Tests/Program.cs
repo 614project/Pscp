@@ -2928,7 +2928,8 @@ internal static class TestRunner
     private static async Task VerifySampleProgramsBuildAsync(string workspaceRoot, string generatedRoot, List<string> failures)
     {
         string samplesDirectory = Path.Combine(workspaceRoot, "tests", "TestCodes");
-        string[] samples = Directory.GetFiles(samplesDirectory, "*.pscp").OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        // The v0.7 conformance programs are compiled too, so every sample is checked against C# 10.
+        string[] samples = Directory.GetFiles(samplesDirectory, "*.pscp", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         if (samples.Length == 0)
         {
             failures.Add($"SamplePrograms: no .pscp files found in {samplesDirectory}");
@@ -2945,8 +2946,8 @@ internal static class TestRunner
         bool anyTranspiled = false;
         foreach (string sample in samples)
         {
-            string sampleName = Path.GetFileNameWithoutExtension(sample);
-            string safeName = "S" + string.Concat(sampleName.Where(char.IsLetterOrDigit));
+            string sampleName = Path.GetRelativePath(samplesDirectory, sample);
+            string safeName = "S" + string.Concat(Path.ChangeExtension(sampleName, null).Where(char.IsLetterOrDigit));
             string source = await File.ReadAllTextAsync(sample, Encoding.UTF8);
             TranspilationResult result = PscpTranspiler.Transpile(
                 NormalizeSource(source),

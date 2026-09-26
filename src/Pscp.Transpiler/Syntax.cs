@@ -328,7 +328,8 @@ public sealed record MethodMember(
     IReadOnlyList<ParameterSyntax> Parameters,
     MethodBody Body,
     bool IsConstructor,
-    string? InitializerText = null) : TypeMember;
+    string? InitializerText = null,
+    string? ConstraintText = null) : TypeMember;
 
 public sealed record OperatorMember(
     IReadOnlyList<string> Modifiers,

@@ -2345,6 +2345,8 @@ internal static class PscpSemanticAnalyzer
             return elementType;
         }
 
+        // A lambda value has a delegate type: `Func<...>` or `Action<...>` when its parameter types are written,
+        // an unknown delegate otherwise. The body type is kept for helpers that infer from it.
         private TypeSyntax? AnalyzeLambda(LambdaExpression lambda, Scope scope)
         {
             Scope lambdaScope = new(scope);
@@ -2354,8 +2356,24 @@ internal static class PscpSemanticAnalyzer
                 DeclareBinding(parameter.Target, Normalize(parameter.Type), lambdaScope, parameter.Modifier is ArgumentModifier.Ref or ArgumentModifier.Out);
             }
 
-            return AnalyzeLambdaBody(lambda.Body, lambdaScope);
+            TypeSyntax? bodyType = AnalyzeLambdaBody(lambda.Body, lambdaScope);
+            _lambdaResultTypes.TryAdd(lambda, bodyType);
+            TypeSyntax?[] parameterTypes = lambda.Parameters.Select(parameter => Normalize(parameter.Type)).ToArray();
+            if (bodyType is null || parameterTypes.Any(type => type is null))
+            {
+                return UnknownDelegateType;
+            }
+
+            if (IsNamed(bodyType, "void"))
+            {
+                return parameterTypes.Length == 0 ? TypeName("Action") : new NamedTypeSyntax("Action", parameterTypes!);
+            }
+
+            return new NamedTypeSyntax("Func", [.. parameterTypes!, bodyType]);
         }
+
+        // The type of a lambda whose delegate type depends on its target.
+        internal static readonly TypeSyntax UnknownDelegateType = new NamedTypeSyntax("Delegate", Immutable.List<TypeSyntax>());
 
         private TypeSyntax? AnalyzeNew(NewExpression creation, Scope scope)
         {
@@ -2666,6 +2684,8 @@ internal static class PscpSemanticAnalyzer
                 case WhileStatement { Condition: LiteralExpression { Kind: LiteralKind.True } } loop when !ContainsBreak(loop.Body):
                     // `while true` without `break` never falls through.
                     return;
+                case TryStatement tryStatement when AlwaysExits(tryStatement.Body) && tryStatement.Catches.All(catchClause => AlwaysExits(catchClause.Body)):
+                    return;
                 case TryStatement:
                     Error(
                         DiagnosticCodes.MissingReturnValue,
@@ -2680,6 +2700,19 @@ internal static class PscpSemanticAnalyzer
                     return;
             }
         }
+
+        // The statement never completes normally: every path ends in `return` or `throw`.
+        private static bool AlwaysExits(Statement statement)
+            => statement switch
+            {
+                ReturnStatement or ThrowStatement => true,
+                ExpressionStatement { Expression: ThrowExpression } => true,
+                BlockStatement block => block.Statements.Count > 0 && AlwaysExits(block.Statements[^1]),
+                IfStatement { ElseBranch: not null } ifStatement => AlwaysExits(ifStatement.ThenBranch) && AlwaysExits(ifStatement.ElseBranch),
+                TryStatement tryStatement => (AlwaysExits(tryStatement.Body) && tryStatement.Catches.All(catchClause => AlwaysExits(catchClause.Body)))
+                    || (tryStatement.Finally is not null && AlwaysExits(tryStatement.Finally)),
+                _ => false,
+            };
 
         private bool _resultReturnEligible(Expression expression)
             => expression switch

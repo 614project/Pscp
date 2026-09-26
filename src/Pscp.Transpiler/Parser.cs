@@ -1236,18 +1236,22 @@ public sealed partial class Parser
             if (Match(TokenKind.OpenParen))
             {
                 IReadOnlyList<ParameterSyntax> parameters = ParseParameterListTail();
+                string? constraintText = null;
                 if (Current.Kind == TokenKind.Where)
                 {
+                    int constraintStart = _position;
                     while (Current.Kind is not (TokenKind.OpenBrace or TokenKind.FatArrow or TokenKind.NewLine or TokenKind.EndOfFile))
                     {
                         Next();
                     }
+
+                    constraintText = TokensToText(constraintStart, _position);
                 }
 
                 SkipSeparators();
                 MethodBody body = ParseMethodBody();
                 string methodName = typeParameterText is null ? nameToken.Text : nameToken.Text + typeParameterText;
-                MethodMember method = Mark(new MethodMember(modifiers, returnType, methodName, parameters, body, IsConstructor: false), savedPosition);
+                MethodMember method = Mark(new MethodMember(modifiers, returnType, methodName, parameters, body, IsConstructor: false, ConstraintText: constraintText), savedPosition);
                 _spans.SetName(method, nameToken.Span);
                 members.Add(method);
                 return true;

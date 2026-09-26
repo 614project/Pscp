@@ -548,6 +548,11 @@ internal sealed partial class CSharpEmitter
             signature += " " + method.InitializerText;
         }
 
+        if (!string.IsNullOrWhiteSpace(method.ConstraintText))
+        {
+            signature += " " + method.ConstraintText;
+        }
+
         WithReturnType(method.IsConstructor ? null : method.ReturnType, () => EmitMethodLike(signature, method.Body, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType))));
     }
 
@@ -701,7 +706,7 @@ internal sealed partial class CSharpEmitter
             prefix += "static ";
         }
 
-        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}({parameters})");
+        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}{function.TypeParameterText}({parameters}){(function.ConstraintText is null ? string.Empty : " " + function.ConstraintText)}");
         _writer.WriteLine("{");
         _writer.Indent();
         WithReturnType(function.ReturnType, () =>
@@ -878,7 +883,41 @@ internal sealed partial class CSharpEmitter
             case LocalFunctionStatement localFunction:
                 EmitFunction(localFunction.Function, includeAccessibility: false, isStatic: false);
                 break;
+            case TryStatement tryStatement:
+                EmitTryStatement(tryStatement);
+                break;
+            case ThrowStatement throwStatement:
+                EmitStatementWithHoisting(throwStatement.Expression, null, () => _writer.WriteLine(throwStatement.Expression is null
+                    ? "throw;"
+                    : $"throw {EmitExpression(throwStatement.Expression)};"));
+                break;
         }
+    }
+
+    // `try`/`catch`/`finally` pass through (spec §12); catch filters are PSCP expressions.
+    private void EmitTryStatement(TryStatement tryStatement)
+    {
+        _writer.WriteLine("try");
+        EmitEmbeddedStatement(tryStatement.Body);
+        foreach (CatchClause catchClause in tryStatement.Catches)
+        {
+            _writer.WriteLine(EmitCatchHeader(catchClause));
+            EmitEmbeddedStatement(catchClause.Body);
+        }
+
+        if (tryStatement.Finally is not null)
+        {
+            _writer.WriteLine("finally");
+            EmitEmbeddedStatement(tryStatement.Finally);
+        }
+    }
+
+    private string EmitCatchHeader(CatchClause catchClause)
+    {
+        string header = catchClause.Type is null
+            ? "catch"
+            : $"catch ({EmitType(catchClause.Type)}{(catchClause.Name is null ? string.Empty : " " + catchClause.Name)})";
+        return catchClause.Filter is null ? header : $"{header} when ({EmitExpression(catchClause.Filter)})";
     }
 
     private void EmitEmbeddedStatement(Statement statement)

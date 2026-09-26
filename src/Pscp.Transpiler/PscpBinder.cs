@@ -429,16 +429,28 @@ internal sealed class PscpBinder : SyntaxRewriter
         });
     }
 
+    // The header is C# text: the intrinsic `stdin`/`stdout` in it are renamed like identifiers elsewhere.
     public override Statement VisitCStyleForStatement(CStyleForStatement statement)
         => WithScope(ScopeKind.Local, () =>
         {
-            foreach (string name in PscpSyntaxFacts.GetCStyleForHeaderBindings(statement.HeaderText))
+            string header = statement.HeaderText;
+            foreach ((string name, string reserved) in new[] { ("stdin", StdinName), ("stdout", StdoutName) })
+            {
+                if (Lookup(name, out _) is null)
+                {
+                    header = System.Text.RegularExpressions.Regex.Replace(header, $@"(?<![\w.@]){name}\b", reserved);
+                }
+            }
+
+            foreach (string name in PscpSyntaxFacts.GetCStyleForHeaderBindings(header))
             {
                 _scope.Symbols[name] = new Symbol(SymbolKind.Variable, null);
             }
 
             Statement body = VisitLoopBody(statement.Body);
-            return Same(body, statement.Body) ? statement : Replace(statement, statement with { Body = body });
+            return Same(body, statement.Body) && header == statement.HeaderText
+                ? statement
+                : Replace(statement, statement with { HeaderText = header, Body = body });
         });
 
     public override Statement VisitWhileStatement(WhileStatement statement)
