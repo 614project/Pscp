@@ -115,6 +115,10 @@ internal static class PscpSemanticAnalyzer
         public bool IsValueType { get; }
         public bool HasParameterlessConstructor { get; set; } = true;
         public bool HasOrdering { get; set; }
+
+        // Every member is declared in the type itself: no base list and no pass-through body.
+        public bool HasKnownMembers { get; set; }
+
         public Dictionary<string, Symbol> Members { get; }
         public Dictionary<string, TypeInfo> NestedTypes { get; }
     }
@@ -215,6 +219,8 @@ internal static class PscpSemanticAnalyzer
                 || (constructors.Length == 0 ? !positional : constructors.Any(constructor => constructor.Parameters.Count == 0));
             info.HasOrdering = declaration.Members.Any(member => member is OrderingShorthandMember)
                 || declaration.HeaderText.Contains("IComparable", StringComparison.Ordinal);
+            info.HasKnownMembers = !declaration.HeaderText.Contains(':', StringComparison.Ordinal)
+                && !declaration.Members.Any(member => member is RawTypeMember);
             _types[fullName] = info;
             _types.TryAdd(declaration.Name, info);
             if (parent is not null) parent.NestedTypes.TryAdd(declaration.Name, info);
@@ -2170,6 +2176,11 @@ internal static class PscpSemanticAnalyzer
                         "GetHashCode" or "CompareTo" => TypeName("int"),
                         _ => null,
                     };
+                }
+
+                if (typeInfo.HasKnownMembers && !typeInfo.NestedTypes.ContainsKey(memberName))
+                {
+                    Error(DiagnosticCodes.SurfaceTypeError, $"Type `{DisplayType(receiverNamed)}` does not contain a member named `{memberName}`.", span);
                 }
 
                 return null;

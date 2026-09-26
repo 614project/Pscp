@@ -43,7 +43,7 @@ internal sealed partial class CSharpEmitter
 
         if (_emitStdout || verbose)
         {
-            Add(PruneRuntimeClass(StdoutTemplate, name => verbose || programText.Contains($"{PscpBinder.StdoutName}.{name}(", StringComparison.Ordinal)));
+            Add(PruneRuntimeClass(StdoutTemplate, (name, key) => verbose || _stdoutMembers.Contains(key) || _stdoutMembers.Contains(name)));
         }
 
         // The sequence helpers are extension methods, so a member call such as `xs.sort()` also uses them.
@@ -57,7 +57,7 @@ internal sealed partial class CSharpEmitter
         string renderText = usedText;
         if (verbose || renderText.Contains("__PscpRender.", StringComparison.Ordinal))
         {
-            Add(PruneRuntimeClass(RenderTemplate, name => verbose || renderText.Contains("__PscpRender." + name, StringComparison.Ordinal)));
+            Add(PruneRuntimeClass(RenderTemplate, name => verbose || renderText.Contains("__PscpRender." + name + "(", StringComparison.Ordinal)));
         }
 
         if (verbose || usedText.Contains("__PscpOrder", StringComparison.Ordinal))
@@ -83,53 +83,147 @@ internal sealed partial class CSharpEmitter
     // The class header, the kept members and the closing brace. Members are separated at brace depth 1; a member
     // is kept when `isRoot` accepts its name or a kept member refers to it (constructors and fields included).
     private static string PruneRuntimeClass(string template, Func<string, bool> isRoot)
+        => PruneRuntimeClass(template, (name, _) => isRoot(name));
+
+    // Roots are chosen by member name or by overload key (`writeln(int)`); a name a kept member refers to keeps
+    // every overload of that name.
+    private static string PruneRuntimeClass(string template, Func<string, string, bool> isRoot)
     {
         (string header, List<(string Name, string Text)> members, string footer) = SplitRuntimeClass(template);
-        HashSet<string> names = members.Select(member => member.Name).Where(name => name.Length > 0).ToHashSet(StringComparer.Ordinal);
         string className = Regex.Match(header, @"(?:class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)").Groups[1].Value;
-        HashSet<string> kept = new(StringComparer.Ordinal);
-        Queue<string> pending = new();
-        foreach (string name in names)
+        bool[] kept = new bool[members.Count];
+        HashSet<string> keptNames = new(StringComparer.Ordinal);
+        Queue<int> pending = new();
+
+        void Keep(int index)
         {
-            if (name == className || isRoot(name))
+            if (!kept[index])
             {
-                kept.Add(name);
-                pending.Enqueue(name);
+                kept[index] = true;
+                keptNames.Add(members[index].Name);
+                pending.Enqueue(index);
+            }
+        }
+
+        for (int i = 0; i < members.Count; i++)
+        {
+            string name = members[i].Name;
+            if (name.Length == 0 || name == className || isRoot(name, GetRuntimeMemberKey(members[i].Text, name)))
+            {
+                Keep(i);
             }
         }
 
         while (pending.Count > 0)
         {
-            string current = pending.Dequeue();
-            foreach ((string name, string text) in members)
+            int current = pending.Dequeue();
+            // The member's own name in its declaration is not a reference to its other overloads.
+            string code = StripRuntimeLiterals(members[current].Text);
+            Match declaration = Regex.Match(code, @"\b" + Regex.Escape(members[current].Name) + @"\b");
+            if (declaration.Success)
             {
-                if (name != current)
-                {
-                    continue;
-                }
+                code = code.Remove(declaration.Index, declaration.Length);
+            }
 
-                foreach (Match identifier in RuntimeIdentifierPattern.Matches(StripRuntimeLiterals(text)))
+            HashSet<string> referenced = RuntimeIdentifierPattern.Matches(code).Select(match => match.Value).ToHashSet(StringComparer.Ordinal);
+            for (int i = 0; i < members.Count; i++)
+            {
+                if (!kept[i] && members[i].Name.Length > 0 && referenced.Contains(members[i].Name))
                 {
-                    if (names.Contains(identifier.Value) && kept.Add(identifier.Value))
-                    {
-                        pending.Enqueue(identifier.Value);
-                    }
+                    Keep(i);
                 }
             }
         }
 
         System.Text.StringBuilder builder = new();
         builder.Append(header);
-        foreach ((string name, string text) in members)
+        for (int i = 0; i < members.Count; i++)
         {
-            if (name.Length == 0 || kept.Contains(name))
+            if (kept[i])
             {
-                builder.Append(text);
+                builder.Append(members[i].Text);
             }
         }
 
         builder.Append(footer);
         return builder.ToString();
+    }
+
+    // `public void writeln(int value) { ... }` → `writeln(int)`; members without parameters use their name.
+    private static string GetRuntimeMemberKey(string memberText, string name)
+    {
+        string signature = memberText.TrimStart();
+        while (signature.StartsWith("//", StringComparison.Ordinal))
+        {
+            int newline = signature.IndexOf('\n');
+            signature = newline < 0 ? string.Empty : signature[(newline + 1)..].TrimStart();
+        }
+
+        Match match = Regex.Match(signature, @"\b" + Regex.Escape(name) + @"\s*(?:<[^>]*>)?\s*\(");
+        if (!match.Success)
+        {
+            return name;
+        }
+
+        int open = match.Index + match.Length - 1;
+        int depth = 0;
+        int close = open;
+        for (int i = open; i < signature.Length; i++)
+        {
+            if (signature[i] is '(' or '<' or '[')
+            {
+                depth++;
+            }
+            else if (signature[i] is ')' or '>' or ']')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    close = i;
+                    break;
+                }
+            }
+        }
+
+        string parameters = signature[(open + 1)..close];
+        List<string> types = [];
+        foreach (string parameter in SplitRuntimeParameters(parameters))
+        {
+            string trimmed = parameter.Trim();
+            int lastSpace = trimmed.LastIndexOf(' ');
+            types.Add(lastSpace < 0 ? trimmed : trimmed[..lastSpace].Trim());
+        }
+
+        return $"{name}({string.Join(",", types)})";
+    }
+
+    private static IEnumerable<string> SplitRuntimeParameters(string parameters)
+    {
+        if (parameters.Trim().Length == 0)
+        {
+            yield break;
+        }
+
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            switch (parameters[i])
+            {
+                case '(' or '<' or '[':
+                    depth++;
+                    break;
+                case ')' or '>' or ']':
+                    depth--;
+                    break;
+                case ',' when depth == 0:
+                    yield return parameters[start..i];
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        yield return parameters[start..];
     }
 
     private static HashSet<string> GetRuntimeClassMemberNames(string template)

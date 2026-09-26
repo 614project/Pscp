@@ -13,18 +13,10 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<string> _declaredValueNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Stack<string>> _identifierAliases = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectScalarWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectScalarWritelnKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectNullableScalarWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectNullableScalarWritelnKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectArrayWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectArrayWritelnKinds = new(StringComparer.Ordinal);
     private string _className = string.Empty;
     private string _runMethodName = "Run";
     private bool _emitStdin;
     private bool _emitStdout;
-    private bool _stdoutNeedsBlankLine;
-    private bool _stdoutNeedsFallbackHelpers;
     private int _temporaryId;
 
     // Return types of the functions being emitted: a `return` value and a tail value are target-typed (§22.6).
@@ -2070,8 +2062,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutUsage(output.Kind, _semantic.GetExpressionType(call));
-        _writer.WriteLine($"__pscp_stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        _writer.WriteLine($"{PscpBinder.StdoutName}.{ChooseStdoutWrite(output.Kind == OutputKind.Write ? "write" : "writeln", _semantic.GetExpressionType(call))}({tempName});");
         return true;
     }
 
@@ -2084,8 +2075,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutUsage(output.Kind, aggregationType);
-        _writer.WriteLine($"__pscp_stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        _writer.WriteLine($"{PscpBinder.StdoutName}.{ChooseStdoutWrite(output.Kind == OutputKind.Write ? "write" : "writeln", aggregationType)}({tempName});");
         return true;
     }
 
@@ -2110,94 +2100,49 @@ internal sealed partial class CSharpEmitter
         => _writer.WriteLine($"{EmitStatementAssignmentExpression(new AssignmentExpression(assignment.Target, assignment.Operator, assignment.Value, false))};");
 
     private string EmitOutputInvocation(OutputKind kind, Expression expression)
+        => $"{PscpBinder.StdoutName}.{ChooseStdoutWrite(kind == OutputKind.Write ? "write" : "writeln", _semantic?.GetExpressionType(expression))}({EmitExpression(expression)});";
+
+    // Stdout members the program uses, as pruning keys: `writeln(int)`, `writeValue`, `lines`, ... (spec §31).
+    private readonly HashSet<string> _stdoutMembers = new(StringComparer.Ordinal) { "flush" };
+
+    // `write`/`writeln` bind to the overload for the static type; other values use the run-time renderer.
+    private string ChooseStdoutWrite(string method, TypeSyntax? type)
     {
-        RegisterStdoutUsage(kind, _semantic?.GetExpressionType(expression));
-        return $"__pscp_stdout.{(kind == OutputKind.Write ? "write" : "writeln")}({EmitExpression(expression)});";
+        string? parameter = GetStdoutOverloadParameter(type);
+        if (parameter is null)
+        {
+            _stdoutMembers.Add(method + "Value");
+            return method + "Value";
+        }
+
+        _stdoutMembers.Add($"{method}({parameter})");
+        return method;
     }
 
-    private void RegisterExplicitStdoutCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments)
+    private static string? GetStdoutOverloadParameter(TypeSyntax? type)
+        => type switch
+        {
+            NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "float" or "decimal" or "bool" or "char" } named => named.Name,
+            NamedTypeSyntax { TypeArguments.Count: 0, Name: "string" } => "string?",
+            NullableTypeSyntax { InnerType: NamedTypeSyntax { TypeArguments.Count: 0, Name: "string" } } => "string?",
+            ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { TypeArguments.Count: 0, Name: "char" or "int" or "long" or "string" } element } => element.Name + "[]",
+            _ => null,
+        };
+
+    // An explicit `stdout.member(...)` call: `write`/`writeln` with one value pick their overload like `=`/`+=`.
+    private string? TryEmitExplicitStdoutCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments)
     {
-        switch (memberName)
+        if (memberName is "write" or "writeln"
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } value)
         {
-            case "write":
-            case "writeln":
-                if (arguments.Count == 1 && arguments[0] is ExpressionArgumentSyntax expressionArgument)
-                {
-                    RegisterStdoutUsage(memberName == "write" ? OutputKind.Write : OutputKind.WriteLine, _semantic?.GetExpressionType(expressionArgument.Expression));
-                }
-                else if (memberName == "writeln" && arguments.Count == 0)
-                {
-                    _stdoutNeedsBlankLine = true;
-                }
-                else
-                {
-                    _stdoutNeedsFallbackHelpers = true;
-                }
-                break;
-            case "flush":
-                break;
-            default:
-                _stdoutNeedsFallbackHelpers = true;
-                break;
+            string chosen = ChooseStdoutWrite(memberName, _semantic?.GetExpressionType(value.Expression));
+            return $"{PscpBinder.StdoutName}.{chosen}({EmitExpression(value.Expression)})";
         }
+
+        _stdoutMembers.Add(memberName == "writeln" && arguments.Count == 0 ? "writeln()" : memberName);
+        return null;
     }
-
-    private void RegisterStdoutUsage(OutputKind kind, TypeSyntax? type)
-    {
-        if (type is NullableTypeSyntax nullable
-            && UnwrapNullableType(nullable.InnerType) is NamedTypeSyntax { TypeArguments.Count: 0 } nullableNamed
-            && IsDirectStdoutScalar(nullableNamed.Name))
-        {
-            RegisterStdoutScalarUsage(kind, nullableNamed.Name);
-            if (nullableNamed.Name != "string")
-            {
-                RegisterStdoutNullableScalarUsage(kind, nullableNamed.Name);
-            }
-            return;
-        }
-
-        TypeSyntax? normalized = UnwrapNullableType(type);
-        if (normalized is NamedTypeSyntax { TypeArguments.Count: 0 } named && IsDirectStdoutScalar(named.Name))
-        {
-            RegisterStdoutScalarUsage(kind, named.Name);
-            return;
-        }
-
-        if (normalized is ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { TypeArguments.Count: 0 } elementNamed }
-            && IsDirectStdoutScalar(elementNamed.Name))
-        {
-            _stdoutDirectScalarWriteKinds.Add(elementNamed.Name);
-            _stdoutDirectArrayWriteKinds.Add(elementNamed.Name);
-            if (kind == OutputKind.WriteLine)
-            {
-                _stdoutDirectArrayWritelnKinds.Add(elementNamed.Name);
-            }
-            return;
-        }
-
-        _stdoutNeedsFallbackHelpers = true;
-    }
-
-    private void RegisterStdoutScalarUsage(OutputKind kind, string scalarKind)
-    {
-        _stdoutDirectScalarWriteKinds.Add(scalarKind);
-        if (kind == OutputKind.WriteLine)
-        {
-            _stdoutDirectScalarWritelnKinds.Add(scalarKind);
-        }
-    }
-
-    private void RegisterStdoutNullableScalarUsage(OutputKind kind, string scalarKind)
-    {
-        _stdoutDirectNullableScalarWriteKinds.Add(scalarKind);
-        if (kind == OutputKind.WriteLine)
-        {
-            _stdoutDirectNullableScalarWritelnKinds.Add(scalarKind);
-        }
-    }
-
-    private static bool IsDirectStdoutScalar(string name)
-        => name is "int" or "long" or "double" or "decimal" or "bool" or "char" or "string";
 
     private void EmitExplainSourceHeader(string source)
     {

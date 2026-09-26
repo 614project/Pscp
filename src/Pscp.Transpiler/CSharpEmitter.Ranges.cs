@@ -218,6 +218,9 @@ internal sealed partial class CSharpEmitter
         return ($"for ({plan.ElementType} {item} = {plan.Start}; {condition}; {update}, {index}++)", $"int {index} = 0;");
     }
 
+    private static bool IsSimpleCountText(string text)
+        => text.All(char.IsDigit) || System.Text.RegularExpressions.Regex.IsMatch(text, "^[A-Za-z_][A-Za-z0-9_]*$");
+
     // The number of elements, never negative, as an `int` array length.
     private static string RangeCountExpression(RangePlan plan)
     {
@@ -311,8 +314,14 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine(line);
         }
 
-        string countName = NextTemporary("count");
-        _writer.WriteLine($"int {countName} = {RangeCountExpression(plan)};");
+        string countName = RangeCountExpression(plan);
+        if (!IsSimpleCountText(countName))
+        {
+            string countTemporary = NextTemporary("count");
+            _writer.WriteLine($"int {countTemporary} = {countName};");
+            countName = countTemporary;
+        }
+
         _writer.WriteLine(declareArray
             ? $"{arrayTypeText} {arrayName} = {NewArray(elementTypeText, countName)};"
             : $"{arrayName} = {NewArray(elementTypeText, countName)};");
@@ -335,11 +344,17 @@ internal sealed partial class CSharpEmitter
     private string EmitRangeArrayValueBlock(RangePlan plan, string elementTypeText, string itemName, string? indexName, string valueExpression)
     {
         string resultName = NextTemporary("result");
-        string countName = NextTemporary("count");
+        string countName = RangeCountExpression(plan);
         string slotName = indexName ?? NextTemporary("slot");
         (string header, string? indexDeclaration) = RangeForHeader(plan, itemName, slotName);
         List<string> lines = [.. plan.Setup];
-        lines.Add($"int {countName} = {RangeCountExpression(plan)};");
+        if (!IsSimpleCountText(countName))
+        {
+            string countTemporary = NextTemporary("count");
+            lines.Add($"int {countTemporary} = {countName};");
+            countName = countTemporary;
+        }
+
         lines.Add($"{elementTypeText}[] {resultName} = {NewArray(elementTypeText, countName)};");
         if (indexDeclaration is not null)
         {

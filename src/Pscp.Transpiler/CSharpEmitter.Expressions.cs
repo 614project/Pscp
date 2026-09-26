@@ -231,9 +231,10 @@ internal sealed partial class CSharpEmitter
     private string EmitCallExpression(CallExpression call, TypeSyntax? targetTypeHint)
     {
         if (call.Callee is MemberAccessExpression stdoutMember
-            && stdoutMember.Receiver is IdentifierExpression { Name: PscpBinder.StdoutName })
+            && stdoutMember.Receiver is IdentifierExpression { Name: PscpBinder.StdoutName }
+            && TryEmitExplicitStdoutCall(stdoutMember.MemberName, call.Arguments) is string stdoutCall)
         {
-            RegisterExplicitStdoutCall(stdoutMember.MemberName, call.Arguments);
+            return stdoutCall;
         }
 
         if (call.Callee is MemberAccessExpression stdinMember
@@ -1498,11 +1499,7 @@ internal sealed partial class CSharpEmitter
 
     private string EmitIndexExpression(IndexExpression index)
     {
-        string receiver = index.Receiver is IdentifierExpression identifier
-            && IsIdentifierAliasActive(identifier.Name)
-            && _declaredValueNames.Contains(identifier.Name)
-                ? identifier.Name
-                : EmitExpression(index.Receiver);
+        string receiver = EmitExpression(index.Receiver);
 
         // Spec §15.3: `List<T>` has no range indexer; its slices use `GetRange`.
         if (index.Arguments.Count == 1

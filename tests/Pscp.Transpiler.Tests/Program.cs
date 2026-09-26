@@ -8,6 +8,9 @@ internal sealed record TestCase(string Name, string Source, string Input, string
     public IReadOnlyList<string> ExpectedWarnings { get; init; } = Array.Empty<string>();
 
     public bool LargeStack { get; init; }
+
+    // Compare like `pscp test` (guide §14.5): trailing spaces of a line and trailing blank lines are ignored.
+    public bool CompareAsSample { get; init; }
 }
 
 internal static class Program
@@ -79,7 +82,10 @@ internal static class TestRunner
                 += text
                 """,
                 "3\nabc\n",
-                "3\nabc\n"),
+                "3\nabc\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "CharGridAfterTokenInput",
                 """
@@ -89,7 +95,10 @@ internal static class TestRunner
                 += grid[1]
                 """,
                 "2\nab\ncd\n",
-                "a b\nc d\n"),
+                "ab\ncd\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "RecursionAndSpaceCall",
                 """
@@ -159,7 +168,7 @@ internal static class TestRunner
                 += find(0)
                 """,
                 "",
-                "2\nTrue\n1\n"),
+                "2\ntrue\n1\n"),
             new(
                 "BuilderAggregationAndFastFor",
                 """
@@ -189,7 +198,10 @@ internal static class TestRunner
                 += doubled.sum()
                 """,
                 "4 1 2 3 4",
-                "18\n"),
+                "18\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "BinaryMinMaxIntrinsic",
                 """
@@ -208,8 +220,7 @@ internal static class TestRunner
                 bool p = true
                 bool q = false
                 let andValue = a & int b
-                let orValue = a
-                    |
+                let orValue = a |
                     int b
                 let xorValue = a ^ int b
                 let xorKeyword = p xor q
@@ -221,7 +232,7 @@ internal static class TestRunner
                 += xorKeyword
                 """,
                 "",
-                "2\n7\n5\nFalse\nTrue\nTrue\n"),
+                "2\n7\n5\nfalse\ntrue\ntrue\n"),
             new(
                 "ComparatorAndOutVarDecl",
                 """
@@ -352,7 +363,7 @@ internal static class TestRunner
                 int solve() {
                     if bug == 0 {
                         bug++
-                        bug
+                        return bug
                     }
 
                     0..<1 -> _ {
@@ -391,7 +402,7 @@ internal static class TestRunner
                 """
                 let a = int "123"
                 let b = int true
-                let c = bool "hello"
+                let c = bool "TRUE"
                 let d = bool 0
                 let e = string 123
                 += a + b
@@ -400,7 +411,7 @@ internal static class TestRunner
                 += e
                 """,
                 "",
-                "124\nTrue\nFalse\n123\n"),
+                "124\ntrue\nfalse\n123\n"),
             new(
                 "PipeConversionAndShadowedAggregationBindings",
                 """
@@ -408,9 +419,9 @@ internal static class TestRunner
                 int[n][n] a =
                 int[n][n] b =
 
-                = sum (0..<n -> a do
-                    sum (0..<n -> b do
-                        (0..<n).Any(c => a[a][c] is 1 and b[c][b] is 1) |> int
+                = sum (0..<n -> i do
+                    sum (0..<n -> j do
+                        (0..<n).Any(c => a[i][c] is 1 && b[c][j] is 1) |> int
                     )
                 )
                 """,
@@ -477,9 +488,9 @@ internal static class TestRunner
                 int[] arr = [10, 20, 30, 40, 50]
                 let total = sum (for i in 0..<arr.Length do arr[i])
                 += total
-                += text[1..^1]
+                += text[1..<^1]
                 += text[^1]
-                += arr[..^2]
+                += arr[..<^2]
                 """,
                 "",
                 "150\nbcde\nf\n10 20 30\n"),
@@ -520,7 +531,7 @@ internal static class TestRunner
                 += (~pq, --pq)
                 """,
                 "",
-                "True False\n10 10 8 8\n5 5\n"),
+                "true false\n10 10 8 8\n5 5\n"),
             new(
                 "OrderingShorthandAndSectionLabels",
                 """
@@ -531,10 +542,8 @@ internal static class TestRunner
                 }
 
                 class Runner {
-                private:
-                    int secret() => 5
+                    private int secret() => 5
 
-                public:
                     int solve() => secret()
                 }
 
@@ -546,13 +555,7 @@ internal static class TestRunner
                 += runner.solve()
                 """,
                 "",
-                "1\n2\n5\n")
-            {
-                ExpectedWarnings =
-                [
-                    "removed in v0.6"
-                ]
-            },
+                "1\n2\n5\n"),
             new(
                 "InterpolatedStringAndArrayZero",
                 """
@@ -563,7 +566,10 @@ internal static class TestRunner
                 += msg
                 """,
                 "",
-                "sum = 10\n"),
+                "sum = 10\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "CoordinateCompressionHelpers",
                 """
@@ -645,7 +651,7 @@ internal static class TestRunner
                 += findLastIndex(arr, x => x == 2)
                 """,
                 "",
-                "3\nTrue\nTrue\n4\n2\n4\n"),
+                "3\ntrue\ntrue\n4\n2\n4\n"),
             new(
                 "V06IntrinsicShadowing",
                 """
@@ -686,7 +692,7 @@ internal static class TestRunner
                 += seen += 7
                 """,
                 "",
-                "True\nFalse\n10\nTrue\nTrue\nTrue\nFalse\n"),
+                "true\nfalse\n10\ntrue\ntrue\ntrue\nfalse\n"),
             new(
                 "V06CollectionDictionaryHelpers",
                 """
@@ -699,12 +705,15 @@ internal static class TestRunner
                 += positions[2]
                 """,
                 "",
-                "2\n1\n1\n"),
+                "2\n1\n1\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "ThisMemberAndTypedInput",
                 """
                 class Counter {
-                    int value;
+                    mut int value;
 
                     void add(int delta) {
                         this.value += delta
@@ -754,7 +763,10 @@ internal static class TestRunner
                 += $"first={grid[0][0]}, last={grid[^1][^1]}"
                 """,
                 "2 3 1 2 3 4 5 6",
-                "first=1, last=6\n"),
+                "first=1, last=6\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "MatchWhenAsIdentifiers",
                 """
@@ -821,7 +833,10 @@ internal static class TestRunner
                 += rest
                 """,
                 "10 20 30 40 50",
-                "1\n40\n50\n"),
+                "1\n40\n50\n")
+            {
+                ExpectedWarnings = ["deprecated"],
+            },
             new(
                 "ChminEvaluatesTargetOnce",
                 """
@@ -887,7 +902,7 @@ internal static class TestRunner
                 += ok
                 """,
                 "5",
-                "False\n")
+                "false\n")
             {
                 ExpectedWarnings = ["is immutable but is modified"],
             },
@@ -1060,6 +1075,7 @@ internal static class TestRunner
 
         List<string> failures = [];
         List<Func<Task<string?>>> runs = [];
+        testCases.AddRange(LoadConformanceCases(workspaceRoot));
 
         foreach (TestCase testCase in testCases)
         {
@@ -1109,8 +1125,8 @@ internal static class TestRunner
                     return $"{testCase.Name}: generated program failed\nSTDOUT:\n{runResult.StdOut}\nSTDERR:\n{runResult.StdErr}\nGenerated:\n{result.CSharpCode}";
                 }
 
-                string actual = NormalizeOutput(runResult.StdOut);
-                string expected = NormalizeOutput(testCase.ExpectedOutput);
+                string actual = testCase.CompareAsSample ? NormalizeSampleOutput(runResult.StdOut) : NormalizeOutput(runResult.StdOut);
+                string expected = testCase.CompareAsSample ? NormalizeSampleOutput(testCase.ExpectedOutput) : NormalizeOutput(testCase.ExpectedOutput);
                 return string.Equals(actual, expected, StringComparison.Ordinal)
                     ? null
                     : $"{testCase.Name}: output mismatch\nExpected: {Escape(expected)}\nActual:   {Escape(actual)}\nGenerated:\n{result.CSharpCode}";
@@ -1216,7 +1232,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "BinaryMinMaxLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"BinaryMinMaxLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1246,7 +1262,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "ConstLetLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ConstLetLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1276,15 +1292,15 @@ internal static class TestRunner
                 int[n][n] a =
                 int[n][n] b =
 
-                = sum (0..<n -> a do
-                    sum (0..<n -> b do
-                        (0..<n).Any(c => a[a][c] is 1 and b[c][b] is 1) |> int
+                = sum (0..<n -> i do
+                    sum (0..<n -> j do
+                        (0..<n).Any(c => a[i][c] is 1 && b[c][j] is 1) |> int
                     )
                 )
                 """),
             new TranspilationOptions("Pscp.Generated", "PipeConversionAndShadowedBindingLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"PipeConversionAndShadowedBindingLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1293,10 +1309,9 @@ internal static class TestRunner
         string userCode = GetUserCodePortion(result.CSharpCode);
         if (!userCode.Contains("? 1 : 0", StringComparison.Ordinal)
             || userCode.Contains("Convert.ToInt32", StringComparison.Ordinal)
-            || userCode.Contains("for (int a =", StringComparison.Ordinal)
-            || userCode.Contains("for (int b =", StringComparison.Ordinal)
-            || !userCode.Contains("a[__", StringComparison.Ordinal)
-            || !userCode.Contains("b[c][__", StringComparison.Ordinal))
+            || !userCode.Contains("for (int i = 0; i < n; i++)", StringComparison.Ordinal)
+            || !userCode.Contains("a[i][c] is 1", StringComparison.Ordinal)
+            || !userCode.Contains("b[c][j] is 1", StringComparison.Ordinal))
         {
             failures.Add($"PipeConversionAndShadowedBindingLowering: expected direct bool-to-int pipe and generated binding aliases\nGenerated:\n{result.CSharpCode}");
         }
@@ -1313,7 +1328,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "RuntimeAvoidsDynamicHelpersProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"RuntimeAvoidsDynamicHelpers: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1336,7 +1351,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DirectRangeBuilderLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DirectRangeBuilderLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1369,7 +1384,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DirectGeneratorAggregateLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DirectGeneratorAggregateLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1398,7 +1413,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DirectRangeCollectionLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DirectRangeCollectionLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1428,7 +1443,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DirectFastForLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DirectFastForLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1463,14 +1478,15 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "RecordPrimaryConstructorMaxAndRangeProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"RecordPrimaryConstructorMaxAndRangeLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("Dish[] dishes = new Dish[System.Math.Max(0, n)];", StringComparison.Ordinal)
+        if (!userCode.Contains("= System.Math.Max(0, n);", StringComparison.Ordinal)
+            || !userCode.Contains("Dish[] dishes = new Dish[__pscp_count", StringComparison.Ordinal)
             || !userCode.Contains("long result = default!;", StringComparison.Ordinal)
             || !userCode.Contains("foreach (var x in dishes)", StringComparison.Ordinal)
             || userCode.Contains("object result", StringComparison.Ordinal)
@@ -1518,7 +1534,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "ImplicitReturnConstructorSortAndHoistedRangeProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ImplicitReturnConstructorSortAndHoistedRangeLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1530,7 +1546,7 @@ internal static class TestRunner
             || !userCode.Contains("return (parent[x] = find(parent[x]));", StringComparison.Ordinal)
             || !userCode.Contains("new Edge(1, 2, 7L, 1)", StringComparison.Ordinal)
             || userCode.Contains("Edge(1, 2, 7L, 1)", StringComparison.Ordinal) && !userCode.Contains("new Edge(1, 2, 7L, 1)", StringComparison.Ordinal)
-            || !userCode.Contains("parent = new int[1 + 1];", StringComparison.Ordinal)
+            || !userCode.Contains("parent = new int[2];", StringComparison.Ordinal)
             || userCode.Contains("__PscpThunk.run", StringComparison.Ordinal))
         {
             failures.Add($"ImplicitReturnConstructorSortAndHoistedRangeLowering: expected statement/value lowering shape not found\nGenerated:\n{result.CSharpCode}");
@@ -1547,7 +1563,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "InterpolatedStringLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"InterpolatedStringLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1572,7 +1588,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DotNetPassThroughLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DotNetPassThroughLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1593,7 +1609,7 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 struct PointData {
-                    int X, Y
+                    mut int X, Y
                 }
 
                 PointData point = new(1, 2)
@@ -1601,7 +1617,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "StructObjectInitializerLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"StructObjectInitializerLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1625,24 +1641,24 @@ internal static class TestRunner
                 }
 
                 struct PointData {
-                    int X, Y
+                    mut int X, Y
                 }
                 """),
             new TranspilationOptions("Pscp.Generated", "ImplicitFieldAccessibilityLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ImplicitFieldAccessibilityLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (userCode.Contains("public List<Job> jobs", StringComparison.Ordinal)
-            || !userCode.Contains("List<Job> jobs = new();", StringComparison.Ordinal)
+        if (!userCode.Contains("public readonly List<Job> jobs = new();", StringComparison.Ordinal)
+            || !userCode.Contains("public record struct Job(int Id)", StringComparison.Ordinal)
             || !userCode.Contains("public int X;", StringComparison.Ordinal)
             || !userCode.Contains("public int Y;", StringComparison.Ordinal))
         {
-            failures.Add($"ImplicitFieldAccessibilityLowering: expected private class fields and public value-type fields\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"ImplicitFieldAccessibilityLowering: expected public members, a readonly auto-constructed field and mutable struct fields\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1661,7 +1677,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "AutoConstructArrayDeclarationLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"AutoConstructArrayDeclarationLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1694,14 +1710,14 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "ReverseCompareToLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ReverseCompareToLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("Comparer<Item>.Create((__left, __right) => Item.CompareTo(__right, __left))", StringComparison.Ordinal))
+        if (!userCode.Contains("Comparer<Item>.Create((__pscp_l, __pscp_r) => Item.CompareTo(__pscp_r, __pscp_l))", StringComparison.Ordinal))
         {
             failures.Add($"ReverseCompareToLowering: expected reversed comparer lowering not found\nGenerated:\n{result.CSharpCode}");
         }
@@ -1719,7 +1735,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "PostfixStatementLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"PostfixStatementLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1752,14 +1768,14 @@ internal static class TestRunner
             """
             += stdin.nope()
             """,
-            "Unknown intrinsic member `stdin.nope`.");
+            "`stdin` has no member `nope`.");
 
         ExpectDiagnostic(
             failures,
             "UnknownUserMember",
             """
             class Box {
-                int value;
+                mut int value;
             }
 
             Box box = new()
@@ -1771,10 +1787,10 @@ internal static class TestRunner
             failures,
             "InvalidNewBang",
             """
-            int[] arr = new![3]
+            int[][] arr = new![3]
             += arr.Length
             """,
-            "`new![n]` requires a known auto-constructible collection element type.");
+            "`new![n]` fills each element with `new()`, which an array element cannot use.");
 
         ExpectDiagnostic(
             failures,
@@ -1785,7 +1801,7 @@ internal static class TestRunner
             }
             += fact(5)
             """,
-            "Recursive self-reference to `fact` requires the `rec` modifier.");
+            "`fact` calls itself, so it must be declared `rec`");
 
         ExpectDiagnostic(
             failures,
@@ -1804,7 +1820,7 @@ internal static class TestRunner
             let pair = (1, 2)
             += pair.3
             """,
-            "Invalid tuple projection `.3`.");
+            "`.3` is out of range: the tuple has 2 elements.");
 
         ExpectDiagnostic(
             failures,
@@ -1813,7 +1829,7 @@ internal static class TestRunner
             int x = 1
             += x[..]
             """,
-            "Slicing is supported only on strings and arrays.");
+            "A `int` cannot be sliced.");
 
         ExpectDiagnostic(
             failures,
@@ -1824,7 +1840,7 @@ internal static class TestRunner
             }
             += bad()
             """,
-            "`bad` must end with a return value of type `int`.");
+            "The last expression of `bad` produces no value, but `int` is required.");
 
         ExpectDiagnostic(
             failures,
@@ -1833,7 +1849,7 @@ internal static class TestRunner
             int[] values = [1, 2, 3]
             values.Add(4)
             """,
-            "Arrays do not contain an `Add` method.");
+            "Arrays do not have an `Add` method.");
 
         ExpectDiagnostic(
             failures,
@@ -1852,20 +1868,20 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 int n = 3
-                let xs = stdin.array<int>(n)
+                let xs = stdin.readArray<int>(n)
                 += xs
                 """),
             new TranspilationOptions("Pscp.Generated", "ExplicitStdinArraySpecializationProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ExplicitStdinArraySpecialization: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("stdin.readArrayInt(n)", StringComparison.Ordinal)
-            || userCode.Contains("stdin.array<int>(n)", StringComparison.Ordinal))
+        if (!userCode.Contains("__pscp_stdin.readArrayInt(n)", StringComparison.Ordinal)
+            || userCode.Contains("readArray<int>(n)", StringComparison.Ordinal))
         {
             failures.Add($"ExplicitStdinArraySpecialization: expected direct stdin.readArrayInt lowering\nGenerated:\n{result.CSharpCode}");
         }
@@ -1909,7 +1925,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "CompactSequenceMemberPruningProgram", HelperEmissionMode.Compact));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"CompactSequenceMemberPruning: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1942,7 +1958,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "RangeLoopLoweringSemanticsProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"RangeLoopLoweringSemantics: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -1966,22 +1982,25 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 int n =
-                string text = stdin.line()
-                char[][] grid = stdin.charGrid(2)
+                string text = stdin.readLine()
+                char[][] grid = stdin.readCharGrid(2)
                 += text
                 += grid[0]
                 """),
             new TranspilationOptions("Pscp.Generated", "LineReaderAlignmentProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"LineReaderAlignment: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
-        if (!result.CSharpCode.Contains("ConsumePendingLineBoundary", StringComparison.Ordinal))
+        // Spec §17.4: line readers follow the cursor left by token readers.
+        if (!result.CSharpCode.Contains("__pscp_stdin.readLine()", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("__pscp_stdin.readCharGrid(2)", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("_lineStart", StringComparison.Ordinal))
         {
-            failures.Add($"LineReaderAlignment: expected line-alignment helper not found\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"LineReaderAlignment: expected the line cursor in the stdin runtime\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -1999,7 +2018,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "CollectionSeparatorToleranceProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"CollectionSeparatorTolerance: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}\nGenerated:\n{result.CSharpCode}");
         }
@@ -2015,7 +2034,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "DiscardLoopLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DiscardLoopLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2039,7 +2058,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "ShorthandInputAvoidsGenericHelpersProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ShorthandInputAvoidsGenericHelpers: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2066,15 +2085,15 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "LambdaInputShorthandLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"LambdaInputShorthandLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         if (result.CSharpCode.Contains("Input shorthand is not supported", StringComparison.Ordinal)
-            || !result.CSharpCode.Contains("int w = stdin.readInt();", StringComparison.Ordinal)
-            || !result.CSharpCode.Contains("int h = stdin.readInt();", StringComparison.Ordinal))
+            || !result.CSharpCode.Contains("int w = __pscp_stdin.readInt();", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("int h = __pscp_stdin.readInt();", StringComparison.Ordinal))
         {
             failures.Add($"LambdaInputShorthandLowering: expected lambda block input shorthand to lower to direct typed reads\nGenerated:\n{result.CSharpCode}");
         }
@@ -2090,15 +2109,17 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "CompactPrunesStdoutRenderProgram", HelperEmissionMode.Compact));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"CompactPrunesStdoutRender: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
-        if (result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal))
+        if (result.CSharpCode.Contains("WriteObject", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writeValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writelnValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("public void writeln(long value)", StringComparison.Ordinal)
+            || !result.CSharpCode.Contains("public void writeln(int value)", StringComparison.Ordinal))
         {
             failures.Add($"CompactPrunesStdoutRender: expected scalar-only output to avoid generic render helpers\nGenerated:\n{result.CSharpCode}");
         }
@@ -2109,7 +2130,7 @@ internal static class TestRunner
         TranspilationResult result = PscpTranspiler.Transpile(
             NormalizeSource(
                 """
-                string? line;
+                mut string? line;
                 while (line := Console.ReadLine()) != null {
                     let steps = line.Split(' ')
                     let result = steps.copy()
@@ -2118,16 +2139,16 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "StringSplitCopyOutputStaysCompactProgram", HelperEmissionMode.Compact));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"StringSplitCopyOutputStaysCompact: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}\nGenerated:\n{result.CSharpCode}");
             return;
         }
 
-        if (result.CSharpCode.Contains("WriteValue", StringComparison.Ordinal)
+        if (result.CSharpCode.Contains("WriteObject", StringComparison.Ordinal)
             || result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writeValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writelnValue", StringComparison.Ordinal)
             || result.CSharpCode.Contains("public void writeln(string? value)", StringComparison.Ordinal)
             || !result.CSharpCode.Contains("public void writeln(string[] values)", StringComparison.Ordinal))
         {
@@ -2141,20 +2162,20 @@ internal static class TestRunner
             NormalizeSource(
                 """
                 int[] xs = [1, 2, 2]
-                let counts = xs.groupCount()
+                let counts = xs.freq()
                 += counts[2]
                 """),
             new TranspilationOptions("Pscp.Generated", "DictionaryIndexTypeAvoidsStdoutFallbackProgram", HelperEmissionMode.Compact));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"DictionaryIndexTypeAvoidsStdoutFallback: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
-        if (result.CSharpCode.Contains("write<T>", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("writeln<T>", StringComparison.Ordinal)
-            || result.CSharpCode.Contains("__PscpRender", StringComparison.Ordinal))
+        if (result.CSharpCode.Contains("writeValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("writelnValue", StringComparison.Ordinal)
+            || result.CSharpCode.Contains("WriteObject", StringComparison.Ordinal))
         {
             failures.Add($"DictionaryIndexTypeAvoidsStdoutFallback: expected dictionary indexer output to stay on direct scalar stdout path\nGenerated:\n{result.CSharpCode}");
         }
@@ -2171,18 +2192,18 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "SortByLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"SortByLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
         }
 
         string userCode = GetUserCodePortion(result.CSharpCode);
-        if (!userCode.Contains("Array.Sort(sorted", StringComparison.Ordinal)
-            || userCode.Contains("__PscpSeq.sortBy", StringComparison.Ordinal)
+        if (!userCode.Contains("arr.sortBy(", StringComparison.Ordinal)
+            || userCode.Contains("Array.Sort(", StringComparison.Ordinal)
             || userCode.Contains("__PscpThunk.run", StringComparison.Ordinal))
         {
-            failures.Add($"SortByLowering: expected direct Array.Sort lowering\nGenerated:\n{result.CSharpCode}");
+            failures.Add($"SortByLowering: expected the stable sortBy helper\nGenerated:\n{result.CSharpCode}");
         }
     }
 
@@ -2197,7 +2218,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "EmptyMinMaxPolicyProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"EmptyMinMaxPolicy: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2310,7 +2331,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "MathIntrinsicLoweringProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"MathIntrinsicLowering: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2392,7 +2413,7 @@ internal static class TestRunner
                 """),
             new TranspilationOptions("Pscp.Generated", "RunAndFlushShapeProgram"));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"RunAndFlushShape: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2423,7 +2444,7 @@ internal static class TestRunner
             normalized,
             new TranspilationOptions("Pscp.Generated", "ExplainHeaderProgram", HelperEmissionMode.Compact, Explain: true, ExplainSource: normalized));
 
-        if (result.Diagnostics.Count > 0)
+        if (Reported(result.Diagnostics).Count > 0)
         {
             failures.Add($"ExplainHeaderEmission: unexpected diagnostics\n{FormatDiagnostics(result.Diagnostics)}");
             return;
@@ -2500,7 +2521,7 @@ internal static class TestRunner
             int x = stdin.read<int>()
             += x
             """,
-            "Unknown intrinsic member `stdin.read`.");
+            "`stdin` has no member `read`.");
     }
 
     private static async Task VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(List<string> failures)
@@ -2614,7 +2635,7 @@ internal static class TestRunner
 
         await session.SendDidChangeAsync("let x = 1\nx = 2\n", version: 2);
         IReadOnlyList<string> immutableDiagnostics = await session.ReadDiagnosticsAsync();
-        if (!immutableDiagnostics.Any(message => message.Contains("Cannot assign to immutable binding `x`.", StringComparison.Ordinal)))
+        if (!immutableDiagnostics.Any(message => message.Contains("`x` is immutable but is modified here.", StringComparison.Ordinal)))
         {
             failures.Add($"LanguageServerLoopBlockAndIndexerDiagnostics: expected immutable simple assignment diagnostic\nActual: {string.Join(" | ", immutableDiagnostics)}");
         }
@@ -2623,7 +2644,7 @@ internal static class TestRunner
     private static async Task VerifyLanguageServerCollectionMutationAndNullableLoopAsync(List<string> failures)
     {
         const string source = """
-            string? line;
+            mut string? line;
             while (line := Console.ReadLine()) != null {
                 let steps = line.Split(' ')
                 List<int> errs
@@ -2646,7 +2667,7 @@ internal static class TestRunner
             record struct Dish(long A, long B) {}
 
             let dishes = [new Dish(1, 2)]
-            let sorted = dishes.sort()
+            let sorted = dishes.copy()
             let best = max (dishes -> x do x.A + x.B)
             += sorted[0].A + best
             """;
@@ -2820,6 +2841,45 @@ internal static class TestRunner
     private static string NormalizeSource(string source)
         => source.Replace("\r\n", "\n").Trim() + "\n";
 
+    private static string NormalizeSampleOutput(string text)
+    {
+        List<string> lines = text.Replace("\r\n", "\n").Split('\n').Select(line => line.TrimEnd()).ToList();
+        while (lines.Count > 0 && lines[^1].Length == 0)
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    // The v0.7 conformance programs: each `name.pscp` with `name.in` must print `name.out`.
+    private static IEnumerable<TestCase> LoadConformanceCases(string workspaceRoot)
+    {
+        string directory = Path.Combine(workspaceRoot, "tests", "TestCodes", "v0.7");
+        if (!Directory.Exists(directory))
+        {
+            yield break;
+        }
+
+        foreach (string sourcePath in Directory.EnumerateFiles(directory, "*.pscp").OrderBy(path => path, StringComparer.Ordinal))
+        {
+            string stem = Path.Combine(directory, Path.GetFileNameWithoutExtension(sourcePath));
+            if (!File.Exists(stem + ".out"))
+            {
+                continue;
+            }
+
+            yield return new TestCase(
+                "V07_" + Path.GetFileNameWithoutExtension(sourcePath),
+                File.ReadAllText(sourcePath),
+                File.Exists(stem + ".in") ? File.ReadAllText(stem + ".in") : string.Empty,
+                File.ReadAllText(stem + ".out"))
+            {
+                CompareAsSample = true,
+            };
+        }
+    }
+
     private static string NormalizeOutput(string text)
         => text.Replace("\r\n", "\n");
 
@@ -2827,7 +2887,11 @@ internal static class TestRunner
         => text.Replace("\n", "\\n");
 
     private static string FormatDiagnostics(IReadOnlyList<Diagnostic> diagnostics)
-        => string.Join("\n", diagnostics.Select(diagnostic => $"{diagnostic.Message} at {diagnostic.Span.Start}"));
+        => string.Join("\n", diagnostics.Select(diagnostic => $"{diagnostic.EffectiveCode} {diagnostic.Message} at {diagnostic.Span.Start}"));
+
+    // Errors and warnings, as `pscp check` reports them; editor-only information (PSCP5xxx) is left out.
+    private static IReadOnlyList<Diagnostic> Reported(IReadOnlyList<Diagnostic> diagnostics)
+        => diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Info).ToArray();
 
     private static string GetUserCodePortion(string generatedCode)
     {
@@ -2840,6 +2904,8 @@ internal static class TestRunner
             "public sealed class __PscpStdin",
             "public sealed class __PscpStdout",
             "public static class __PscpRender",
+            "public static class __PscpOrder",
+            "public sealed class __PscpOrderCore",
         ];
 
         int index = runtimeMarkers

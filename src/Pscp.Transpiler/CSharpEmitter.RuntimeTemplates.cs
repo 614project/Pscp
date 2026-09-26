@@ -343,6 +343,8 @@ internal sealed partial class CSharpEmitter
         """;
 
     // Output (spec §18). Everything is written to one buffer that `Console.Out` shares; lines end with `\n`.
+    // The emitter picks the overload from the static type (§18.5) and keeps only the overloads it used;
+    // `writeValue` / `writelnValue` render values of any other type at run time.
     private const string StdoutTemplate =
         """
         public sealed class __PscpStdout
@@ -364,30 +366,32 @@ internal sealed partial class CSharpEmitter
             public void write(char[] values) => _writer.Write(values);
             public void write(int[] values) => __PscpRender.writeInts(_writer, values);
             public void write(long[] values) => __PscpRender.writeLongs(_writer, values);
-            public void write<T>(T value) => __PscpRender.write(_writer, value);
+            public void write(string[] values) => _writer.Write(string.Join(' ', values));
+            public void writeValue<T>(T value) => __PscpRender.write(_writer, value);
 
             public void writeln() => _writer.Write('\n');
-            public void writeln(int value) { write(value); _writer.Write('\n'); }
-            public void writeln(long value) { write(value); _writer.Write('\n'); }
-            public void writeln(double value) { write(value); _writer.Write('\n'); }
-            public void writeln(float value) { write(value); _writer.Write('\n'); }
-            public void writeln(decimal value) { write(value); _writer.Write('\n'); }
-            public void writeln(bool value) { write(value); _writer.Write('\n'); }
-            public void writeln(char value) { write(value); _writer.Write('\n'); }
-            public void writeln(string? value) { write(value); _writer.Write('\n'); }
-            public void writeln(char[] values) { write(values); _writer.Write('\n'); }
-            public void writeln(int[] values) { write(values); _writer.Write('\n'); }
-            public void writeln(long[] values) { write(values); _writer.Write('\n'); }
-            public void writeln<T>(T value) { write(value); _writer.Write('\n'); }
+            public void writeln(int value) { __PscpRender.writeInt(_writer, value); _writer.Write('\n'); }
+            public void writeln(long value) { __PscpRender.writeLong(_writer, value); _writer.Write('\n'); }
+            public void writeln(double value) { _writer.Write(__PscpRender.formatDouble(value)); _writer.Write('\n'); }
+            public void writeln(float value) { _writer.Write(__PscpRender.formatFloat(value)); _writer.Write('\n'); }
+            public void writeln(decimal value) { _writer.Write(value.ToString(CultureInfo.InvariantCulture)); _writer.Write('\n'); }
+            public void writeln(bool value) { _writer.Write(value ? "true" : "false"); _writer.Write('\n'); }
+            public void writeln(char value) { _writer.Write(value); _writer.Write('\n'); }
+            public void writeln(string? value) { _writer.Write(value); _writer.Write('\n'); }
+            public void writeln(char[] values) { _writer.Write(values); _writer.Write('\n'); }
+            public void writeln(int[] values) { __PscpRender.writeInts(_writer, values); _writer.Write('\n'); }
+            public void writeln(long[] values) { __PscpRender.writeLongs(_writer, values); _writer.Write('\n'); }
+            public void writeln(string[] values) { _writer.Write(string.Join(' ', values)); _writer.Write('\n'); }
+            public void writelnValue<T>(T value) { __PscpRender.write(_writer, value); _writer.Write('\n'); }
 
             public void lines<T>(IEnumerable<T> values)
             {
-                foreach (T value in values) writeln(value);
+                foreach (T value in values) writelnValue(value);
             }
 
             public void grid<T>(IEnumerable<T> rows)
             {
-                foreach (T row in rows) writeln(row);
+                foreach (T row in rows) writelnValue(row);
             }
 
             public void join<T>(string separator, IEnumerable<T> values)
@@ -397,7 +401,7 @@ internal sealed partial class CSharpEmitter
                 {
                     if (!first) _writer.Write(separator);
                     first = false;
-                    write(value);
+                    writeValue(value);
                 }
             }
 
@@ -408,7 +412,7 @@ internal sealed partial class CSharpEmitter
                 {
                     if (!first) _writer.Write(separator);
                     first = false;
-                    write(value);
+                    writeValue(value);
                 }
             }
         }
