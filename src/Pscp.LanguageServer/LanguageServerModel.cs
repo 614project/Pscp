@@ -11,10 +11,11 @@ internal sealed class LineIndex
 
     public LineIndex(string text)
     {
+        // LSP line breaks are `\n`, `\r\n` and a lone `\r` (guide §5.2).
         List<int> starts = [0];
         for (int i = 0; i < text.Length; i++)
         {
-            if (text[i] == '\n')
+            if (text[i] == '\n' || (text[i] == '\r' && (i + 1 == text.Length || text[i + 1] != '\n')))
             {
                 starts.Add(i + 1);
             }
@@ -107,7 +108,8 @@ internal sealed record PscpServerDiagnostic(
     string Message,
     TextSpan Span,
     ServerDiagnosticSeverity Severity,
-    string? RelatedSymbolId = null);
+    string? RelatedSymbolId = null,
+    TextSpan? RelatedSpan = null);
 
 internal sealed record PscpServerSymbol(
     string Id,
@@ -147,7 +149,15 @@ internal sealed record PscpCompletionEntry(
     string? Documentation,
     string? InsertText = null,
     int? InsertTextFormat = null,
-    string? SortText = null);
+    string? SortText = null,
+    // `labelDetails` (guide §8.4): the parameter shape and the result type.
+    string? LabelDetail = null,
+    string? LabelDescription = null)
+{
+    // A copy in completion group `group` (guide §8.3). Entries carry their own name-ordered suffix.
+    public PscpCompletionEntry InGroup(string group)
+        => this with { SortText = group + (SortText is { Length: > 1 } text && char.IsDigit(text[0]) ? text[1..] : SortText ?? Label) };
+}
 
 internal sealed record PscpSignatureEntry(
     string Label,
@@ -180,6 +190,9 @@ internal sealed class PscpAnalysisResult
     public required IReadOnlyDictionary<string, PscpSignatureEntry> Signatures { get; init; }
     public required IReadOnlyList<PscpCodeActionEntry> CodeActions { get; init; }
     public required IReadOnlyList<PscpInlayHintEntry> InlayHints { get; init; }
+
+    // The shared front-end result of this version (tokens, tree, diagnostics), used by the generated C# preview.
+    public PscpFrontEndResult? FrontEnd { get; set; }
 
     public Token? FindTokenAtOffset(int offset)
     {

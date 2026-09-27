@@ -2,220 +2,43 @@ using Pscp.Transpiler;
 
 namespace Pscp.LanguageServer;
 
+// Completion, hover and signature tables built from the shared intrinsic catalog (PscpIntrinsicDocs, guide
+// principle 3). Sort groups follow guide §8.3.
 internal static class PscpIntrinsics
 {
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> Globals =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["stdin"] = new("stdin", 6, "intrinsic object", "Contest-oriented input helper object."),
-            ["stdout"] = new("stdout", 6, "intrinsic object", "Contest-oriented output helper object."),
-            ["Array"] = new("Array", 7, "type", "Built-in .NET array type with `Array.zero(n)` helper surface."),
-        };
+    public const string SortLocal = "0";
+    public const string SortTypeMember = "1";
+    public const string SortTopLevel = "2";
+    public const string SortIntrinsic = "3";
+    public const string SortDotNet = "4";
+    public const string SortKeyword = "5";
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdinMembers =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["readInt"] = Completion("readInt", "readInt()", "Reads one integer token.", 2),
-            ["readLong"] = Completion("readLong", "readLong()", "Reads one long integer token.", 2),
-            ["readDouble"] = Completion("readDouble", "readDouble()", "Reads one floating-point token.", 2),
-            ["readDecimal"] = Completion("readDecimal", "readDecimal()", "Reads one decimal token.", 2),
-            ["readBool"] = Completion("readBool", "readBool()", "Reads one boolean token.", 2),
-            ["readChar"] = Completion("readChar", "readChar()", "Reads one character token.", 2),
-            ["readString"] = Completion("readString", "readString()", "Reads one string token.", 2),
-            ["readLine"] = Completion("readLine", "readLine()", "Reads the next physical input line.", 2),
-            ["readRestOfLine"] = Completion("readRestOfLine", "readRestOfLine()", "Reads the current physical line remainder.", 2),
-            ["readLines"] = Completion("readLines", "readLines(${1:n})", "Reads `n` full lines.", 15, "readLines($1)"),
-            ["readWords"] = Completion("readWords", "readWords()", "Reads one line and splits it into words.", 2),
-            ["readChars"] = Completion("readChars", "readChars()", "Reads one line as `char[]`.", 2),
-            ["readArray"] = Completion("readArray", "readArray<T>(${1:n})", "Compile-time generic sugar that lowers to specialized typed array reads.", 15, "readArray<T>($1)"),
-            ["readList"] = Completion("readList", "readList<T>(${1:n})", "Compile-time generic sugar that lowers to specialized typed reads and `List<T>` materialization.", 15, "readList<T>($1)"),
-            ["readLinkedList"] = Completion("readLinkedList", "readLinkedList<T>(${1:n})", "Compile-time generic sugar that lowers to specialized typed reads and `LinkedList<T>` materialization.", 15, "readLinkedList<T>($1)"),
-            ["readTuple2"] = Completion("readTuple2", "readTuple2<T1, T2>()", "Compile-time generic sugar that lowers to specialized tuple reads.", 2),
-            ["readTuple3"] = Completion("readTuple3", "readTuple3<T1, T2, T3>()", "Compile-time generic sugar that lowers to specialized tuple reads.", 2),
-            ["readTuples2"] = Completion("readTuples2", "readTuples2<T1, T2>(${1:n})", "Compile-time generic sugar that lowers to specialized tuple-array reads.", 15, "readTuples2<T1, T2>($1)"),
-            ["readTuples3"] = Completion("readTuples3", "readTuples3<T1, T2, T3>(${1:n})", "Compile-time generic sugar that lowers to specialized tuple-array reads.", 15, "readTuples3<T1, T2, T3>($1)"),
-            ["readNestedArray"] = Completion("readNestedArray", "readNestedArray<T>(${1:n}, ${2:m})", "Compile-time generic sugar that lowers to specialized typed nested-array reads.", 15, "readNestedArray<T>($1, $2)"),
-            ["readGridInt"] = Completion("readGridInt", "readGridInt(${1:n}, ${2:m})", "Reads an `int` grid.", 15, "readGridInt($1, $2)"),
-            ["readGridLong"] = Completion("readGridLong", "readGridLong(${1:n}, ${2:m})", "Reads a `long` grid.", 15, "readGridLong($1, $2)"),
-            ["readCharGrid"] = Completion("readCharGrid", "readCharGrid(${1:n})", "Reads `n` lines as `char[][]`.", 15, "readCharGrid($1)"),
-            ["readWordGrid"] = Completion("readWordGrid", "readWordGrid(${1:n})", "Reads `n` lines as `string[][]`.", 15, "readWordGrid($1)"),
-        };
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> Globals = Table(
+        PscpIntrinsicDocs.Of(IntrinsicDocKind.Object).Select(doc => new PscpCompletionEntry(doc.Name, 6, doc.Name, PscpIntrinsicDocs.FormatMarkdown(doc), null, null, SortIntrinsic + doc.Name))
+            .Append(new PscpCompletionEntry("Array", 7, ".NET type", "The .NET array type (`Array.Sort`, `Array.Fill`, ...).", null, null, SortDotNet + "Array")));
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdoutMembers =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["write"] = Completion("write", "write(${1:value})", "Writes a value without a trailing newline.", 15, "write($1)"),
-            ["writeln"] = Completion("writeln", "writeln(${1:value})", "Writes a value with a trailing newline.", 15, "writeln($1)"),
-            ["flush"] = Completion("flush", "flush()", "Flushes buffered output.", 2),
-            ["lines"] = Completion("lines", "lines(${1:values})", "Writes one element per line.", 15, "lines($1)"),
-            ["grid"] = Completion("grid", "grid(${1:grid})", "Writes a grid line by line.", 15, "grid($1)"),
-            ["join"] = Completion("join", "join(${1:sep}, ${2:values})", "Writes values joined by a separator.", 15, "join($1, $2)"),
-        };
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdinMembers = Members(IntrinsicDocKind.StdinMember, 2);
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ArrayMembers =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["zero"] = Completion("zero", "zero(${1:n})", "Creates a zero-initialized array from type context.", 15, "zero($1)"),
-        };
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> StdoutMembers = Members(IntrinsicDocKind.StdoutMember, 2);
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ComparatorMembers =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["asc"] = new("asc", 10, "ascending comparer", "Comparator sugar that resolves to the default ascending comparer for the receiver type."),
-            ["desc"] = new("desc", 10, "descending comparer", "Comparator sugar that resolves to the default descending comparer for the receiver type."),
-        };
+    // `Array.zero(n)` is deprecated (spec appendix C): it is no longer offered.
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ArrayMembers = new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal);
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> CollectionMembers =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["map"] = Member("map", "map(${1:x => x})", "Maps each element and materializes the result in the receiver's default family.", "map($1)"),
-            ["filter"] = Member("filter", "filter(${1:x => true})", "Keeps elements that satisfy the predicate.", "filter($1)"),
-            ["fold"] = Member("fold", "fold(${1:seed}, ${2:(acc, x) => acc})", "Folds the receiver into one value.", "fold($1, $2)"),
-            ["scan"] = Member("scan", "scan(${1:seed}, ${2:(acc, x) => acc})", "Returns the prefix states produced by a fold-like operation.", "scan($1, $2)"),
-            ["mapFold"] = Member("mapFold", "mapFold(${1:seed}, ${2:(acc, x) => (x, acc)})", "Maps values while carrying state; callback returns `(mapped, nextState)`.", "mapFold($1, $2)"),
-            ["any"] = Member("any", "any(${1:x => true})", "Returns whether any element satisfies the predicate.", "any($1)"),
-            ["all"] = Member("all", "all(${1:x => true})", "Returns whether all elements satisfy the predicate.", "all($1)"),
-            ["count"] = Member("count", "count(${1:x => true})", "Counts elements, optionally by predicate.", "count($1)"),
-            ["find"] = Member("find", "find(${1:x => true})", "Returns the first matching element, or the default value.", "find($1)"),
-            ["findIndex"] = Member("findIndex", "findIndex(${1:x => true})", "Returns the first matching index, or `-1`.", "findIndex($1)"),
-            ["findLastIndex"] = Member("findLastIndex", "findLastIndex(${1:x => true})", "Returns the last matching index, or `-1`.", "findLastIndex($1)"),
-            ["sort"] = Member("sort", "sort()", "Returns a sorted materialized copy.", "sort()"),
-            ["sortBy"] = Member("sortBy", "sortBy(${1:x => x})", "Returns a materialized copy sorted by the projected key.", "sortBy($1)"),
-            ["sortWith"] = Member("sortWith", "sortWith(${1:comparer})", "Returns a materialized copy sorted with a comparer or comparison.", "sortWith($1)"),
-            ["distinct"] = Member("distinct", "distinct()", "Returns distinct elements preserving source order where possible.", "distinct()"),
-            ["reverse"] = Member("reverse", "reverse()", "Returns elements in reverse order.", "reverse()"),
-            ["copy"] = Member("copy", "copy()", "Returns a materialized copy.", "copy()"),
-            ["groupCount"] = Member("groupCount", "groupCount()", "Counts occurrences of each distinct value.", "groupCount()"),
-            ["freq"] = Member("freq", "freq()", "Alias of `groupCount()`.", "freq()"),
-            ["index"] = Member("index", "index()", "Maps each distinct value to its first index.", "index()"),
-        };
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> ComparatorMembers = Table(
+        PscpIntrinsicDocs.Of(IntrinsicDocKind.Comparator).Select(doc => new PscpCompletionEntry(doc.Name, 10, doc.Signature, PscpIntrinsicDocs.FormatMarkdown(doc), null, null, SortIntrinsic + doc.Name)));
 
-    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> IntrinsicFunctions =
-        new Dictionary<string, PscpCompletionEntry>(StringComparer.Ordinal)
-        {
-            ["sum"] = Function("sum", "sum(${1:values})", "Sums the elements of an iterable.", "sum($1)"),
-            ["sumBy"] = Function("sumBy", "sumBy(${1:values}, ${2:selector})", "Maps each element and sums the projected values.", "sumBy($1, $2)"),
-            ["min"] = Function("min", "min(${1:left}, ${2:right})", "Returns the smaller of two values, or the minimum element of a sequence.", "min($1, $2)"),
-            ["max"] = Function("max", "max(${1:left}, ${2:right})", "Returns the larger of two values, or the maximum element of a sequence.", "max($1, $2)"),
-            ["minBy"] = Function("minBy", "minBy(${1:values}, ${2:keySelector})", "Returns the element whose key is minimal.", "minBy($1, $2)"),
-            ["maxBy"] = Function("maxBy", "maxBy(${1:values}, ${2:keySelector})", "Returns the element whose key is maximal.", "maxBy($1, $2)"),
-            ["count"] = Function("count", "count(${1:values}, ${2:predicate})", "Counts the elements that satisfy the predicate.", "count($1, $2)"),
-            ["any"] = Function("any", "any(${1:values}, ${2:predicate})", "Returns whether any element satisfies the predicate.", "any($1, $2)"),
-            ["all"] = Function("all", "all(${1:values}, ${2:predicate})", "Returns whether all elements satisfy the predicate.", "all($1, $2)"),
-            ["find"] = Function("find", "find(${1:values}, ${2:predicate})", "Returns the first matching element, or the default value.", "find($1, $2)"),
-            ["findIndex"] = Function("findIndex", "findIndex(${1:values}, ${2:predicate})", "Returns the index of the first matching element, or `-1`.", "findIndex($1, $2)"),
-            ["findLastIndex"] = Function("findLastIndex", "findLastIndex(${1:values}, ${2:predicate})", "Returns the index of the last matching element, or `-1`.", "findLastIndex($1, $2)"),
-            ["map"] = Function("map", "map(${1:values}, ${2:selector})", "Pipe-friendly helper target; canonical source form is `values.map(selector)`.", "map($1, $2)"),
-            ["filter"] = Function("filter", "filter(${1:values}, ${2:predicate})", "Pipe-friendly helper target; canonical source form is `values.filter(predicate)`.", "filter($1, $2)"),
-            ["fold"] = Function("fold", "fold(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.fold(seed, folder)`.", "fold($1, $2, $3)"),
-            ["scan"] = Function("scan", "scan(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.scan(seed, folder)`.", "scan($1, $2, $3)"),
-            ["mapFold"] = Function("mapFold", "mapFold(${1:values}, ${2:seed}, ${3:folder})", "Pipe-friendly helper target; canonical source form is `values.mapFold(seed, folder)`.", "mapFold($1, $2, $3)"),
-            ["sort"] = Function("sort", "sort(${1:values})", "Returns the values sorted by their default ordering.", "sort($1)"),
-            ["sortBy"] = Function("sortBy", "sortBy(${1:values}, ${2:keySelector})", "Returns the values sorted by the projected key.", "sortBy($1, $2)"),
-            ["sortWith"] = Function("sortWith", "sortWith(${1:values}, ${2:comparer})", "Returns the values sorted with a custom comparer.", "sortWith($1, $2)"),
-            ["distinct"] = Function("distinct", "distinct(${1:values})", "Returns distinct elements preserving source order where possible.", "distinct($1)"),
-            ["reverse"] = Function("reverse", "reverse(${1:values})", "Returns the values in reverse order.", "reverse($1)"),
-            ["copy"] = Function("copy", "copy(${1:values})", "Returns a copied materialized sequence.", "copy($1)"),
-            ["abs"] = Function("abs", "abs(${1:value})", "Returns the absolute value using the math intrinsic lowering.", "abs($1)"),
-            ["sqrt"] = Function("sqrt", "sqrt(${1:value})", "Returns the square root using the math intrinsic lowering.", "sqrt($1)"),
-            ["clamp"] = Function("clamp", "clamp(${1:value}, ${2:min}, ${3:max})", "Clamps a value into the given inclusive range.", "clamp($1, $2, $3)"),
-            ["gcd"] = Function("gcd", "gcd(${1:left}, ${2:right})", "Returns the greatest common divisor of two integers.", "gcd($1, $2)"),
-            ["lcm"] = Function("lcm", "lcm(${1:left}, ${2:right})", "Returns the least common multiple of two integers.", "lcm($1, $2)"),
-            ["floor"] = Function("floor", "floor(${1:value})", "Returns the floor using Math-compatible lowering.", "floor($1)"),
-            ["ceil"] = Function("ceil", "ceil(${1:value})", "Returns the ceiling using Math-compatible lowering.", "ceil($1)"),
-            ["round"] = Function("round", "round(${1:value})", "Returns the rounded value using Math-compatible lowering.", "round($1)"),
-            ["pow"] = Function("pow", "pow(${1:value}, ${2:power})", "Returns the value raised to the given power.", "pow($1, $2)"),
-            ["popcount"] = Function("popcount", "popcount(${1:value})", "Counts one-bits in an integer value.", "popcount($1)"),
-            ["bitLength"] = Function("bitLength", "bitLength(${1:value})", "Returns the effective bit length of an integer value.", "bitLength($1)"),
-            ["groupCount"] = Function("groupCount", "groupCount(${1:values})", "Counts occurrences of each distinct value.", "groupCount($1)"),
-            ["freq"] = Function("freq", "freq(${1:values})", "Alias of `groupCount`.", "freq($1)"),
-            ["index"] = Function("index", "index(${1:values})", "Maps each distinct value to its first index.", "index($1)"),
-            ["chmin"] = Function("chmin", "chmin(ref ${1:target}, ${2:value})", "Updates `target` when `value` is smaller, and returns whether it changed.", "chmin(ref $1, $2)"),
-            ["chmax"] = Function("chmax", "chmax(ref ${1:target}, ${2:value})", "Updates `target` when `value` is larger, and returns whether it changed.", "chmax(ref $1, $2)"),
-        };
+    // Guide §8.1: member completion offers the collection helpers, the aggregate member aliases, and
+    // `lowerBound`/`upperBound`.
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> CollectionMembers = Table(
+        PscpIntrinsicDocs.Of(IntrinsicDocKind.CollectionHelper)
+            .Concat(PscpIntrinsicDocs.Of(IntrinsicDocKind.Aggregate).Where(doc => doc.Name is not ("chmin" or "chmax")))
+            .Select(doc => doc.Kind == IntrinsicDocKind.Aggregate ? AggregateMember(doc) : Completion(doc, kind: 2)));
 
-    public static readonly IReadOnlyDictionary<string, PscpSignatureEntry> Signatures =
-        new Dictionary<string, PscpSignatureEntry>(StringComparer.Ordinal)
-        {
-            ["stdin.readInt"] = new("stdin.readInt()", Array.Empty<string>(), "Reads one integer token."),
-            ["stdin.readLong"] = new("stdin.readLong()", Array.Empty<string>(), "Reads one long integer token."),
-            ["stdin.readDouble"] = new("stdin.readDouble()", Array.Empty<string>(), "Reads one floating-point token."),
-            ["stdin.readDecimal"] = new("stdin.readDecimal()", Array.Empty<string>(), "Reads one decimal token."),
-            ["stdin.readBool"] = new("stdin.readBool()", Array.Empty<string>(), "Reads one boolean token."),
-            ["stdin.readChar"] = new("stdin.readChar()", Array.Empty<string>(), "Reads one character token."),
-            ["stdin.readString"] = new("stdin.readString()", Array.Empty<string>(), "Reads one string token."),
-            ["stdin.readLine"] = new("stdin.readLine()", Array.Empty<string>(), "Reads the next physical input line."),
-            ["stdin.readRestOfLine"] = new("stdin.readRestOfLine()", Array.Empty<string>(), "Reads the current physical line remainder."),
-            ["stdin.readLines"] = new("stdin.readLines(n)", new[] { "n" }, "Reads `n` lines."),
-            ["stdin.readWords"] = new("stdin.readWords()", Array.Empty<string>(), "Reads one line and splits it into words."),
-            ["stdin.readChars"] = new("stdin.readChars()", Array.Empty<string>(), "Reads one line as `char[]`."),
-            ["stdin.readArray"] = new("stdin.readArray<T>(n)", new[] { "n" }, "Compile-time generic sugar that lowers to specialized typed array reads."),
-            ["stdin.readList"] = new("stdin.readList<T>(n)", new[] { "n" }, "Compile-time generic sugar that lowers to specialized typed reads and `List<T>` materialization."),
-            ["stdin.readLinkedList"] = new("stdin.readLinkedList<T>(n)", new[] { "n" }, "Compile-time generic sugar that lowers to specialized typed reads and `LinkedList<T>` materialization."),
-            ["stdin.readTuple2"] = new("stdin.readTuple2<T1, T2>()", Array.Empty<string>(), "Compile-time generic sugar that lowers to specialized tuple reads."),
-            ["stdin.readTuple3"] = new("stdin.readTuple3<T1, T2, T3>()", Array.Empty<string>(), "Compile-time generic sugar that lowers to specialized tuple reads."),
-            ["stdin.readTuples2"] = new("stdin.readTuples2<T1, T2>(n)", new[] { "n" }, "Compile-time generic sugar that lowers to specialized tuple-array reads."),
-            ["stdin.readTuples3"] = new("stdin.readTuples3<T1, T2, T3>(n)", new[] { "n" }, "Compile-time generic sugar that lowers to specialized tuple-array reads."),
-            ["stdin.readNestedArray"] = new("stdin.readNestedArray<T>(n, m)", new[] { "n", "m" }, "Compile-time generic sugar that lowers to specialized typed nested-array reads."),
-            ["stdin.readGridInt"] = new("stdin.readGridInt(n, m)", new[] { "n", "m" }, "Reads an integer grid."),
-            ["stdin.readGridLong"] = new("stdin.readGridLong(n, m)", new[] { "n", "m" }, "Reads a long integer grid."),
-            ["stdin.readCharGrid"] = new("stdin.readCharGrid(n)", new[] { "n" }, "Reads `n` lines as a character grid."),
-            ["stdin.readWordGrid"] = new("stdin.readWordGrid(n)", new[] { "n" }, "Reads `n` lines as a word grid."),
-            ["stdout.write"] = new("stdout.write(value)", new[] { "value" }, "Writes one rendered value without newline."),
-            ["stdout.writeln"] = new("stdout.writeln(value)", new[] { "value" }, "Writes one rendered value with newline."),
-            ["stdout.flush"] = new("stdout.flush()", Array.Empty<string>(), "Flushes buffered output."),
-            ["stdout.lines"] = new("stdout.lines(values)", new[] { "values" }, "Writes one value per line."),
-            ["stdout.grid"] = new("stdout.grid(grid)", new[] { "grid" }, "Writes a grid line by line."),
-            ["stdout.join"] = new("stdout.join(sep, values)", new[] { "sep", "values" }, "Writes values joined by a separator."),
-            ["Array.zero"] = new("Array.zero(n)", new[] { "n" }, "Creates a zero-initialized array from the target type context."),
-            ["sum"] = new("sum(values)", new[] { "values" }, "Sums the elements of an iterable."),
-            ["sumBy"] = new("sumBy(values, selector)", new[] { "values", "selector" }, "Maps each element and sums the projected values."),
-            ["min"] = new("min(left, right)", new[] { "left", "right" }, "Returns the smaller of two values."),
-            ["max"] = new("max(left, right)", new[] { "left", "right" }, "Returns the larger of two values."),
-            ["minBy"] = new("minBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the element whose key is minimal."),
-            ["maxBy"] = new("maxBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the element whose key is maximal."),
-            ["count"] = new("count(values, predicate)", new[] { "values", "predicate" }, "Counts matching elements."),
-            ["any"] = new("any(values, predicate)", new[] { "values", "predicate" }, "Returns whether any element matches."),
-            ["all"] = new("all(values, predicate)", new[] { "values", "predicate" }, "Returns whether all elements match."),
-            ["find"] = new("find(values, predicate)", new[] { "values", "predicate" }, "Returns the first matching element."),
-            ["findIndex"] = new("findIndex(values, predicate)", new[] { "values", "predicate" }, "Returns the first matching index, or `-1`."),
-            ["findLastIndex"] = new("findLastIndex(values, predicate)", new[] { "values", "predicate" }, "Returns the last matching index, or `-1`."),
-            ["sort"] = new("sort(values)", new[] { "values" }, "Returns the values sorted by their default ordering."),
-            ["sortBy"] = new("sortBy(values, keySelector)", new[] { "values", "keySelector" }, "Returns the values sorted by a projected key."),
-            ["sortWith"] = new("sortWith(values, comparer)", new[] { "values", "comparer" }, "Returns the values sorted with a custom comparer."),
-            ["distinct"] = new("distinct(values)", new[] { "values" }, "Returns distinct values."),
-            ["reverse"] = new("reverse(values)", new[] { "values" }, "Returns the values in reverse order."),
-            ["copy"] = new("copy(values)", new[] { "values" }, "Returns a copied materialized sequence."),
-            ["abs"] = new("abs(value)", new[] { "value" }, "Returns the absolute value."),
-            ["sqrt"] = new("sqrt(value)", new[] { "value" }, "Returns the square root."),
-            ["clamp"] = new("clamp(value, min, max)", new[] { "value", "min", "max" }, "Clamps a value into the given inclusive range."),
-            ["gcd"] = new("gcd(left, right)", new[] { "left", "right" }, "Returns the greatest common divisor of two integers."),
-            ["lcm"] = new("lcm(left, right)", new[] { "left", "right" }, "Returns the least common multiple of two integers."),
-            ["floor"] = new("floor(value)", new[] { "value" }, "Returns the floor using Math-compatible semantics."),
-            ["ceil"] = new("ceil(value)", new[] { "value" }, "Returns the ceiling using Math-compatible semantics."),
-            ["round"] = new("round(value)", new[] { "value" }, "Returns the rounded value using Math-compatible semantics."),
-            ["pow"] = new("pow(value, power)", new[] { "value", "power" }, "Returns the value raised to the given power."),
-            ["popcount"] = new("popcount(value)", new[] { "value" }, "Counts one-bits in an integer value."),
-            ["bitLength"] = new("bitLength(value)", new[] { "value" }, "Returns the effective bit length of an integer value."),
-            ["groupCount"] = new("groupCount(values)", new[] { "values" }, "Counts occurrences of each distinct value."),
-            ["freq"] = new("freq(values)", new[] { "values" }, "Alias of `groupCount`."),
-            ["index"] = new("index(values)", new[] { "values" }, "Maps each distinct value to its first index."),
-            ["chmin"] = new("chmin(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is smaller."),
-            ["chmax"] = new("chmax(ref target, value)", new[] { "target", "value" }, "Updates `target` when `value` is larger."),
-            ["map"] = new("xs.map(f)", new[] { "f" }, "Maps each element and materializes the result."),
-            ["filter"] = new("xs.filter(pred)", new[] { "pred" }, "Keeps elements matching the predicate."),
-            ["fold"] = new("xs.fold(seed, f)", new[] { "seed", "f" }, "Folds the receiver into one value."),
-            ["scan"] = new("xs.scan(seed, f)", new[] { "seed", "f" }, "Returns prefix fold states."),
-            ["mapFold"] = new("xs.mapFold(seed, f)", new[] { "seed", "f" }, "Maps values while carrying state."),
-            ["sort"] = new("xs.sort()", Array.Empty<string>(), "Returns a sorted materialized copy."),
-            ["sortBy"] = new("xs.sortBy(keySelector)", new[] { "keySelector" }, "Sorts by the projected key."),
-            ["sortWith"] = new("xs.sortWith(comparer)", new[] { "comparer" }, "Sorts with a comparer or comparison."),
-            ["distinct"] = new("xs.distinct()", Array.Empty<string>(), "Returns distinct values."),
-            ["reverse"] = new("xs.reverse()", Array.Empty<string>(), "Returns values in reverse order."),
-            ["groupCount"] = new("xs.groupCount()", Array.Empty<string>(), "Counts occurrences."),
-            ["freq"] = new("xs.freq()", Array.Empty<string>(), "Alias of `groupCount`."),
-            ["index"] = new("xs.index()", Array.Empty<string>(), "Maps each distinct value to its first index."),
-        };
+    // Free forms: aggregates and math. Collection helpers are member-only (guide §8.2).
+    public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> IntrinsicFunctions = Table(
+        PscpIntrinsicDocs.Of(IntrinsicDocKind.Aggregate).Concat(PscpIntrinsicDocs.Of(IntrinsicDocKind.Math)).Select(doc => Completion(doc, kind: 3)));
+
+    public static readonly IReadOnlyDictionary<string, PscpSignatureEntry> Signatures = CreateSignatures();
 
     public static readonly IReadOnlyDictionary<string, string> HoverDocs = CreateHoverDocs();
 
@@ -227,6 +50,62 @@ internal static class PscpIntrinsics
         "ref", "out", "is", "public", "private", "protected", "internal", "this", "base",
         "operator", "switch",
     };
+
+    // Guide §8.1: the keywords that can start a statement.
+    public static readonly IReadOnlyList<string> StatementKeywords =
+    [
+        "break", "class", "continue", "do", "for", "if", "let", "mut", "namespace", "rec",
+        "record", "return", "struct", "using", "var", "while",
+    ];
+
+    // Guide §8.2: `class`, `namespace`, `using`, `operator` and `where` cannot start an expression, so the
+    // expression position offers only these.
+    public static readonly IReadOnlyList<string> ExpressionKeywords =
+    [
+        "false", "if", "new", "not", "null", "switch", "this", "true",
+    ];
+
+    // Guide §8.1 and §8.6: the output shorthand and the statement snippets a statement start offers.
+    public static readonly IReadOnlyList<PscpCompletionEntry> StatementSnippets =
+    [
+        new PscpCompletionEntry("=", 15, "= value", "Output shorthand: writes the value without a trailing newline (spec §18.1).", "= ${1:value}", 2, SortKeyword + "0="),
+        new PscpCompletionEntry("+=", 15, "+= value", "Output shorthand: writes the value followed by a newline (spec §18.1).", "+= ${1:value}", 2, SortKeyword + "0+="),
+        new PscpCompletionEntry(
+            "tc",
+            15,
+            "test case loop",
+            "The test-case shape: reads the case count and loops over it.",
+            "int ${1:t} =\nfor _ in 0..<${1:t} {\n\t$0\n}",
+            2,
+            SortKeyword + "0tc"),
+        new PscpCompletionEntry(
+            "rec",
+            15,
+            "rec function",
+            "A recursive function (`rec` is required for self-recursion, spec §12.4).",
+            "rec ${1:int} ${2:solve}(${3:int n}) {\n\t$0\n}",
+            2,
+            SortKeyword + "0rec"),
+        new PscpCompletionEntry(
+            "record struct",
+            15,
+            "record struct",
+            "A value record: the compact shape for a point or an edge (spec §26).",
+            "record struct ${1:Point}(${2:int x, int y})",
+            2,
+            SortKeyword + "0record"),
+        new PscpCompletionEntry(
+            "->",
+            15,
+            "-> iteration",
+            "Iteration shorthand: `xs -> x { ... }` (spec §15.3).",
+            "${1:xs} -> ${2:x} {\n\t$0\n}",
+            2,
+            SortKeyword + "0->"),
+    ];
+
+    // Guide §8.1: after `is` and in a switch arm pattern.
+    public static readonly IReadOnlyList<string> PatternKeywords = ["and", "not", "null", "or"];
 
     public static readonly IReadOnlySet<string> BuiltinTypes = PscpIntrinsicCatalog.BuiltinTypes;
 
@@ -256,19 +135,53 @@ internal static class PscpIntrinsics
 
     private static IReadOnlyDictionary<string, string> CreateHoverDocs()
     {
-        Dictionary<string, string> docs = Signatures.ToDictionary(
-            pair => pair.Key,
-            pair => $"```pscp\n{pair.Value.Label}\n```\n\n{pair.Value.Documentation}",
-            StringComparer.Ordinal);
-
-        docs["comparer.asc"] = "```pscp\nT.asc\n```\n\nComparator sugar that resolves to the default ascending comparer for the receiver type.";
-        docs["comparer.desc"] = "```pscp\nT.desc\n```\n\nComparator sugar that resolves to the default descending comparer for the receiver type.";
-        foreach ((string name, PscpCompletionEntry entry) in CollectionMembers)
+        Dictionary<string, string> docs = new(StringComparer.Ordinal);
+        foreach (IntrinsicDoc doc in PscpIntrinsicDocs.All)
         {
-            docs[$"collection.{name}"] = $"```pscp\nxs.{entry.Detail}\n```\n\n{entry.Documentation}";
+            string markdown = PscpIntrinsicDocs.FormatMarkdown(doc);
+            switch (doc.Kind)
+            {
+                case IntrinsicDocKind.StdinMember:
+                    docs[$"stdin.{doc.Name}"] = markdown;
+                    break;
+                case IntrinsicDocKind.StdoutMember:
+                    docs[$"stdout.{doc.Name}"] = markdown;
+                    break;
+                case IntrinsicDocKind.Comparator:
+                    docs[$"comparer.{doc.Name}"] = markdown;
+                    break;
+                case IntrinsicDocKind.CollectionHelper:
+                    docs[$"collection.{doc.Name}"] = markdown;
+                    break;
+                default:
+                    docs[doc.Name] = markdown;
+                    break;
+            }
+        }
+
+        foreach (IntrinsicDoc doc in PscpIntrinsicDocs.Of(IntrinsicDocKind.Aggregate))
+        {
+            docs.TryAdd($"collection.{doc.Name}", PscpIntrinsicDocs.FormatMarkdown(doc));
         }
 
         return docs;
+    }
+
+    private static IReadOnlyDictionary<string, PscpSignatureEntry> CreateSignatures()
+    {
+        Dictionary<string, PscpSignatureEntry> signatures = new(StringComparer.Ordinal);
+        foreach (IntrinsicDoc doc in PscpIntrinsicDocs.All)
+        {
+            string key = doc.Kind switch
+            {
+                IntrinsicDocKind.StdinMember => $"stdin.{doc.Name}",
+                IntrinsicDocKind.StdoutMember => $"stdout.{doc.Name}",
+                _ => doc.Name,
+            };
+            signatures.TryAdd(key, new PscpSignatureEntry(FirstForm(doc.Signature), doc.Parameters, doc.Summary));
+        }
+
+        return signatures;
     }
 
     private static string StripGenericSuffix(string name)
@@ -277,12 +190,67 @@ internal static class PscpIntrinsics
         return genericIndex >= 0 ? name[..genericIndex] : name;
     }
 
-    private static PscpCompletionEntry Completion(string label, string detail, string documentation, int kind, string? insertText = null)
-        => new(label, kind, detail, documentation, insertText, insertText is null ? null : 2, label);
+    private static IReadOnlyDictionary<string, PscpCompletionEntry> Table(IEnumerable<PscpCompletionEntry> entries)
+    {
+        Dictionary<string, PscpCompletionEntry> table = new(StringComparer.Ordinal);
+        foreach (PscpCompletionEntry entry in entries)
+        {
+            table.TryAdd(entry.Label, entry);
+        }
 
-    private static PscpCompletionEntry Function(string label, string detail, string documentation, string insertText)
-        => new(label, 3, detail, documentation, insertText, 2, label);
+        return table;
+    }
 
-    private static PscpCompletionEntry Member(string label, string detail, string documentation, string insertText)
-        => new(label, 2, detail, documentation, insertText, 2, label);
+    private static IReadOnlyDictionary<string, PscpCompletionEntry> Members(IntrinsicDocKind docKind, int completionKind)
+        => Table(PscpIntrinsicDocs.Of(docKind).Select(doc => Completion(doc, completionKind)));
+
+    // `detail` is readable text; the snippet goes to `insertText` (guide §8.4).
+    private static PscpCompletionEntry Completion(IntrinsicDoc doc, int kind)
+        => new(doc.Name, kind, FirstForm(doc.Signature), PscpIntrinsicDocs.FormatMarkdown(doc), Snippet(doc), 2, SortIntrinsic + doc.Name);
+
+    private static PscpCompletionEntry AggregateMember(IntrinsicDoc doc)
+    {
+        IReadOnlyList<string> parameters = doc.Name is "sumBy" or "minBy" or "maxBy" ? doc.Parameters.Skip(1).ToArray() : [];
+        string insert = parameters.Count == 0 ? $"{doc.Name}()" : $"{doc.Name}({string.Join(", ", parameters.Select((parameter, index) => $"${{{index + 1}:{parameter}}}"))})";
+        string detail = parameters.Count == 0 ? $"xs.{doc.Name}()" : $"xs.{doc.Name}({string.Join(", ", parameters)})";
+        return new PscpCompletionEntry(doc.Name, 2, detail, PscpIntrinsicDocs.FormatMarkdown(doc), insert, 2, SortIntrinsic + doc.Name);
+    }
+
+    private static string FirstForm(string signature)
+    {
+        int separator = signature.IndexOf(" / ", StringComparison.Ordinal);
+        return separator < 0 ? signature : signature[..separator];
+    }
+
+    // `stdin.readArray<T>(n)` → `readArray<${1:T}>(${2:n})`; `chmin(ref target, value)` → `chmin(ref ${1:target}, ${2:value})`.
+    private static string Snippet(IntrinsicDoc doc)
+    {
+        string form = FirstForm(doc.Signature);
+        int nameStart = form.IndexOf(doc.Name, StringComparison.Ordinal);
+        string call = nameStart < 0 ? doc.Name + "()" : form[nameStart..];
+        int placeholder = 1;
+        string ReplaceList(string list)
+            => string.Join(", ", list.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Where(part => part != "...")
+                .Select(part => part.StartsWith("ref ", StringComparison.Ordinal)
+                    ? $"ref ${{{placeholder++}:{part[4..]}}}"
+                    : $"${{{placeholder++}:{part}}}"));
+
+        string result = call;
+        int genericOpen = result.IndexOf('<');
+        int genericClose = genericOpen < 0 ? -1 : result.IndexOf('>', genericOpen);
+        if (genericOpen >= 0 && genericClose > genericOpen)
+        {
+            result = result[..(genericOpen + 1)] + ReplaceList(result[(genericOpen + 1)..genericClose]) + result[genericClose..];
+        }
+
+        int open = result.LastIndexOf('(');
+        int close = result.LastIndexOf(')');
+        if (open >= 0 && close > open)
+        {
+            result = result[..(open + 1)] + ReplaceList(result[(open + 1)..close]) + result[close..];
+        }
+
+        return result;
+    }
 }

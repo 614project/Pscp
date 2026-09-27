@@ -99,7 +99,7 @@ internal static class PscpSemanticAnalyzer
 
     // `IsImmutableField` marks a type field declared without `mut`/`var` (spec §28.2): assignments outside a
     // constructor are reported, and the field is then generated as an ordinary field.
-    private sealed record Symbol(SymbolKind Kind, TypeSyntax? Type, bool IsMutable, TypeInfo? TypeInfo = null, bool IsImmutableField = false, string? OwnerType = null);
+    private sealed record Symbol(SymbolKind Kind, TypeSyntax? Type, bool IsMutable, TypeInfo? TypeInfo = null, bool IsImmutableField = false, string? OwnerType = null, TextSpan? DeclarationSpan = null);
 
     private sealed class TypeInfo
     {
@@ -965,6 +965,7 @@ internal static class PscpSemanticAnalyzer
                 AsExpression asExpression => AnalyzeAs(asExpression, scope),
                 NullForgivingExpression nullForgiving => UnwrapNullable(AnalyzeExpression(nullForgiving.Operand, scope)),
                 ThrowExpression throwExpression => AnalyzeThrowExpression(throwExpression, scope),
+                ErrorExpression => null,
                 LiteralExpression literal => LiteralType(literal),
                 InterpolatedStringExpression interpolated => AnalyzeInterpolatedString(interpolated, scope),
                 IdentifierExpression identifier => AnalyzeIdentifier(identifier, scope),
@@ -1197,10 +1198,13 @@ internal static class PscpSemanticAnalyzer
 
             if (ReassignedImmutableNames.Add(name))
             {
-                Warning(
-                    DiagnosticCodes.ImmutableMutation,
+                // Guide §6.3: the range is the modification; the declaration is related information.
+                Diagnostics.Add(new Diagnostic(
                     $"`{name}` is immutable but is modified here. Declare it with `mut` (or `var`) to make the mutation explicit.",
-                    span);
+                    span,
+                    DiagnosticSeverity.Warning,
+                    DiagnosticCodes.ImmutableMutation,
+                    symbol.DeclarationSpan));
             }
         }
 
@@ -2937,12 +2941,12 @@ internal static class PscpSemanticAnalyzer
             }
         }
 
-        private static void DeclareBinding(BindingTarget target, TypeSyntax? type, Scope scope, bool isMutable)
+        private void DeclareBinding(BindingTarget target, TypeSyntax? type, Scope scope, bool isMutable)
         {
             switch (target)
             {
                 case NameTarget nameTarget:
-                    scope.DeclareValue(nameTarget.Name, new Symbol(SymbolKind.Local, type, isMutable));
+                    scope.DeclareValue(nameTarget.Name, new Symbol(SymbolKind.Local, type, isMutable, DeclarationSpan: _spans.TryGet(nameTarget, out TextSpan declared) ? declared : null));
                     break;
                 case TupleTarget tupleTarget:
                     for (int i = 0; i < tupleTarget.Elements.Count; i++) DeclareBinding(tupleTarget.Elements[i], TupleElement(type, i), scope, isMutable);

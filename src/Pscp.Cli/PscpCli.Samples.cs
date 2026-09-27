@@ -402,8 +402,22 @@ static partial class PscpCli
                 _ => 3,
             });
             writer.WriteString("code", diagnostic.EffectiveCode);
+            if (DiagnosticCodes.GetSpecLink(diagnostic.EffectiveCode) is string link)
+            {
+                writer.WriteStartObject("codeDescription");
+                writer.WriteString("href", link);
+                writer.WriteEndObject();
+            }
+
             writer.WriteString("source", "pscp");
             writer.WriteString("message", diagnostic.Message);
+            if (DiagnosticCodes.IsUnnecessary(diagnostic.EffectiveCode) || DiagnosticCodes.IsDeprecation(diagnostic.EffectiveCode))
+            {
+                writer.WriteStartArray("tags");
+                writer.WriteNumberValue(DiagnosticCodes.IsUnnecessary(diagnostic.EffectiveCode) ? 1 : 2);
+                writer.WriteEndArray();
+            }
+
             if (diagnostic.RelatedSpan is TextSpan related)
             {
                 writer.WriteStartArray("relatedInformation");
@@ -412,7 +426,7 @@ static partial class PscpCli
                 writer.WriteString("uri", uri);
                 WriteRangeJson(writer, lineStarts, related);
                 writer.WriteEndObject();
-                writer.WriteString("message", "related location");
+                writer.WriteString("message", "declared here");
                 writer.WriteEndObject();
                 writer.WriteEndArray();
             }

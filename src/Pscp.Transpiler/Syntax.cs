@@ -549,6 +549,9 @@ public sealed record NewExpression(
 
 public sealed record ThrowExpression(Expression Expression) : Expression;
 
+// Stands for an expression the parser could not read. It has no type and produces no further diagnostics.
+public sealed record ErrorExpression : Expression;
+
 public sealed record NewArrayExpression(TypeSyntax ElementType, IReadOnlyList<Expression> Dimensions) : Expression;
 
 public sealed record TargetTypedNewArrayExpression(

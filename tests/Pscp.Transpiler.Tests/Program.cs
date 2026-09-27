@@ -2802,15 +2802,40 @@ internal static class TestRunner
 
     // The language server keeps its own documentation for intrinsics; every intrinsic the transpiler knows must
     // have an entry there so completion and hover never miss one.
+    // Guide §8.2: a collection helper has no free-function form, so the language server offers it only as a
+    // member or a pipe target. Every other intrinsic call name is an expression-position candidate, and a
+    // deprecated name (spec appendix C) is offered nowhere.
     private static void VerifyIntrinsicCatalogsAgree(List<string> failures)
     {
+        string[] deprecated = ["groupCount"];
         string[] missing = PscpIntrinsicCatalog.IntrinsicCallNames
-            .Where(name => !Pscp.LanguageServer.PscpIntrinsics.IntrinsicFunctions.ContainsKey(name))
+            .Where(name => !deprecated.Contains(name, StringComparer.Ordinal))
+            .Where(name => !Pscp.LanguageServer.PscpIntrinsics.IntrinsicFunctions.ContainsKey(name)
+                && !Pscp.LanguageServer.PscpIntrinsics.CollectionMembers.ContainsKey(name))
             .Order(StringComparer.Ordinal)
             .ToArray();
         if (missing.Length > 0)
         {
             failures.Add($"IntrinsicCatalogsAgree: language server has no entry for {string.Join(", ", missing)}");
+        }
+
+        string[] offeredDeprecated = deprecated
+            .Where(name => Pscp.LanguageServer.PscpIntrinsics.IntrinsicFunctions.ContainsKey(name)
+                || Pscp.LanguageServer.PscpIntrinsics.CollectionMembers.ContainsKey(name))
+            .ToArray();
+        if (offeredDeprecated.Length > 0)
+        {
+            failures.Add($"IntrinsicCatalogsAgree: language server still offers the deprecated {string.Join(", ", offeredDeprecated)}");
+        }
+
+        string[] freeFormHelpers = PscpIntrinsicCatalog.CollectionHelperNames
+            .Where(name => !PscpIntrinsicCatalog.IntrinsicCallNames.Contains(name))
+            .Where(Pscp.LanguageServer.PscpIntrinsics.IntrinsicFunctions.ContainsKey)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (freeFormHelpers.Length > 0)
+        {
+            failures.Add($"IntrinsicCatalogsAgree: collection helper offered as a free function: {string.Join(", ", freeFormHelpers)}");
         }
     }
 

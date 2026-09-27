@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -50,7 +51,12 @@ public static class PscpLanguageServerHost
             "modification",
             "documentation",
             "defaultLibrary",
+            // PSCP-only modifiers (guide §11.2). The extension declares them in
+            // `contributes.semanticTokenModifiers` so themes can name them.
             "mutable",
+            "intrinsic",
+            "shorthand",
+            "rewrite",
         ];
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -66,6 +72,11 @@ public static class PscpLanguageServerHost
         private readonly Dictionary<Uri, PscpAnalysisResult> _analyses = new();
         private readonly PscpAnalyzer _analyzer = new();
         private bool _shutdownRequested;
+
+        // Client capabilities (guide §12). A client that sends no capabilities gets the plain forms.
+        private bool _supportsSnippets;
+        private bool _supportsLabelDetails;
+        private bool _supportsHierarchicalSymbols = true;
 
         public Session(Stream input, Stream output, TextWriter log)
         {
@@ -143,6 +154,7 @@ public static class PscpLanguageServerHost
                 switch (method)
                 {
                     case "initialize":
+                        ReadClientCapabilities(@params);
                         if (hasId)
                         {
                             await SendResultAsync(id, CreateInitializeResult(), cancellationToken);
@@ -204,6 +216,9 @@ public static class PscpLanguageServerHost
                     case "textDocument/codeAction":
                         await SendResultAsync(id, HandleCodeAction(@params), cancellationToken);
                         return false;
+                    case "pscp/generatedCSharp":
+                        await SendResultAsync(id, HandleGeneratedCSharp(@params), cancellationToken);
+                        return false;
                     default:
                         if (hasId)
                         {
@@ -222,6 +237,37 @@ public static class PscpLanguageServerHost
                 }
 
                 return false;
+            }
+        }
+
+        // The client decides whether snippets, markdown documentation and hierarchical document symbols are
+        // usable (guide §12): the server sends only what the client asked for.
+        private void ReadClientCapabilities(JsonElement @params)
+        {
+            if (@params.ValueKind != JsonValueKind.Object
+                || !@params.TryGetProperty("capabilities", out JsonElement capabilities)
+                || capabilities.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            if (capabilities.TryGetProperty("textDocument", out JsonElement textDocument) && textDocument.ValueKind == JsonValueKind.Object)
+            {
+                if (textDocument.TryGetProperty("completion", out JsonElement completion)
+                    && completion.TryGetProperty("completionItem", out JsonElement completionItem)
+                    && completionItem.ValueKind == JsonValueKind.Object)
+                {
+                    _supportsSnippets = completionItem.TryGetProperty("snippetSupport", out JsonElement snippet)
+                        && snippet.ValueKind == JsonValueKind.True;
+                    _supportsLabelDetails = completionItem.TryGetProperty("labelDetailsSupport", out JsonElement labelDetails)
+                        && labelDetails.ValueKind == JsonValueKind.True;
+                }
+
+                if (textDocument.TryGetProperty("documentSymbol", out JsonElement documentSymbol)
+                    && documentSymbol.TryGetProperty("hierarchicalDocumentSymbolSupport", out JsonElement hierarchical))
+                {
+                    _supportsHierarchicalSymbols = hierarchical.ValueKind == JsonValueKind.True;
+                }
             }
         }
 
@@ -248,7 +294,10 @@ public static class PscpLanguageServerHost
                     ["documentSymbolProvider"] = true,
                     ["renameProvider"] = true,
                     ["prepareRenameProvider"] = true,
-                    ["codeActionProvider"] = true,
+                    ["codeActionProvider"] = new JsonObject
+                    {
+                        ["codeActionKinds"] = new JsonArray("quickfix"),
+                    },
                     ["inlayHintProvider"] = true,
                     ["completionProvider"] = new JsonObject
                     {
@@ -268,6 +317,18 @@ public static class PscpLanguageServerHost
                             ["tokenModifiers"] = ToJsonArray(SemanticTokenModifiers),
                         },
                         ["full"] = true,
+                    },
+                    // Guide §4.2: PSCP-specific protocol and versions.
+                    ["experimental"] = new JsonObject
+                    {
+                        ["pscp"] = new JsonObject
+                        {
+                            ["protocolVersion"] = 1,
+                            ["languageVersion"] = PscpVersionInfo.LanguageVersion,
+                            ["toolVersion"] = PscpVersionInfo.ToolVersion,
+                            ["requests"] = new JsonArray("pscp/generatedCSharp"),
+                            ["notifications"] = new JsonArray(),
+                        },
                     },
                 },
             };
@@ -360,9 +421,20 @@ public static class PscpLanguageServerHost
             JsonArray items = new();
             foreach (PscpCompletionEntry entry in entries.OrderBy(item => item.SortText ?? item.Label, StringComparer.Ordinal).ThenBy(item => item.Label, StringComparer.Ordinal))
             {
+                JsonObject? labelDetails = !_supportsLabelDetails || (entry.LabelDetail is null && entry.LabelDescription is null)
+                    ? null
+                    : new JsonObject
+                    {
+                        ["detail"] = entry.LabelDetail,
+                        ["description"] = entry.LabelDescription,
+                    };
+                // Guide §8.4: a snippet goes out only when the client asked for one.
+                bool snippet = entry.InsertTextFormat == 2;
+                string? insertText = snippet && !_supportsSnippets ? null : entry.InsertText;
                 items.Add(new JsonObject
                 {
                     ["label"] = entry.Label,
+                    ["labelDetails"] = labelDetails,
                     ["kind"] = entry.Kind,
                     ["detail"] = entry.Detail,
                     ["documentation"] = entry.Documentation is null
@@ -372,8 +444,8 @@ public static class PscpLanguageServerHost
                             ["kind"] = "markdown",
                             ["value"] = entry.Documentation,
                         },
-                    ["insertText"] = entry.InsertText,
-                    ["insertTextFormat"] = entry.InsertTextFormat,
+                    ["insertText"] = insertText,
+                    ["insertTextFormat"] = insertText is null ? null : entry.InsertTextFormat,
                     ["sortText"] = entry.SortText ?? entry.Label,
                 });
             }
@@ -547,9 +619,24 @@ public static class PscpLanguageServerHost
                 return new JsonArray();
             }
 
+            // Guide §12.1: only the hints inside the requested range.
+            int rangeStart = 0;
+            int rangeEnd = int.MaxValue;
+            if (@params.TryGetProperty("range", out JsonElement range))
+            {
+                LineIndex lineIndex = analysis!.Snapshot.LineIndex;
+                rangeStart = lineIndex.GetOffset(range.GetProperty("start").GetProperty("line").GetInt32(), range.GetProperty("start").GetProperty("character").GetInt32());
+                rangeEnd = lineIndex.GetOffset(range.GetProperty("end").GetProperty("line").GetInt32(), range.GetProperty("end").GetProperty("character").GetInt32());
+            }
+
             JsonArray hints = new();
             foreach (PscpInlayHintEntry hint in analysis!.InlayHints)
             {
+                if (hint.Span.End < rangeStart || hint.Span.End > rangeEnd)
+                {
+                    continue;
+                }
+
                 hints.Add(new JsonObject
                 {
                     ["position"] = ToPosition(analysis.Snapshot.LineIndex, hint.Span.End),
@@ -610,6 +697,7 @@ public static class PscpLanguageServerHost
             };
         }
 
+        // Guide §12.2: quick fixes for the diagnostics in the requested range, as versioned document changes.
         private JsonNode HandleCodeAction(JsonElement @params)
         {
             if (!TryGetAnalysis(@params, out PscpAnalysisResult? analysis))
@@ -617,31 +705,135 @@ public static class PscpLanguageServerHost
                 return new JsonArray();
             }
 
+            JsonElement range = @params.GetProperty("range");
+            LineIndex lineIndex = analysis!.Snapshot.LineIndex;
+            int start = lineIndex.GetOffset(range.GetProperty("start").GetProperty("line").GetInt32(), range.GetProperty("start").GetProperty("character").GetInt32());
+            int end = lineIndex.GetOffset(range.GetProperty("end").GetProperty("line").GetInt32(), range.GetProperty("end").GetProperty("character").GetInt32());
             JsonArray actions = new();
-            foreach (PscpCodeActionEntry action in analysis!.CodeActions)
+            foreach (PscpQuickFix fix in PscpCodeActions.Compute(analysis, new TextSpan(start, Math.Max(0, end - start))))
             {
-                actions.Add(new JsonObject
+                JsonArray edits = new();
+                foreach (PscpTextEdit edit in fix.Edits)
                 {
-                    ["title"] = action.Title,
-                    ["kind"] = action.Kind,
+                    edits.Add(new JsonObject
+                    {
+                        ["range"] = ToRange(lineIndex, edit.Span),
+                        ["newText"] = edit.NewText,
+                    });
+                }
+
+                JsonObject action = new()
+                {
+                    ["title"] = fix.Title,
+                    ["kind"] = "quickfix",
+                    ["diagnostics"] = new JsonArray(ToLspDiagnostic(analysis, fix.Diagnostic)),
                     ["edit"] = new JsonObject
                     {
-                        ["changes"] = new JsonObject
+                        ["documentChanges"] = new JsonArray(new JsonObject
                         {
-                            [analysis.Snapshot.Uri.ToString()] = new JsonArray
+                            ["textDocument"] = new JsonObject
                             {
-                                new JsonObject
-                                {
-                                    ["range"] = ToRange(analysis.Snapshot.LineIndex, action.Span),
-                                    ["newText"] = action.ReplacementText,
-                                },
+                                ["uri"] = analysis.Snapshot.Uri.ToString(),
+                                ["version"] = analysis.Snapshot.Version,
                             },
-                        },
+                            ["edits"] = edits,
+                        }),
                     },
-                });
+                };
+                if (fix.IsPreferred)
+                {
+                    action["isPreferred"] = true;
+                }
+
+                actions.Add(action);
             }
 
             return actions;
+        }
+
+        // Guide §13.2: the C# `pscp transpile` would write for the latest analyzed version.
+        private JsonNode HandleGeneratedCSharp(JsonElement @params)
+        {
+            if (!TryGetAnalysis(@params, out PscpAnalysisResult? analysis) || analysis!.FrontEnd is null)
+            {
+                return new JsonObject();
+            }
+
+            bool Option(string name) => @params.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.True;
+            System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+            string className = Path.GetFileNameWithoutExtension(analysis.Snapshot.Uri.LocalPath);
+            TranspilationOptions options = new(
+                "Pscp.Generated",
+                new string(className.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray()) + "Program",
+                Option("verbose") ? HelperEmissionMode.Verbose : HelperEmissionMode.Compact,
+                Option("explain"),
+                Option("explain") ? analysis.Snapshot.Text : null,
+                Option("pretty"));
+            string? csharp = null;
+            try
+            {
+                csharp = PscpTranspiler.Generate(analysis.FrontEnd, options);
+            }
+            catch (Exception ex)
+            {
+                _log.WriteLine(ex.ToString());
+            }
+
+            JsonArray diagnostics = new();
+            foreach (PscpServerDiagnostic diagnostic in analysis.Diagnostics.Where(diagnostic => diagnostic.Severity == ServerDiagnosticSeverity.Error))
+            {
+                diagnostics.Add(ToLspDiagnostic(analysis, diagnostic));
+            }
+
+            return new JsonObject
+            {
+                ["uri"] = analysis.Snapshot.Uri.ToString(),
+                ["version"] = analysis.Snapshot.Version,
+                ["languageVersion"] = PscpVersionInfo.LanguageVersion,
+                ["toolVersion"] = PscpVersionInfo.ToolVersion,
+                ["csharp"] = csharp,
+                ["diagnostics"] = diagnostics,
+                ["elapsedMs"] = watch.ElapsedMilliseconds,
+            };
+        }
+
+        // Guide §6.3: the code links to its spec section; deprecated names and unnecessary code are tagged; the
+        // declaration a warning refers to is related information.
+        private static JsonObject ToLspDiagnostic(PscpAnalysisResult analysis, PscpServerDiagnostic diagnostic)
+        {
+            JsonObject result = new()
+            {
+                ["range"] = ToRange(analysis.Snapshot.LineIndex, diagnostic.Span),
+                ["severity"] = (int)diagnostic.Severity,
+                ["code"] = diagnostic.Code,
+                ["source"] = "pscp",
+                ["message"] = diagnostic.Message,
+            };
+
+            if (DiagnosticCodes.GetSpecLink(diagnostic.Code) is string link)
+            {
+                result["codeDescription"] = new JsonObject { ["href"] = link };
+            }
+
+            if (DiagnosticCodes.IsUnnecessary(diagnostic.Code) || DiagnosticCodes.IsDeprecation(diagnostic.Code))
+            {
+                result["tags"] = new JsonArray(DiagnosticCodes.IsUnnecessary(diagnostic.Code) ? 1 : 2);
+            }
+
+            if (diagnostic.RelatedSpan is TextSpan related)
+            {
+                result["relatedInformation"] = new JsonArray(new JsonObject
+                {
+                    ["location"] = new JsonObject
+                    {
+                        ["uri"] = analysis.Snapshot.Uri.ToString(),
+                        ["range"] = ToRange(analysis.Snapshot.LineIndex, related),
+                    },
+                    ["message"] = "declared here",
+                });
+            }
+
+            return result;
         }
 
         private async Task PublishDiagnosticsAsync(PscpAnalysisResult analysis, CancellationToken cancellationToken)
@@ -649,14 +841,7 @@ public static class PscpLanguageServerHost
             JsonArray diagnostics = new();
             foreach (PscpServerDiagnostic diagnostic in analysis.Diagnostics)
             {
-                diagnostics.Add(new JsonObject
-                {
-                    ["range"] = ToRange(analysis.Snapshot.LineIndex, diagnostic.Span),
-                    ["severity"] = (int)diagnostic.Severity,
-                    ["code"] = diagnostic.Code,
-                    ["source"] = "pscp",
-                    ["message"] = diagnostic.Message,
-                });
+                diagnostics.Add(ToLspDiagnostic(analysis, diagnostic));
             }
 
             await SendNotificationAsync(
@@ -817,12 +1002,20 @@ public static class PscpLanguageServerHost
             int previousIndex = tokenIndex >= 0 && analysis.Tokens[tokenIndex].Position >= offset
                 ? tokenIndex - 1
                 : tokenIndex;
+            bool statementStart = previousIndex < 0;
             while (previousIndex >= 0 && analysis.Tokens[previousIndex].Kind is TokenKind.NewLine or TokenKind.Semicolon)
             {
+                statementStart = true;
                 previousIndex--;
             }
 
-            if (previousIndex >= 0 && analysis.Tokens[previousIndex].Kind == TokenKind.Dot)
+            TokenKind previousKind = previousIndex >= 0 ? analysis.Tokens[previousIndex].Kind : TokenKind.NewLine;
+            if (previousKind is TokenKind.OpenBrace or TokenKind.Then or TokenKind.Else or TokenKind.Do)
+            {
+                statementStart = true;
+            }
+
+            if (previousKind == TokenKind.Dot)
             {
                 int receiverIndex = previousIndex - 1;
                 while (receiverIndex >= 0 && analysis.Tokens[receiverIndex].Kind is TokenKind.NewLine or TokenKind.Semicolon)
@@ -838,6 +1031,42 @@ public static class PscpLanguageServerHost
                 return Deduplicate(items);
             }
 
+            // A type is the only candidate after `new`, `:` (the declared type) and `<` (a type argument);
+            // guide §8.1.
+            if (previousKind is TokenKind.New or TokenKind.Colon)
+            {
+                AddTypeCompletions(analysis, offset, items);
+                return Deduplicate(items);
+            }
+
+            // Guide §8.1: after `is` a type, a constant and the pattern keywords are the candidates.
+            if (previousKind == TokenKind.Is)
+            {
+                AddTypeCompletions(analysis, offset, items);
+                AddKeywordCompletions(PscpIntrinsics.PatternKeywords, items);
+                return Deduplicate(items);
+            }
+
+            // Guide §8.1: only a namespace follows `using`.
+            if (previousKind == TokenKind.Using)
+            {
+                foreach (PscpCompletionEntry entry in PscpExternalMetadata.GetTopLevelCompletions().Where(entry => entry.Kind == 9))
+                {
+                    items.Add(entry.InGroup(PscpIntrinsics.SortDotNet));
+                }
+
+                return Deduplicate(items);
+            }
+
+            // Guide §8.1: the collection helper names are candidates as a pipe target and nowhere else.
+            if (previousKind is TokenKind.PipeGreater or TokenKind.LessPipe)
+            {
+                foreach (PscpCompletionEntry entry in PscpIntrinsics.CollectionMembers.Values)
+                {
+                    items.Add(entry.InGroup(PscpIntrinsics.SortIntrinsic));
+                }
+            }
+
             foreach (KeyValuePair<string, PscpCompletionEntry> intrinsic in PscpIntrinsics.Globals)
             {
                 items.Add(intrinsic.Value);
@@ -845,7 +1074,7 @@ public static class PscpLanguageServerHost
 
             foreach (PscpCompletionEntry entry in PscpExternalMetadata.GetTopLevelCompletions())
             {
-                items.Add(entry);
+                items.Add(entry.InGroup(PscpIntrinsics.SortDotNet));
             }
 
             foreach (KeyValuePair<string, PscpCompletionEntry> intrinsic in PscpIntrinsics.IntrinsicFunctions)
@@ -853,33 +1082,88 @@ public static class PscpLanguageServerHost
                 items.Add(intrinsic.Value);
             }
 
-            foreach (string keyword in PscpIntrinsics.Keywords.OrderBy(value => value, StringComparer.Ordinal))
+            AddKeywordCompletions(
+                statementStart
+                    ? PscpIntrinsics.StatementKeywords.Concat(PscpIntrinsics.ExpressionKeywords).ToArray()
+                    : PscpIntrinsics.ExpressionKeywords,
+                items);
+
+            if (statementStart && _supportsSnippets)
             {
-                items.Add(new PscpCompletionEntry(keyword, 14, "keyword", $"`{keyword}` keyword.", null, null, keyword));
+                items.AddRange(PscpIntrinsics.StatementSnippets);
             }
 
-            foreach (KeyValuePair<string, string> builtin in PscpIntrinsics.TypeCompletionDetails.OrderBy(pair => pair.Key, StringComparer.Ordinal))
-            {
-                items.Add(new PscpCompletionEntry(builtin.Key, 7, builtin.Value, "Built-in type.", null, null, builtin.Key));
-            }
-
-            foreach (PscpServerSymbol symbol in analysis.Symbols
-                .Where(symbol => symbol.DeclarationSpan.Start <= offset && symbol.Scope.Start <= offset && offset <= symbol.Scope.End)
-                .OrderBy(symbol => symbol.Name, StringComparer.Ordinal)
-                .ThenByDescending(symbol => symbol.Scope.Start))
-            {
-                items.Add(new PscpCompletionEntry(
-                    symbol.Name,
-                    ToCompletionKind(symbol.Kind),
-                    symbol.TypeDisplay,
-                    symbol.Documentation,
-                    null,
-                    null,
-                    symbol.Name));
-            }
-
+            AddTypeCompletions(analysis, offset, items);
+            AddSymbolCompletions(analysis, offset, items);
             return Deduplicate(items);
         }
+
+        private static void AddKeywordCompletions(IEnumerable<string> keywords, List<PscpCompletionEntry> items)
+        {
+            foreach (string keyword in keywords.OrderBy(value => value, StringComparer.Ordinal))
+            {
+                items.Add(new PscpCompletionEntry(keyword, 14, "keyword", $"`{keyword}` keyword.", null, null, PscpIntrinsics.SortKeyword + keyword));
+            }
+        }
+
+        private static void AddTypeCompletions(PscpAnalysisResult analysis, int offset, List<PscpCompletionEntry> items)
+        {
+            foreach (KeyValuePair<string, string> builtin in PscpIntrinsics.TypeCompletionDetails)
+            {
+                items.Add(new PscpCompletionEntry(builtin.Key, 7, builtin.Value, "Built-in type.", null, null, PscpIntrinsics.SortIntrinsic + builtin.Key));
+            }
+
+            foreach (PscpServerSymbol symbol in analysis.Symbols.Where(symbol => symbol.Kind is PscpServerSymbolKind.Type))
+            {
+                items.Add(SymbolCompletion(symbol, PscpIntrinsics.SortTopLevel));
+            }
+
+            foreach (PscpCompletionEntry entry in PscpExternalMetadata.GetTopLevelCompletions())
+            {
+                items.Add(entry.InGroup(PscpIntrinsics.SortDotNet));
+            }
+        }
+
+        // Guide §8.3: a local, a parameter or a local function comes first, the nearest scope first; a
+        // top-level symbol follows.
+        private static void AddSymbolCompletions(PscpAnalysisResult analysis, int offset, List<PscpCompletionEntry> items)
+        {
+            PscpServerSymbol[] visible = analysis.Symbols
+                .Where(symbol => symbol.DeclarationSpan.Start <= offset && symbol.Scope.Start <= offset && offset <= symbol.Scope.End)
+                .OrderByDescending(symbol => symbol.Scope.Start)
+                .ThenBy(symbol => symbol.Name, StringComparer.Ordinal)
+                .ToArray();
+
+            // The enclosing scopes, innermost first: the rank orders group 0 so that the nearest declaration
+            // of a shadowed name is offered first.
+            int[] scopeStarts = visible.Select(symbol => symbol.Scope.Start).Distinct().OrderByDescending(start => start).ToArray();
+            foreach (PscpServerSymbol symbol in visible)
+            {
+                if (IsTopLevelScope(analysis, symbol))
+                {
+                    items.Add(SymbolCompletion(symbol, PscpIntrinsics.SortTopLevel));
+                    continue;
+                }
+
+                int rank = Math.Min(Array.IndexOf(scopeStarts, symbol.Scope.Start), 99);
+                items.Add(SymbolCompletion(symbol, PscpIntrinsics.SortLocal + rank.ToString("D2", CultureInfo.InvariantCulture)));
+            }
+        }
+
+        private static bool IsTopLevelScope(PscpAnalysisResult analysis, PscpServerSymbol symbol)
+            => symbol.Scope.Start == 0 && symbol.Scope.End >= analysis.Snapshot.Text.Length;
+
+        private static PscpCompletionEntry SymbolCompletion(PscpServerSymbol symbol, string group)
+            => new(
+                symbol.Name,
+                ToCompletionKind(symbol.Kind),
+                symbol.TypeDisplay,
+                symbol.Documentation,
+                null,
+                null,
+                group + symbol.Name,
+                null,
+                symbol.TypeDisplay);
 
         private static IEnumerable<PscpCompletionEntry> GetMemberCompletions(PscpAnalysisResult analysis, int receiverIndex)
         {
@@ -926,25 +1210,26 @@ public static class PscpLanguageServerHost
             List<PscpCompletionEntry> members = [];
             members.AddRange(intrinsicMembers);
 
+            // Guide §8.3: field and property, then the PSCP member alias, then the .NET method.
+            if (instanceContext
+                && analysis.TypeMembers.TryGetValue(NormalizeTypeMemberReceiver(receiverName), out IReadOnlyDictionary<string, PscpServerSymbol>? userMembers))
+            {
+                members.AddRange(userMembers.Values.Select(symbol => SymbolCompletion(
+                    symbol,
+                    symbol.Kind is PscpServerSymbolKind.Property or PscpServerSymbolKind.Local
+                        ? PscpIntrinsics.SortTypeMember
+                        : PscpIntrinsics.SortTopLevel)));
+            }
+
             if (IsCollectionLikeReceiver(receiverName, instanceContext, analysis.Tokens[receiverIndex].Kind))
             {
                 members.AddRange(PscpIntrinsics.CollectionMembers.Values);
             }
 
-            if (instanceContext
-                && analysis.TypeMembers.TryGetValue(NormalizeTypeMemberReceiver(receiverName), out IReadOnlyDictionary<string, PscpServerSymbol>? userMembers))
+            foreach (PscpCompletionEntry entry in PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext))
             {
-                members.AddRange(userMembers.Values.Select(symbol => new PscpCompletionEntry(
-                    symbol.Name,
-                    ToCompletionKind(symbol.Kind),
-                    symbol.TypeDisplay,
-                    symbol.Documentation,
-                    null,
-                    null,
-                    symbol.Name)));
+                members.Add(entry.InGroup(entry.Kind is 5 or 10 ? PscpIntrinsics.SortTypeMember : PscpIntrinsics.SortDotNet));
             }
-
-            members.AddRange(PscpExternalMetadata.GetMemberCompletions(receiverName, instanceContext));
 
             if (ShouldOfferComparatorMembers(receiverName, instanceContext, receiverSymbol))
             {
@@ -1008,8 +1293,7 @@ public static class PscpLanguageServerHost
             }
 
             string normalized = PscpExternalMetadata.NormalizeTypeReceiver(receiverName);
-            return receiverName.EndsWith("[]", StringComparison.Ordinal)
-                || normalized is "Array" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet"
+            return normalized is "Array" or "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "SortedSet" or "SortedDictionary" or "Dictionary" or "String"
                 || normalized.StartsWith("IEnumerable", StringComparison.Ordinal);
         }
 

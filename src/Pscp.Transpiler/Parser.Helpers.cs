@@ -196,8 +196,19 @@ public sealed partial class Parser
         return node;
     }
 
+    // A second syntax error at the position of the previous one is its consequence and is not reported.
     private void AddDiagnostic(string code, string message, TextSpan span, DiagnosticSeverity severity = DiagnosticSeverity.Error)
-        => _diagnostics.Add(new Diagnostic(message, span, severity, code));
+    {
+        if (severity == DiagnosticSeverity.Error
+            && _diagnostics.Count > 0
+            && _diagnostics[^1] is { Severity: DiagnosticSeverity.Error } previous
+            && previous.Span.Start == span.Start)
+        {
+            return;
+        }
+
+        _diagnostics.Add(new Diagnostic(message, span, severity, code));
+    }
 
     private bool IsStatementTerminator(TokenKind kind)
         => kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.CloseBrace or TokenKind.EndOfFile;

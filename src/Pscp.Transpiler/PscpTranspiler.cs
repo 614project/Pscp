@@ -8,6 +8,8 @@ public sealed record PscpFrontEndResult(
     IReadOnlyList<Diagnostic> Diagnostics)
 {
     public bool Success => Diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Error);
+
+    internal SemanticAnalysisResult? Semantic { get; init; }
 }
 
 public static class PscpTranspiler
@@ -16,8 +18,17 @@ public static class PscpTranspiler
     {
         options ??= new TranspilationOptions();
         FrontEnd frontEnd = RunFrontEnd(source);
-        CSharpEmitter emitter = new(options, frontEnd.Semantic);
-        string csharp = emitter.Emit(frontEnd.Program);
+        string csharp;
+        try
+        {
+            csharp = new CSharpEmitter(options, frontEnd.Semantic).Emit(frontEnd.Program);
+        }
+        catch (Exception) when (frontEnd.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
+        {
+            // A program with errors is not compiled; its C# is only informative.
+            csharp = string.Empty;
+        }
+
         return new TranspilationResult(source, frontEnd.Program, csharp, frontEnd.Diagnostics);
     }
 
@@ -29,8 +40,15 @@ public static class PscpTranspiler
     public static PscpFrontEndResult Analyze(string source)
     {
         FrontEnd frontEnd = RunFrontEnd(source);
-        return new PscpFrontEndResult(frontEnd.Tokens, frontEnd.Program, frontEnd.Spans, frontEnd.Diagnostics);
+        return new PscpFrontEndResult(frontEnd.Tokens, frontEnd.Program, frontEnd.Spans, frontEnd.Diagnostics) { Semantic = frontEnd.Semantic };
     }
+
+    // C# for an analyzed source without analyzing it again (the language server's generated C# preview), or null
+    // when the source has errors.
+    public static string? Generate(PscpFrontEndResult frontEnd, TranspilationOptions? options = null)
+        => frontEnd.Success
+            ? new CSharpEmitter(options ?? new TranspilationOptions(), frontEnd.Semantic).Emit(frontEnd.Program)
+            : null;
 
     private sealed record FrontEnd(
         IReadOnlyList<Token> Tokens,
@@ -53,18 +71,56 @@ public static class PscpTranspiler
             .. parser.Diagnostics.Select(diagnostic => diagnostic.Code is null ? diagnostic with { Code = DiagnosticCodes.Syntax } : diagnostic),
         ];
 
+        // Guide §6.4: a syntax error does not hide the semantic diagnostics of the rest of the file. Semantic
+        // diagnostics on the lines of a syntax error are dropped, since they are usually its consequences.
         SemanticAnalysisResult? semantic = null;
-        if (diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Error))
+        Diagnostic[] syntaxErrors = diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
+        try
         {
             BindingResult binding = PscpBinder.Bind(program, parser.Spans);
             program = binding.Program;
-            diagnostics.AddRange(binding.Diagnostics);
-            semantic = PscpSemanticAnalyzer.Analyze(program, parser.Spans, binding.ConstantsUsedByTypes);
-            diagnostics.AddRange(semantic.Diagnostics);
+            SemanticAnalysisResult analysis = PscpSemanticAnalyzer.Analyze(program, parser.Spans, binding.ConstantsUsedByTypes);
+            IEnumerable<Diagnostic> semanticDiagnostics = binding.Diagnostics.Concat(analysis.Diagnostics);
+            if (syntaxErrors.Length > 0)
+            {
+                int[] lineStarts = GetLineStarts(source);
+                HashSet<int> brokenLines = syntaxErrors.Select(error => LineOf(lineStarts, error.Span.Start)).ToHashSet();
+                semanticDiagnostics = semanticDiagnostics.Where(diagnostic => !brokenLines.Contains(LineOf(lineStarts, diagnostic.Span.Start)));
+            }
+            else
+            {
+                semantic = analysis;
+            }
+
+            diagnostics.AddRange(semanticDiagnostics);
+        }
+        catch (Exception) when (syntaxErrors.Length > 0)
+        {
+            // A tree broken by syntax errors may not analyze; its syntax errors are still reported.
         }
 
         diagnostics.Sort((left, right) => left.Span.Start.CompareTo(right.Span.Start));
         return new FrontEnd(tokens, program, parser.Spans, semantic, Deduplicate(diagnostics));
+    }
+
+    private static int[] GetLineStarts(string source)
+    {
+        List<int> starts = [0];
+        for (int i = 0; i < source.Length; i++)
+        {
+            if (source[i] == '\n')
+            {
+                starts.Add(i + 1);
+            }
+        }
+
+        return starts.ToArray();
+    }
+
+    private static int LineOf(int[] lineStarts, int offset)
+    {
+        int index = Array.BinarySearch(lineStarts, offset);
+        return index >= 0 ? index : ~index - 1;
     }
 
     // The same message at the same place is reported once.

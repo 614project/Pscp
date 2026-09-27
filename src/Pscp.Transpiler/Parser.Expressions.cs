@@ -40,7 +40,7 @@ public sealed partial class Parser
                 DiagnosticCodes.TrailingAssignment,
                 "The value of `=` is missing. Only an input declaration such as `int n =` may end a line with `=`; wrap a long value in parentheses to continue it on the next line.",
                 operatorToken.Span);
-            return Mark(new AssignmentExpression(target, AssignmentOperator.Assign, new IdentifierExpression("default"), false), start);
+            return Mark(new AssignmentExpression(target, AssignmentOperator.Assign, new ErrorExpression(), false), start);
         }
 
         // Any other assignment operator at the end of a line continues the statement (spec §4.2 rule 2).
@@ -1126,7 +1126,7 @@ public sealed partial class Parser
                     Next();
                 }
 
-                return Mark(new IdentifierExpression(unexpected.Text.Length == 0 ? "default" : unexpected.Text), start);
+                return Mark(new ErrorExpression(), start);
         }
     }
 
@@ -1353,7 +1353,7 @@ public sealed partial class Parser
                 DiagnosticCodes.IfExpressionWithoutElse,
                 "An `if` used as a value needs an `else` branch: `if c then a else b`.",
                 ifToken.Span);
-            return new IfExpression(condition, thenExpression, new IdentifierExpression("default"));
+            return new IfExpression(condition, thenExpression, new ErrorExpression());
         }
 
         Next();

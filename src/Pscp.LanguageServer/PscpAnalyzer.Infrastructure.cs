@@ -113,6 +113,13 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.LessEqual:
                 case TokenKind.GreaterEqual:
                     state.MarkToken(i, "operator");
+                    // Guide §7.2: the PSCP-only operators explain their lowering. A data-structure rewrite
+                    // needs the receiver's static type, so it is filled in once the analysis knows it.
+                    if (PscpOperatorHovers.ForOperator(token.Kind) is { } operatorHover)
+                    {
+                        state.SetHover(i, operatorHover);
+                    }
+
                     break;
                 case TokenKind.Identifier when PscpIntrinsics.BuiltinTypes.Contains(token.Text):
                     state.MarkToken(i, "type", "defaultLibrary");
@@ -633,8 +640,8 @@ internal sealed class AnalyzerState
     public Scope CreateScope(Scope? parent, int startOffset, int endOffset)
         => new(parent, startOffset, endOffset);
 
-    public void AddDiagnostic(string code, string message, TextSpan span, ServerDiagnosticSeverity severity, string? relatedSymbolId = null)
-        => _diagnostics.Add(new PscpServerDiagnostic(code, message, span, severity, relatedSymbolId));
+    public void AddDiagnostic(string code, string message, TextSpan span, ServerDiagnosticSeverity severity, string? relatedSymbolId = null, TextSpan? relatedSpan = null)
+        => _diagnostics.Add(new PscpServerDiagnostic(code, message, span, severity, relatedSymbolId, relatedSpan));
 
     public bool HasDiagnosticOverlapping(TextSpan span)
         => _diagnostics.Any(existing => existing.Span.Start < Math.Max(span.End, span.Start + 1)
@@ -742,6 +749,18 @@ internal sealed class AnalyzerState
         }
     }
 
+    public bool TryGetSymbolAt(int tokenIndex, out PscpServerSymbol? symbol)
+    {
+        if (_tokenToSymbolId.TryGetValue(tokenIndex, out string? id))
+        {
+            symbol = _symbols.FirstOrDefault(candidate => candidate.Id == id);
+            return symbol is not null;
+        }
+
+        symbol = null;
+        return false;
+    }
+
     public void AddDocumentSymbol(PscpDocumentSymbol symbol)
         => _documentSymbols.Add(symbol);
 
@@ -753,6 +772,10 @@ internal sealed class AnalyzerState
 
     public void SetHover(int tokenIndex, string markdown)
         => _hoverByTokenIndex[tokenIndex] = new PscpHoverEntry(markdown);
+
+    // The token type already assigned to `tokenIndex`, so a later pass can add a modifier without changing it.
+    public string? ClassificationOf(int tokenIndex)
+        => _tokenClassifications.TryGetValue(tokenIndex, out TokenClassificationBuilder? builder) ? builder.TokenType : null;
 
     public void MarkToken(int tokenIndex, string tokenType, params string[] modifiers)
         => MarkToken(tokenIndex, tokenType, (IEnumerable<string>)modifiers);
