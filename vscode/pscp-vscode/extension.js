@@ -8,6 +8,7 @@ const PSCP_PROTOCOL_VERSION = 1;
 const EXPECTED_LANGUAGE_VERSION = '0.7';
 const GENERATED_SCHEME = 'pscp-generated';
 const PREVIEW_DEBOUNCE_MS = 300;
+const ANALYZING_INDICATOR_DELAY_MS = 300;
 const DEFAULT_SAMPLE_TIMEOUT_MS = 2000;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
@@ -82,11 +83,13 @@ function getServerFeatureSettings() {
   const config = vscode.workspace.getConfiguration('pscp');
   return {
     inlayHints: {
-      types: config.get('inlayHints.types') !== false,
-      parameterNames: config.get('inlayHints.parameterNames') !== false
+      inferredTypes: config.get('inlayHints.inferredTypes') !== false,
+      rewriteResults: config.get('inlayHints.rewriteResults') !== false,
+      accumulatorTypes: config.get('inlayHints.accumulatorTypes') !== false,
+      parameterNames: config.get('inlayHints.parameterNames') === true
     },
     hints: {
-      rewrite: config.get('hints.rewrite') !== false
+      loweringDiagnostics: config.get('hints.loweringDiagnostics') === true
     }
   };
 }
@@ -359,6 +362,38 @@ class FeatureRegistrations {
       }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }));
     }
 
+    if (capabilities.foldingRangeProvider) {
+      this.add(vscode.languages.registerFoldingRangeProvider(selector, {
+        provideFoldingRanges(document, contextInfo, token) {
+          return activeClient.request('textDocument/foldingRange', {
+            textDocument: toTextDocument(document)
+          }, token).then(fromFoldingRanges, fallbackProviderResult(output, 'folding ranges', []));
+        }
+      }));
+    }
+
+    if (capabilities.selectionRangeProvider) {
+      this.add(vscode.languages.registerSelectionRangeProvider(selector, {
+        provideSelectionRanges(document, positions, token) {
+          return activeClient.request('textDocument/selectionRange', {
+            textDocument: toTextDocument(document),
+            positions: positions.map(toPosition)
+          }, token).then(fromSelectionRanges, fallbackProviderResult(output, 'selection ranges', []));
+        }
+      }));
+    }
+
+    if (capabilities.documentHighlightProvider) {
+      this.add(vscode.languages.registerDocumentHighlightProvider(selector, {
+        provideDocumentHighlights(document, position, token) {
+          return activeClient.request('textDocument/documentHighlight', {
+            textDocument: toTextDocument(document),
+            position: toPosition(position)
+          }, token).then(fromDocumentHighlights, fallbackProviderResult(output, 'document highlights', []));
+        }
+      }));
+    }
+
     const legend = activeClient.semanticTokensLegend();
     if (legend) {
       this.add(vscode.languages.registerDocumentSemanticTokensProvider(selector, {
@@ -411,6 +446,8 @@ class PscpClient {
     this.serverInfo = {};
     this.pscpExperimental = {};
     this.readyListeners = [];
+    this.analyzingTimer = null;
+    this.lastAnalysisMs = null;
   }
 
   // Guide §11.1: the client must read the legend the server announced instead of keeping its own copy.
@@ -554,6 +591,10 @@ class PscpClient {
       clearTimeout(timer);
     }
     this.changeTimers.clear();
+    if (this.analyzingTimer) {
+      clearTimeout(this.analyzingTimer);
+      this.analyzingTimer = null;
+    }
 
     if (this.process) {
       this.process.kill();
@@ -800,6 +841,8 @@ class PscpClient {
 
     if (message.method === 'textDocument/publishDiagnostics') {
       this._handleDiagnostics(message.params);
+    } else if (message.method === 'pscp/status') {
+      this._handleStatus(message.params);
     } else if (message.method === 'window/logMessage' || message.method === 'window/showMessage') {
       const text = message.params && message.params.message ? message.params.message : JSON.stringify(message.params || {});
       this.output.appendLine(`Server: ${text}`);
@@ -827,6 +870,36 @@ class PscpClient {
       id: message.id,
       error: { code: -32601, message: `Method not found: ${message.method}` }
     });
+  }
+
+  // Guide §13.3: show progress only for an analysis that lasts longer than 300 ms, so a normal keystroke
+  // does not make the status bar flicker.
+  _handleStatus(params) {
+    const state = params && params.state;
+    if (state === 'analyzing') {
+      if (!this.analyzingTimer) {
+        this.analyzingTimer = setTimeout(() => {
+          this.analyzingTimer = null;
+          this._setStatus('analyzing');
+        }, ANALYZING_INDICATOR_DELAY_MS);
+      }
+
+      return;
+    }
+
+    if (this.analyzingTimer) {
+      clearTimeout(this.analyzingTimer);
+      this.analyzingTimer = null;
+    }
+
+    if (state === 'error') {
+      this.output.appendLine(`Analysis failed: ${(params && params.message) || 'unknown error'}`);
+      this._setStatus('warning');
+      return;
+    }
+
+    this.lastAnalysisMs = params && typeof params.analysisMs === 'number' ? params.analysisMs : this.lastAnalysisMs;
+    this._setStatus(this.versionWarning ? 'warning' : 'ready');
   }
 
   _handleDiagnostics(params) {
@@ -862,11 +935,15 @@ class PscpClient {
       this.status.tooltip = [
         `Server: ${this.serverPath || 'resolved automatically'}`,
         `Tool version: ${this.toolVersion || 'unknown'}`,
-        `Language version: ${version || 'unknown'}`
+        `Language version: ${version || 'unknown'}`,
+        this.lastAnalysisMs === null ? 'Not analysed yet' : `Last analysis: ${this.lastAnalysisMs} ms`
       ].join('\n');
     } else if (state === 'starting') {
       this.status.text = '$(sync~spin) PSCP';
       this.status.tooltip = 'Starting PSCP language server.';
+    } else if (state === 'analyzing') {
+      this.status.text = '$(sync~spin) PSCP';
+      this.status.tooltip = 'Analyzing the current PSCP file.';
     } else if (state === 'warning') {
       this.status.text = `$(warning) PSCP ${this.languageVersion || ''}`.trim();
       this.status.tooltip = this.versionWarning || 'The PSCP language server version does not match the extension.';
@@ -1923,6 +2000,55 @@ function fromCodeActions(result) {
 
     return action;
   });
+}
+
+function fromFoldingRanges(result) {
+  if (!Array.isArray(result)) {
+    return [];
+  }
+
+  return result.map((range) => new vscode.FoldingRange(
+    range.startLine,
+    range.endLine,
+    range.kind === 'comment' ? vscode.FoldingRangeKind.Comment
+      : range.kind === 'imports' ? vscode.FoldingRangeKind.Imports
+        : range.kind === 'region' ? vscode.FoldingRangeKind.Region
+          : undefined
+  ));
+}
+
+function fromSelectionRanges(result) {
+  if (!Array.isArray(result)) {
+    return [];
+  }
+
+  // The server sends each chain innermost-first with a `parent` link; vscode.SelectionRange nests the same way.
+  return result.map((node) => {
+    const chain = [];
+    for (let current = node; current; current = current.parent) {
+      chain.push(fromRange(current.range));
+    }
+
+    let selection;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      selection = new vscode.SelectionRange(chain[i], selection);
+    }
+
+    return selection;
+  }).filter((selection) => selection !== undefined);
+}
+
+function fromDocumentHighlights(result) {
+  if (!Array.isArray(result)) {
+    return [];
+  }
+
+  return result.map((highlight) => new vscode.DocumentHighlight(
+    fromRange(highlight.range),
+    highlight.kind === 3 ? vscode.DocumentHighlightKind.Write
+      : highlight.kind === 1 ? vscode.DocumentHighlightKind.Text
+        : vscode.DocumentHighlightKind.Read
+  ));
 }
 
 function fromSemanticTokens(result) {

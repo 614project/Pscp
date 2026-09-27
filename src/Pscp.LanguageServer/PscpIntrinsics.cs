@@ -179,7 +179,8 @@ internal static class PscpIntrinsics
                 IntrinsicDocKind.StdoutMember => $"stdout.{doc.Name}",
                 _ => doc.Name,
             };
-            signatures.TryAdd(key, new PscpSignatureEntry(FirstForm(doc.Signature), doc.Parameters, doc.Summary));
+            // Guide §9.4: every overload the catalog lists is offered, not just the first form.
+            signatures.TryAdd(key, PscpSignatureEntry.FromSignature(doc.Signature, doc.Summary));
         }
 
         return signatures;

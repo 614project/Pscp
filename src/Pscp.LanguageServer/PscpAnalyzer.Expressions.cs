@@ -308,6 +308,10 @@ internal sealed partial class PscpAnalyzer
                 state.MarkToken(tokenIndex, "variable");
             }
 
+            // The analysis is a single pass, so a name declared further down the file is not in its scope
+            // yet. Spec §7.3 and §10.2 make a top-level binding and a local function visible regardless of
+            // order, so the token is retried once the whole file has been walked (guide §10.1).
+            state.AddPendingResolution(tokenIndex, scope);
             return;
         }
 

@@ -158,20 +158,11 @@
           "default": "off",
           "description": "How much LSP traffic to write to the PSCP Language Server output channel."
         },
-        "pscp.inlayHints.types": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the inferred type of a `let`/`var` binding as an inlay hint."
-        },
         "pscp.inlayHints.parameterNames": {
           "type": "boolean",
-          "default": true,
-          "description": "Show parameter names at call sites as inlay hints."
-        },
-        "pscp.hints.rewrite": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the .NET method a data-structure rewrite operator calls."
+          "default": false,
+          "scope": "resource",
+          "description": "Show parameter names before literal arguments in calls that take three or more."
         },
         "pscp.samples.configuration": {
           "type": "string",
@@ -205,6 +196,30 @@
           "type": "boolean",
           "default": false,
           "description": "Annotate the generated C# preview with the lowering each construct went through."
+        },
+        "pscp.inlayHints.inferredTypes": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show the inferred type of a `let`/`var` binding after its name."
+        },
+        "pscp.inlayHints.rewriteResults": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show the result type of a data-structure rewrite that is used as a value, such as `visited += x` inside a condition."
+        },
+        "pscp.inlayHints.accumulatorTypes": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show the widened accumulation type when `sum`, `sumBy` or an integer `pow` accumulates in a wider type (spec §22.6)."
+        },
+        "pscp.hints.loweringDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Report the lowering information diagnostics (PSCP51xx), such as which bindings become `const`."
         }
       }
     },

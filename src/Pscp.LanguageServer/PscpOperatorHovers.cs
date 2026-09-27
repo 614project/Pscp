@@ -102,6 +102,84 @@ internal static class PscpOperatorHovers
             : Hover($"{shape}      // {typeDisplay}", meaning, $"x.{member}", "26 자료구조 연산자 rewrite", "26-자료구조-연산자-rewrite");
     }
 
+    // The .NET return type of the rewrite, or null when the operator has no rewrite for that type.
+    public static string? RewriteResultType(TokenKind kind, string? typeDisplay)
+    {
+        if (typeDisplay is null)
+        {
+            return null;
+        }
+
+        string name = typeDisplay.Split('<', 2)[0].Split('.')[^1];
+        if (!RewriteTable.TryGetValue(name, out (string? Add, string? Remove, string? Peek, string? Take) entry))
+        {
+            return null;
+        }
+
+        string? member = kind switch
+        {
+            TokenKind.PlusEqual => entry.Add,
+            TokenKind.MinusEqual => entry.Remove,
+            TokenKind.Tilde => entry.Peek,
+            TokenKind.MinusMinus => entry.Take,
+            _ => null,
+        };
+
+        if (member is null)
+        {
+            return null;
+        }
+
+        // `Add(v)` : `bool` carries the result type after the marker; `Peek()` and `Dequeue()` yield the
+        // element type, which the receiver's type argument names.
+        int marker = member.IndexOf("` : `", StringComparison.Ordinal);
+        if (marker >= 0)
+        {
+            return member[(marker + 5)..];
+        }
+
+        return ElementType(typeDisplay, name);
+    }
+
+    private static string? ElementType(string typeDisplay, string name)
+    {
+        int open = typeDisplay.IndexOf('<');
+        if (open < 0 || !typeDisplay.EndsWith('>'))
+        {
+            return null;
+        }
+
+        string[] arguments = SplitTypeArguments(typeDisplay[(open + 1)..^1]);
+        // `PriorityQueue<E, P>` peeks and dequeues the element, not the priority.
+        return arguments.Length == 0 ? null : arguments[0];
+    }
+
+    private static string[] SplitTypeArguments(string text)
+    {
+        List<string> parts = [];
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (text[i] is '<' or '(')
+            {
+                depth++;
+            }
+            else if (text[i] is '>' or ')')
+            {
+                depth--;
+            }
+            else if (text[i] == ',' && depth == 0)
+            {
+                parts.Add(text[start..i].Trim());
+                start = i + 1;
+            }
+        }
+
+        parts.Add(text[start..].Trim());
+        return parts.ToArray();
+    }
+
     private static string Hover(string shape, string meaning, string lowering, string section, string anchor)
         => $"```pscp\n{shape}\n```\n\n{meaning}\n\n→ C#: `{lowering}`\n\n[Spec §{section}]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString(anchor)})";
 }

@@ -1201,6 +1201,9 @@ internal static class TestRunner
         await VerifyLanguageServerLoopBlockAndIndexerDiagnosticsAsync(failures);
         await VerifyLanguageServerCollectionMutationAndNullableLoopAsync(failures);
         await VerifyLanguageServerRecordCollectionInferenceAndRenameAsync(failures);
+        await VerifyLanguageServerOutlineAndNavigationAsync(failures);
+        await VerifyLanguageServerSpaceCallSignatureHelpAsync(failures);
+        await VerifyLanguageServerRenameRefusalsAsync(failures);
 
         if (failures.Count > 0)
         {
@@ -2524,6 +2527,158 @@ internal static class TestRunner
             "`stdin` has no member `read`.");
     }
 
+    // Guide §10.1 and §10.4: the outline nests and carries the right kinds, and a name used before its
+    // declaration still resolves.
+    private static async Task VerifyLanguageServerOutlineAndNavigationAsync(List<string> failures)
+    {
+        const string source = """
+            let MOD = 1000000007
+
+            record struct Point(int x, int y)
+
+            int n =
+
+            rec int find(int v) {
+                if v == 0 then v
+                else parent[v]
+            }
+
+            int[] parent = [0..<n]
+
+            int solve(int v) {
+                int inner(int w) { w * 2 }
+                inner(v)
+            }
+
+            += find n + solve n + MOD + parent[0]
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        _ = await session.ReadDiagnosticsAsync();
+
+        using JsonDocument outline = await session.RequestAsync("textDocument/documentSymbol", string.Empty);
+        Dictionary<string, (int Kind, string[] Children)> symbols = new(StringComparer.Ordinal);
+        foreach (JsonElement symbol in outline.RootElement.GetProperty("result").EnumerateArray())
+        {
+            symbols[symbol.GetProperty("name").GetString()!] = (
+                symbol.GetProperty("kind").GetInt32(),
+                symbol.GetProperty("children").EnumerateArray().Select(child => child.GetProperty("name").GetString()!).ToArray());
+        }
+
+        // Constant (14), Struct (23), Variable (13), Function (12).
+        foreach ((string name, int kind) in new[] { ("MOD", 14), ("Point", 23), ("n", 13), ("find", 12), ("solve", 12) })
+        {
+            if (!symbols.TryGetValue(name, out (int Kind, string[] Children) entry))
+            {
+                failures.Add($"LanguageServerOutline: `{name}` missing from the outline (found {string.Join(", ", symbols.Keys)}).");
+            }
+            else if (entry.Kind != kind)
+            {
+                failures.Add($"LanguageServerOutline: `{name}` has kind {entry.Kind}, expected {kind}.");
+            }
+        }
+
+        if (symbols.TryGetValue("Point", out (int Kind, string[] Children) point)
+            && !(point.Children.Contains("x") && point.Children.Contains("y")))
+        {
+            failures.Add($"LanguageServerOutline: `Point` children are [{string.Join(", ", point.Children)}], expected x and y.");
+        }
+
+        if (symbols.TryGetValue("solve", out (int Kind, string[] Children) solve) && !solve.Children.Contains("inner"))
+        {
+            failures.Add($"LanguageServerOutline: local function `inner` is not a child of `solve` (children: {string.Join(", ", solve.Children)}).");
+        }
+
+        // `parent` is declared below `find`, and the spec makes it visible inside it (§7.3).
+        using JsonDocument definition = await session.RequestAsync(
+            "textDocument/definition",
+            ",\"position\":{\"line\":8,\"character\":9}");
+        if (!definition.RootElement.TryGetProperty("result", out JsonElement target) || target.ValueKind == JsonValueKind.Null)
+        {
+            failures.Add("LanguageServerOutline: a forward reference to the top-level `parent` did not resolve.");
+        }
+    }
+
+    // Guide §9: space-call signature help, with the overload and the active parameter the spec's argument
+    // grouping implies.
+    private static async Task VerifyLanguageServerSpaceCallSignatureHelpAsync(List<string> failures)
+    {
+        const string source = """
+            int a, b, lo, hi =
+            let c = clamp a lo hi
+            let d = max (a, b) lo
+            += c + d
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        _ = await session.ReadDiagnosticsAsync();
+
+        async Task<(string Label, int Active)> HelpAsync(int line, int character)
+        {
+            using JsonDocument response = await session.RequestAsync(
+                "textDocument/signatureHelp",
+                $",\"position\":{{\"line\":{line},\"character\":{character}}}");
+            if (!response.RootElement.TryGetProperty("result", out JsonElement result) || result.ValueKind == JsonValueKind.Null)
+            {
+                return (string.Empty, -1);
+            }
+
+            int active = result.GetProperty("activeSignature").GetInt32();
+            return (result.GetProperty("signatures")[active].GetProperty("label").GetString() ?? string.Empty,
+                result.GetProperty("activeParameter").GetInt32());
+        }
+
+        (string Label, int Active) clamp = await HelpAsync(1, 19);
+        if (clamp.Label != "clamp(x, lo, hi)" || clamp.Active != 2)
+        {
+            failures.Add($"LanguageServerSpaceCallSignatureHelp: `clamp a lo ` gave ({clamp.Label}, {clamp.Active}), expected (clamp(x, lo, hi), 2).");
+        }
+
+        (string Label, int Active) max = await HelpAsync(2, 19);
+        if (max.Label != "max(a, b, ...)" || max.Active != 2)
+        {
+            failures.Add($"LanguageServerSpaceCallSignatureHelp: `max (a, b) ` gave ({max.Label}, {max.Active}), expected (max(a, b, ...), 2).");
+        }
+    }
+
+    // Guide §10.3: a rename that would collide, or a new name that is not a legal identifier, is refused with
+    // a reason rather than silently doing nothing.
+    private static async Task VerifyLanguageServerRenameRefusalsAsync(List<string> failures)
+    {
+        const string source = """
+            int n =
+            let xs = [1, 2, 3]
+            += n + xs.sum()
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        _ = await session.ReadDiagnosticsAsync();
+
+        async Task<string?> RefusalAsync(string newName)
+        {
+            using JsonDocument response = await session.RequestAsync(
+                "textDocument/rename",
+                $",\"position\":{{\"line\":1,\"character\":5}},\"newName\":\"{newName}\"");
+            return response.RootElement.TryGetProperty("error", out JsonElement error)
+                ? error.GetProperty("message").GetString()
+                : null;
+        }
+
+        foreach (string rejected in new[] { "n", "then", "__pscpX" })
+        {
+            if (await RefusalAsync(rejected) is null)
+            {
+                failures.Add($"LanguageServerRenameRefusals: renaming `xs` to `{rejected}` was accepted.");
+            }
+        }
+
+        // Shadowing an intrinsic is allowed; it only raises the PSCP5001 information diagnostic.
+        if (await RefusalAsync("sum") is string refusal)
+        {
+            failures.Add($"LanguageServerRenameRefusals: renaming `xs` to `sum` was refused: {refusal}");
+        }
+    }
+
     private static async Task VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(List<string> failures)
     {
         const string source = """
@@ -3138,7 +3293,7 @@ internal static class TestRunner
 
             LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.4\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
-            _ = await session.ReadMessageAsync();
+            _ = await session.ReadResponseAsync(1);
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");
             return session;
@@ -3146,16 +3301,36 @@ internal static class TestRunner
 
         public async Task<IReadOnlyList<string>> ReadDiagnosticsAsync()
         {
-            JsonDocument message = await ReadMessageAsync();
-            JsonElement diagnostics = message.RootElement.GetProperty("params").GetProperty("diagnostics");
-            List<string> results = [];
-            foreach (JsonElement diagnostic in diagnostics.EnumerateArray())
+            // The server also sends `pscp/status` around each analysis (guide §13.3); skip to the diagnostics.
+            while (true)
             {
-                results.Add(diagnostic.GetProperty("message").GetString() ?? string.Empty);
-            }
+                JsonDocument message = await ReadMessageAsync();
+                if (message.RootElement.TryGetProperty("method", out JsonElement method)
+                    && method.GetString() != "textDocument/publishDiagnostics")
+                {
+                    message.Dispose();
+                    continue;
+                }
 
-            message.Dispose();
-            return results;
+                JsonElement diagnostics = message.RootElement.GetProperty("params").GetProperty("diagnostics");
+                List<string> results = [];
+                foreach (JsonElement diagnostic in diagnostics.EnumerateArray())
+                {
+                    results.Add(diagnostic.GetProperty("message").GetString() ?? string.Empty);
+                }
+
+                message.Dispose();
+                return results;
+            }
+        }
+
+        // A raw request, for the features whose results the other helpers do not shape.
+        public async Task<JsonDocument> RequestAsync(string method, string paramsJson)
+        {
+            int id = _nextRequestId++;
+            await SendAsync("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"" + method
+                + "\",\"params\":{\"textDocument\":{\"uri\":\"" + _uri + "\"}" + paramsJson + "}}");
+            return await ReadResponseAsync(id);
         }
 
         public async Task<IReadOnlyList<string>> RequestCompletionLabelsAsync(int line, int character)
@@ -3165,7 +3340,7 @@ internal static class TestRunner
                 + ",\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"" + _uri
                 + "\"},\"position\":{\"line\":" + line + ",\"character\":" + character + "}}}";
             await SendAsync(request);
-            JsonDocument response = await ReadMessageAsync();
+            JsonDocument response = await ReadResponseAsync(id);
             List<string> labels = [];
             foreach (JsonElement item in response.RootElement.GetProperty("result").GetProperty("items").EnumerateArray())
             {
@@ -3184,7 +3359,7 @@ internal static class TestRunner
                 + "\"},\"position\":{\"line\":" + line + ",\"character\":" + character
                 + "},\"newName\":\"" + JsonEncodedText.Encode(newName) + "\"}}";
             await SendAsync(request);
-            JsonDocument response = await ReadMessageAsync();
+            JsonDocument response = await ReadResponseAsync(id);
             int count = 0;
             if (response.RootElement.TryGetProperty("result", out JsonElement result)
                 && result.ValueKind == JsonValueKind.Object
@@ -3205,7 +3380,7 @@ internal static class TestRunner
                 + ",\"method\":\"textDocument/inlayHint\",\"params\":{\"textDocument\":{\"uri\":\"" + _uri
                 + "\"},\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":200,\"character\":0}}}}";
             await SendAsync(request);
-            JsonDocument response = await ReadMessageAsync();
+            JsonDocument response = await ReadResponseAsync(id);
             List<string> labels = [];
             if (response.RootElement.TryGetProperty("result", out JsonElement result)
                 && result.ValueKind == JsonValueKind.Array)
@@ -3231,8 +3406,9 @@ internal static class TestRunner
         {
             try
             {
-                await SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{_nextRequestId++},\"method\":\"shutdown\",\"params\":{{}}}}");
-                JsonDocument response = await ReadMessageAsync();
+                int shutdownId = _nextRequestId++;
+                await SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{shutdownId},\"method\":\"shutdown\",\"params\":{{}}}}");
+                JsonDocument response = await ReadResponseAsync(shutdownId);
                 response.Dispose();
                 await SendAsync("""{"jsonrpc":"2.0","method":"exit","params":{}}""");
             }
@@ -3254,6 +3430,23 @@ internal static class TestRunner
             byte[] body = Encoding.UTF8.GetBytes(json);
             await _writer.WriteAsync($"Content-Length: {body.Length}\r\n\r\n{json}");
             await _writer.FlushAsync();
+        }
+
+        // A notification (`pscp/status`, `publishDiagnostics`) can arrive before the response, so skip to it.
+        public async Task<JsonDocument> ReadResponseAsync(int id)
+        {
+            while (true)
+            {
+                JsonDocument message = await ReadMessageAsync();
+                if (message.RootElement.TryGetProperty("id", out JsonElement responseId)
+                    && responseId.ValueKind == JsonValueKind.Number
+                    && responseId.GetInt32() == id)
+                {
+                    return message;
+                }
+
+                message.Dispose();
+            }
         }
 
         private async Task<JsonDocument> ReadMessageAsync()

@@ -8,7 +8,10 @@
 - 진단: 진단 코드(`PSCP2108` 등), 스펙 링크, 선언 위치 연결, 폐기 예정 이름 취소선
 - 자동완성: 문맥별 후보, 그룹 정렬(지역 → 타입 멤버 → 최상위 → intrinsic → .NET → 키워드), `labelDetails`, 스니펫
 - hover: 낮아지는 C#까지 보여 줍니다. `:=`, `|>`, `<|`, `<=>`, range, `->`, 자료구조 rewrite(`+=`, `-=`, `~`, 전위 `--`), 입출력 shorthand, 바인딩의 `const` 여부
-- definition / references / document symbols / signature help / rename / inlay hints
+- definition / references / rename / signature help (space-call 포함, 오버로드와 활성 매개변수 강조)
+- 계층형 문서 기호(개요): 타입 아래 필드·속성·메서드, 함수 아래 로컬 함수
+- 접기(`{ }`, 여러 줄 괄호, 연속된 `using`과 주석, `// #region`), 선택 범위 확장, 문서 강조(읽기/쓰기 구분)
+- inlay hints: 추론 타입, 값으로 쓰인 자료구조 rewrite의 결과 타입
 - semantic tokens: legend는 서버가 알려 주는 것을 씁니다. PSCP 전용 수식어 `mutable`, `intrinsic`, `shorthand`, `rewrite`를 테마에서 꾸밀 수 있습니다
 - 빠른 수정: `mut`으로 선언, `rec` 추가/제거, `:=`로 바꾸기, `..<`/`..=` 고르기, `string.asc` 넘기기, 폐기 예정 이름 바꾸기, `foreach` → `for x in xs`
 
@@ -44,12 +47,18 @@
 | `pscp.samples.floatTolerance` | 없음 | 실수 비교 허용 오차 |
 | `pscp.preview.pretty` | 켜짐 | 생성 C# 미리보기를 정렬합니다 |
 | `pscp.preview.explain` | 꺼짐 | 미리보기에 lowering 설명을 붙입니다 |
-| `pscp.inlayHints.types` | 켜짐 | `let`/`var` 바인딩의 추론 타입 |
-| `pscp.inlayHints.parameterNames` | 켜짐 | 호출 위치의 매개변수 이름 |
-| `pscp.hints.rewrite` | 켜짐 | 자료구조 rewrite가 부르는 .NET 메서드 |
+| `pscp.inlayHints.inferredTypes` | 켜짐 | `let`/`var` 바인딩의 추론 타입 |
+| `pscp.inlayHints.rewriteResults` | 켜짐 | 값으로 쓰인 자료구조 rewrite의 결과 타입 |
+| `pscp.inlayHints.accumulatorTypes` | 켜짐 | 넓혀서 누산할 때의 누산 타입 |
+| `pscp.inlayHints.parameterNames` | 꺼짐 | 인자가 3개 이상인 호출의 매개변수 이름 |
+| `pscp.hints.loweringDiagnostics` | 꺼짐 | lowering 정보 진단(`PSCP51xx`) |
 | `pscp.trace.server` | `off` | LSP 통신 기록 (`off` / `messages` / `verbose`) |
 
 서버 기능 설정(`pscp.inlayHints.*`, `pscp.hints.*`)은 서버를 재시작하지 않고 `workspace/didChangeConfiguration`으로 전달합니다. 서버 실행 설정(경로, 인자)이 바뀌면 서버를 다시 시작합니다.
+
+## 분석 상태
+
+서버는 분석을 시작할 때와 끝낼 때 `pscp/status` 알림을 보냅니다. 상태 표시줄은 분석이 300 ms를 넘길 때만 진행 표시를 켜므로 타이핑할 때마다 깜빡이지 않습니다. 타이핑 도중 온 편집은 하나로 합쳐져 분석이 한 번만 돌고, 편집기가 요청을 취소하면 서버가 `RequestCancelled`로 답하고 그 일을 하지 않습니다.
 
 ## 언어 서버 연결 순서
 
