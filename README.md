@@ -2,6 +2,8 @@
 
 PSCP 언어를 제공하기 위한 도구들(트랜스파일러, 언어 서버, 확장 등)이 준비되어 있는 저장소입니다.
 
+현재 언어 버전은 **0.7**이고 도구 버전은 **0.7.0**입니다. 규범 문서는 [`docs/pscp_v_0_7_spec.md`](docs/pscp_v_0_7_spec.md)이며, 0.6에서 무엇이 바뀌었는지는 [`docs/pscp_v_0_7_changes.md`](docs/pscp_v_0_7_changes.md)에 있습니다.
+
 ## 🚀 PSCP 언어 소개
 
 **PSCP**는 알고리즘 문제 해결(PS)과 경쟁 프로그래밍(CP)에 최적화된 새로운 프로그래밍 언어입니다.
@@ -148,7 +150,12 @@ query -> q {
 - `vscode/pscp-vscode`: VS Code 확장
 - `vscode/Build-Vsix.ps1`: VSIX 빌드 스크립트
 - `installer/Build-Installer.ps1`: 설치기 빌드 스크립트
+- `tests/TestCodes/v0.7`: v0.7 적합성 프로그램 (`.pscp` / `.in` / `.out`)
 - `docs` : 언어 및 서버 관련 문서
+  - `docs/pscp_v_0_7_spec.md`: 언어 스펙 (규범). 진단 목록은 부록 B
+  - `docs/pscp_v_0_7_changes.md`: 0.6 대비 변경 항목 해설
+  - `docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md`: 언어 서버와 VS Code 확장의 계약
+  - `docs/deprecated`: 이전 버전 문서
 
 ## 빠른 SDK 빌드
 
@@ -202,13 +209,37 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- run .\sample\main.pscp --st
 
 ```text
 pscp init [directory] [--force]
-pscp check [file.pscp]
-pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--large-stack]
-pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
-pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--compact|--verbose] [--pretty] [--large-stack]
+pscp check [file.pscp] [--json]
+pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack]
+pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]
+pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]
+pscp test [file.pscp] [--json] [-c Debug|Release] [--timeout ms] [--float-tolerance eps]
 pscp lsp
 pscp version
 ```
+
+### 진단
+
+진단마다 코드가 붙습니다(`PSCP2108` 등). 코드 범위는 스펙 [부록 B](docs/pscp_v_0_7_spec.md)에 있습니다.
+
+```text
+2:1: warning PSCP2108: `y` is immutable but is modified here. Declare it with `mut` or `var` to make the mutation explicit.
+```
+
+`pscp check --json`은 편집기나 CI가 읽기 좋은 형태로 같은 진단을 내보냅니다. 각 항목에 코드, 범위, 심각도, 스펙 절 링크(`codeDescription`), 태그, 관련 위치(`relatedInformation`)가 들어갑니다.
+
+### 샘플 실행 (`pscp test`)
+
+`dir/name.pscp`의 샘플은 같은 폴더의 `name.in`/`name.out`과 `name.<k>.in`/`name.<k>.out` 쌍입니다. `pscp test`는 **한 번만 빌드**하고 샘플을 모두 실행해 기대 출력과 비교합니다.
+
+```powershell
+pscp test                 # 현재 폴더의 main.pscp
+pscp test code.pscp --json
+```
+
+비교할 때 줄 끝 `\r\n`은 `\n`으로 바꾸고, 줄 끝 공백과 끝의 빈 줄은 무시합니다. `--float-tolerance`를 주면 같은 자리의 실수 토큰을 그 오차 안에서 같다고 봅니다.
+
+종료 코드는 모두 통과하면 `0`, 하나라도 실패하면 `1`, 빌드 실패면 `2`입니다. `--json`은 빌드 결과와 샘플별 `status`(`passed`, `failed`, `error`, `timeout`, `noExpected`)를 냅니다.
 
 기본적으로 생성된 `Main`은 `Run()`을 메인 스레드에서 바로 호출합니다. 대부분의 온라인 저지는 메인 스레드에 넉넉한 스택을 주기 때문입니다. 로컬 환경(Windows 기본 1MB 등)에서 깊은 재귀가 필요하면 `--large-stack`을 붙이세요. 그러면 프로그램 본문이 256MB 스택 스레드에서 실행됩니다.
 
@@ -288,7 +319,7 @@ artifacts/linux/<runtime>/pscp-sdk_<version>_<runtime>.tar.gz
 Debian/Ubuntu 계열에서는 `.deb`를 설치합니다.
 
 ```bash
-sudo apt install ./artifacts/linux/linux-x64/pscp_0.6.7_amd64.deb
+sudo apt install ./artifacts/linux/linux-x64/pscp_0.7.0_amd64.deb
 pscp version
 ```
 
@@ -306,7 +337,7 @@ pscp version
 릴리즈 방법:
 
 1. `src/Pscp.Transpiler/Syntax.cs`의 `ToolVersion`을 올리고 main에 병합합니다.
-2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.6.8 && git push origin v0.6.8`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
+2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.7.1 && git push origin v0.7.1`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
 
 태그와 `ToolVersion`이 다르면 릴리즈는 실패합니다. 이미 다른 커밋을 가리키는 태그로 수동 실행해도 실패합니다. `-`가 들어간 버전(예: `0.7.0-beta.1`)은 pre-release로 올라가고, 같은 태그로 다시 실행하면 기존 릴리즈의 파일을 교체합니다.
 
@@ -339,13 +370,13 @@ powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
 생성 위치:
 
 ```text
-artifacts\vscode\local.pscp-vscode-0.6.7.vsix
+artifacts\vscode\local.pscp-vscode-0.7.0.vsix
 ```
 
 설치 방법:
 
 ```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.6.7.vsix
+code --install-extension .\artifacts\vscode\local.pscp-vscode-0.7.0.vsix
 ```
 
 또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.
