@@ -423,11 +423,20 @@ public static class PscpLanguageServerHost
             {
                 JsonObject? labelDetails = !_supportsLabelDetails || (entry.LabelDetail is null && entry.LabelDescription is null)
                     ? null
-                    : new JsonObject
+                    : new JsonObject();
+                if (labelDetails is not null)
+                {
+                    if (entry.LabelDetail is not null)
                     {
-                        ["detail"] = entry.LabelDetail,
-                        ["description"] = entry.LabelDescription,
-                    };
+                        labelDetails["detail"] = entry.LabelDetail;
+                    }
+
+                    if (entry.LabelDescription is not null)
+                    {
+                        labelDetails["description"] = entry.LabelDescription;
+                    }
+                }
+
                 // Guide §8.4: a snippet goes out only when the client asked for one.
                 bool snippet = entry.InsertTextFormat == 2;
                 string? insertText = snippet && !_supportsSnippets ? null : entry.InsertText;

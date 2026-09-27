@@ -1,8 +1,8 @@
 {
   "name": "pscp-vscode",
   "displayName": "PSCP",
-  "description": "VS Code support for the PSCP programming language.",
-  "version": "0.6.7",
+  "description": "VS Code support for the PSCP programming language (language version 0.7).",
+  "version": "0.7.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -21,11 +21,7 @@
   ],
   "activationEvents": [
     "onLanguage:pscp",
-    "workspaceContains:**/*.pscp",
-    "onCommand:pscp.restartLanguageServer",
-    "onCommand:pscp.showServerLog",
-    "onCommand:pscp.transpileCurrentFile",
-    "onCommand:pscp.runCurrentFile"
+    "workspaceContains:**/*.pscp"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -39,12 +35,43 @@
         "title": "PSCP: Show Language Server Log"
       },
       {
+        "command": "pscp.showStatusActions",
+        "title": "PSCP: Show Status Actions"
+      },
+      {
         "command": "pscp.transpileCurrentFile",
-        "title": "PSCP: Transpile Current File"
+        "title": "PSCP: Transpile Current File",
+        "enablement": "isWorkspaceTrusted"
       },
       {
         "command": "pscp.runCurrentFile",
-        "title": "PSCP: Run Current File"
+        "title": "PSCP: Run Current File",
+        "icon": "$(play)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "pscp.runWithInput",
+        "title": "PSCP: Run with Input File",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "pscp.runSamples",
+        "title": "PSCP: Run Samples",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "pscp.newSample",
+        "title": "PSCP: New Sample"
+      },
+      {
+        "command": "pscp.previewGeneratedCSharp",
+        "title": "PSCP: Preview Generated C#"
+      },
+      {
+        "command": "pscp.runFileOrSamples",
+        "title": "PSCP: Run",
+        "icon": "$(play)",
+        "enablement": "isWorkspaceTrusted"
       }
     ],
     "languages": [
@@ -99,7 +126,7 @@
         "pscp.server.trace": {
           "type": "boolean",
           "default": false,
-          "description": "Write LSP request and notification names to the PSCP output channel."
+          "description": "Write LSP request and notification names to the PSCP Language Server output channel. Deprecated; prefer `pscp.trace.server`."
         },
         "pscp.server.requestTimeoutMs": {
           "type": "number",
@@ -120,6 +147,64 @@
             "type": "string"
           },
           "description": "Extra arguments appended to PSCP transpile/run commands."
+        },
+        "pscp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "How much LSP traffic to write to the PSCP Language Server output channel."
+        },
+        "pscp.inlayHints.types": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the inferred type of a `let`/`var` binding as an inlay hint."
+        },
+        "pscp.inlayHints.parameterNames": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter names at call sites as inlay hints."
+        },
+        "pscp.hints.rewrite": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the .NET method a data-structure rewrite operator calls."
+        },
+        "pscp.samples.configuration": {
+          "type": "string",
+          "enum": [
+            "Debug",
+            "Release"
+          ],
+          "default": "Debug",
+          "description": "Build configuration for sample runs. Debug surfaces a precondition violation as an exception."
+        },
+        "pscp.samples.timeoutMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "description": "Time limit for one sample run, excluding the build."
+        },
+        "pscp.samples.floatTolerance": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "When set, two tokens that both read as real numbers compare equal within this absolute or relative error. Unset compares exactly."
+        },
+        "pscp.preview.pretty": {
+          "type": "boolean",
+          "default": true,
+          "description": "Format the generated C# in the preview, as `pscp transpile --pretty` does."
+        },
+        "pscp.preview.explain": {
+          "type": "boolean",
+          "default": false,
+          "description": "Annotate the generated C# preview with the lowering each construct went through."
         }
       }
     },
@@ -136,6 +221,53 @@
           }
         }
       }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "pscp.runFileOrSamples",
+          "when": "resourceLangId == pscp",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "pscp.runFileOrSamples",
+          "when": "false"
+        },
+        {
+          "command": "pscp.showStatusActions",
+          "when": "false"
+        }
+      ]
+    },
+    "semanticTokenModifiers": [
+      {
+        "id": "mutable",
+        "description": "PSCP var/mut binding or mutable field"
+      },
+      {
+        "id": "intrinsic",
+        "description": "PSCP intrinsic (stdin, sum, map, ...)"
+      },
+      {
+        "id": "shorthand",
+        "description": "PSCP input/output shorthand operator"
+      },
+      {
+        "id": "rewrite",
+        "description": "Operator rewritten to a .NET collection call"
+      }
     ]
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace only the editing features run; the transpile and run commands are disabled.",
+      "restrictedConfigurations": [
+        "pscp.server.args",
+        "pscp.transpiler.args"
+      ]
+    }
   }
 }

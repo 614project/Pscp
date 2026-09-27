@@ -79,7 +79,8 @@ internal static class PscpIntrinsics
             2,
             SortKeyword + "0tc"),
         new PscpCompletionEntry(
-            "rec",
+            // The label is not a bare `rec`: the keyword entry already owns that label.
+            "rec function",
             15,
             "rec function",
             "A recursive function (`rec` is required for self-recursion, spec §12.4).",

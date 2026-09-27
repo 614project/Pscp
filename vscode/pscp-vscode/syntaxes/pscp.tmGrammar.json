@@ -47,6 +47,31 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.quoted.double.interpolated.verbatim.pscp",
+          "begin": "\\$@\"|@\\$\"",
+          "end": "\"(?!\")",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pscp",
+              "match": "\"\"|\\{\\{|\\}\\}"
+            },
+            {
+              "include": "#interpolation"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.verbatim.pscp",
+          "begin": "@\"",
+          "end": "\"(?!\")",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pscp",
+              "match": "\"\""
+            }
+          ]
+        },
+        {
           "name": "string.interpolated.double.pscp",
           "begin": "\\$\"",
           "beginCaptures": {
@@ -66,48 +91,7 @@
               "match": "\\\\.|\\{\\{|\\}\\}"
             },
             {
-              "name": "meta.interpolation.pscp",
-              "begin": "\\{",
-              "beginCaptures": {
-                "0": {
-                  "name": "punctuation.section.interpolation.begin.pscp"
-                }
-              },
-              "end": "\\}",
-              "endCaptures": {
-                "0": {
-                  "name": "punctuation.section.interpolation.end.pscp"
-                }
-              },
-              "patterns": [
-                {
-                  "include": "#comments"
-                },
-                {
-                  "include": "#strings"
-                },
-                {
-                  "include": "#numbers"
-                },
-                {
-                  "include": "#section-labels"
-                },
-                {
-                  "include": "#modifiers"
-                },
-                {
-                  "include": "#keywords"
-                },
-                {
-                  "include": "#types"
-                },
-                {
-                  "include": "#functions"
-                },
-                {
-                  "include": "#operators"
-                }
-              ]
+              "include": "#interpolation"
             }
           ]
         },
@@ -146,24 +130,28 @@
     "section-labels": {
       "patterns": [
         {
-          "name": "keyword.other.section-label.pscp",
-          "match": "\\b(?:public|private|protected|internal)\\s*:"
+          "name": "invalid.illegal.section-label.pscp",
+          "match": "^\\s*(?:public|private|protected|internal)\\s*:"
         }
       ]
     },
     "modifiers": {
       "patterns": [
         {
-          "name": "storage.modifier.access.pscp",
-          "match": "\\b(?:public|private|protected|internal)\\b(?!\\s*:)"
+          "name": "storage.modifier.pscp",
+          "match": "\\b(?:public|private|protected|internal|static|readonly|const|params|abstract|sealed|partial)\\b"
         }
       ]
     },
     "keywords": {
       "patterns": [
         {
+          "name": "keyword.operator.new.pscp",
+          "match": "\\bnew!"
+        },
+        {
           "name": "keyword.control.pscp",
-          "match": "\\b(?:let|var|mut|rec|if|then|else|for|in|do|while|break|continue|return|and|or|xor|not|where|new|class|struct|record|namespace|using|ref|out|is|this|base|switch|operator)\\b"
+          "match": "\\b(?:interface|namespace|continue|operator|default|finally|params|record|return|struct|switch|typeof|break|catch|class|throw|using|value|where|while|base|else|enum|init|then|this|when|with|and|for|get|let|mut|new|not|out|rec|ref|set|try|var|xor|as|do|if|in|is|or)\\b"
         },
         {
           "name": "constant.language.pscp",
@@ -183,7 +171,7 @@
       "patterns": [
         {
           "name": "support.function.intrinsic.pscp",
-          "match": "\\b(?:sum|sumBy|min|max|minBy|maxBy|map|filter|fold|scan|mapFold|count|any|all|find|findIndex|findLastIndex|sort|sortBy|sortWith|distinct|reverse|copy|abs|sqrt|clamp|gcd|lcm|floor|ceil|round|pow|popcount|bitLength|groupCount|freq|index|chmin|chmax)\\b"
+          "match": "\\b(?:findLastIndex|lowerBound|upperBound|bitLength|findIndex|distinct|popcount|sortWith|mapFold|reverse|filter|sortBy|chmax|chmin|clamp|count|floor|index|maxBy|minBy|round|sumBy|ceil|copy|desc|find|fold|freq|scan|sort|sqrt|abs|all|any|asc|gcd|lcm|map|max|min|pow|sum)\\b"
         },
         {
           "name": "entity.name.function.pscp",
@@ -198,8 +186,72 @@
     "operators": {
       "patterns": [
         {
+          "match": "^\\s*(\\+?=)(?!=)",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.output.pscp"
+            }
+          }
+        },
+        {
+          "name": "keyword.operator.output.pscp",
+          "match": "(?<=then|else|do|;)\\s*\\+?=(?!=)"
+        },
+        {
+          "name": "keyword.operator.input.pscp",
+          "match": "=(?!=)\\s*(?=(?://.*)?$)"
+        },
+        {
           "name": "keyword.operator.pscp",
           "match": "<=>|\\.\\.<|\\.\\.=|\\.\\.|:=|=>|->|\\|>|<\\||&&|\\|\\||==|!=|<=|>=|\\+\\+|--|\\+=|-=|\\*=|/=|%=|[=+\\-*/%!^~?:<>.&|]"
+        }
+      ]
+    },
+    "interpolation": {
+      "patterns": [
+        {
+          "name": "meta.interpolation.pscp",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.pscp"
+            }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.pscp"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "include": "#section-labels"
+            },
+            {
+              "include": "#modifiers"
+            },
+            {
+              "include": "#keywords"
+            },
+            {
+              "include": "#types"
+            },
+            {
+              "include": "#functions"
+            },
+            {
+              "include": "#operators"
+            }
+          ]
         }
       ]
     }
