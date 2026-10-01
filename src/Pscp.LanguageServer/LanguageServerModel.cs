@@ -11,10 +11,11 @@ internal sealed class LineIndex
 
     public LineIndex(string text)
     {
+        // LSP line breaks are `\n`, `\r\n` and a lone `\r` (guide §5.2).
         List<int> starts = [0];
         for (int i = 0; i < text.Length; i++)
         {
-            if (text[i] == '\n')
+            if (text[i] == '\n' || (text[i] == '\r' && (i + 1 == text.Length || text[i + 1] != '\n')))
             {
                 starts.Add(i + 1);
             }
@@ -107,7 +108,8 @@ internal sealed record PscpServerDiagnostic(
     string Message,
     TextSpan Span,
     ServerDiagnosticSeverity Severity,
-    string? RelatedSymbolId = null);
+    string? RelatedSymbolId = null,
+    TextSpan? RelatedSpan = null);
 
 internal sealed record PscpServerSymbol(
     string Id,
@@ -138,7 +140,20 @@ internal sealed record PscpDocumentSymbol(
     int Kind,
     TextSpan Range,
     TextSpan SelectionRange,
-    IReadOnlyList<PscpDocumentSymbol> Children);
+    IReadOnlyList<PscpDocumentSymbol> Children,
+    // Guide §10.4: the type or the signature, and "input" for a declaration fed by the input shorthand.
+    string? Detail = null);
+
+// A document symbol under construction: children are added while the declaration's body is analysed.
+internal sealed class PscpDocumentSymbolBuilder(string name, int kind, TextSpan range, TextSpan selectionRange, string? detail)
+{
+    public List<PscpDocumentSymbolBuilder> Children { get; } = [];
+
+    public TextSpan Range { get; set; } = range;
+
+    public PscpDocumentSymbol Build()
+        => new(name, kind, Range, selectionRange, Children.OrderBy(child => child.Range.Start).Select(child => child.Build()).ToArray(), detail);
+}
 
 internal sealed record PscpCompletionEntry(
     string Label,
@@ -147,16 +162,121 @@ internal sealed record PscpCompletionEntry(
     string? Documentation,
     string? InsertText = null,
     int? InsertTextFormat = null,
-    string? SortText = null);
+    string? SortText = null,
+    // `labelDetails` (guide §8.4): the parameter shape and the result type.
+    string? LabelDetail = null,
+    string? LabelDescription = null)
+{
+    // A copy in completion group `group` (guide §8.3). Entries carry their own name-ordered suffix.
+    public PscpCompletionEntry InGroup(string group)
+        => this with { SortText = group + (SortText is { Length: > 1 } text && char.IsDigit(text[0]) ? text[1..] : SortText ?? Label) };
+}
 
-internal sealed record PscpSignatureEntry(
-    string Label,
-    IReadOnlyList<string> Parameters,
-    string? Documentation);
+// One parameter of one overload, with its offsets into that overload's label. Guide §9.4 requires the offset
+// form so the editor can highlight the parameter being typed.
+internal sealed record PscpSignatureParameter(string Label, int Start, int End);
+
+internal sealed record PscpSignatureForm(string Label, IReadOnlyList<PscpSignatureParameter> Parameters, bool IsVariadic);
+
+internal sealed record PscpSignatureEntry(IReadOnlyList<PscpSignatureForm> Forms, string? Documentation)
+{
+    public string Label => Forms.Count > 0 ? Forms[0].Label : string.Empty;
+
+    public IReadOnlyList<string> Parameters
+        => Forms.Count > 0 ? Forms[0].Parameters.Select(parameter => parameter.Label).ToArray() : [];
+
+    // `min(a, b, ...) / min(xs)` becomes two overloads; each one's parameters carry their label offsets.
+    public static PscpSignatureEntry FromSignature(string signature, string? documentation)
+        => new(signature.Split(" / ", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(ParseForm)
+            .ToArray(),
+            documentation);
+
+    private static PscpSignatureForm ParseForm(string label)
+    {
+        int open = label.IndexOf('(');
+        int close = label.LastIndexOf(')');
+        if (open < 0 || close <= open)
+        {
+            return new PscpSignatureForm(label, [], false);
+        }
+
+        List<PscpSignatureParameter> parameters = [];
+        bool variadic = false;
+        int depth = 0;
+        int start = open + 1;
+        for (int i = open + 1; i <= close; i++)
+        {
+            char character = label[i];
+            if (character is '(' or '<' or '[')
+            {
+                depth++;
+                continue;
+            }
+
+            if (character is ')' or '>' or ']')
+            {
+                if (i < close)
+                {
+                    depth--;
+                    continue;
+                }
+            }
+            else if (character != ',' || depth > 0)
+            {
+                continue;
+            }
+
+            AddParameter(label, parameters, ref variadic, start, i);
+            start = i + 1;
+        }
+
+        return new PscpSignatureForm(label, parameters, variadic);
+    }
+
+    private static void AddParameter(string label, List<PscpSignatureParameter> parameters, ref bool variadic, int start, int end)
+    {
+        while (start < end && char.IsWhiteSpace(label[start]))
+        {
+            start++;
+        }
+
+        while (end > start && char.IsWhiteSpace(label[end - 1]))
+        {
+            end--;
+        }
+
+        if (end <= start)
+        {
+            return;
+        }
+
+        string text = label[start..end];
+        if (text == "...")
+        {
+            variadic = true;
+        }
+
+        parameters.Add(new PscpSignatureParameter(text, start, end));
+    }
+}
 
 internal sealed record PscpHoverEntry(string Markdown);
 
-internal sealed record PscpInlayHintEntry(TextSpan Span, string Label);
+// Guide §12.1 and appendix C: each kind has its own setting.
+internal enum PscpInlayHintKind
+{
+    InferredType,
+    RewriteResult,
+    AccumulatorType,
+    ParameterName,
+}
+
+internal sealed record PscpInlayHintEntry(
+    TextSpan Span,
+    string Label,
+    PscpInlayHintKind Kind = PscpInlayHintKind.InferredType,
+    string? Tooltip = null);
 
 internal sealed record PscpCodeActionEntry(
     string Title,
@@ -180,6 +300,9 @@ internal sealed class PscpAnalysisResult
     public required IReadOnlyDictionary<string, PscpSignatureEntry> Signatures { get; init; }
     public required IReadOnlyList<PscpCodeActionEntry> CodeActions { get; init; }
     public required IReadOnlyList<PscpInlayHintEntry> InlayHints { get; init; }
+
+    // The shared front-end result of this version (tokens, tree, diagnostics), used by the generated C# preview.
+    public PscpFrontEndResult? FrontEnd { get; set; }
 
     public Token? FindTokenAtOffset(int offset)
     {

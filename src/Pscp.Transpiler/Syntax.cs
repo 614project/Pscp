@@ -12,6 +12,9 @@ public enum TokenKind
     Colon,
     ColonEqual,
     Question,
+    QuestionDot,
+    QuestionQuestion,
+    QuestionQuestionEqual,
     OpenParen,
     CloseParen,
     OpenBrace,
@@ -112,6 +115,8 @@ public enum DiagnosticSeverity
 {
     Warning,
     Error,
+    // Editor-only information (PSCP5xxx). The CLI does not print it and it never fails a build.
+    Info,
 }
 
 public enum HelperEmissionMode
@@ -122,11 +127,21 @@ public enum HelperEmissionMode
 
 public static class PscpVersionInfo
 {
-    public const string LanguageVersion = "0.6";
-    public const string ToolVersion = "0.6.7";
+    public const string LanguageVersion = "0.7";
+    public const string ToolVersion = "0.7.0";
 }
 
-public sealed record Diagnostic(string Message, TextSpan Span, DiagnosticSeverity Severity = DiagnosticSeverity.Error);
+// `Code` identifies the diagnostic kind (PSCPxxxx, see DiagnosticCodes). `RelatedSpan` points at a related location
+// such as the declaration of a binding whose mutation is reported.
+public sealed record Diagnostic(
+    string Message,
+    TextSpan Span,
+    DiagnosticSeverity Severity = DiagnosticSeverity.Error,
+    string? Code = null,
+    TextSpan? RelatedSpan = null)
+{
+    public string EffectiveCode => Code ?? (Severity == DiagnosticSeverity.Error ? DiagnosticCodes.GenericError : DiagnosticCodes.GenericWarning);
+}
 
 // Generated C# always stays within C# 10 / .NET 6 APIs, so it compiles for both the default SDK project and the
 // `pscp build --older` (net6.0, LangVersion 10) project; there is no separate "older" emission mode.
@@ -167,6 +182,7 @@ public enum AssignmentOperator
     BitwiseXorAssign,
     ShiftLeftAssign,
     ShiftRightAssign,
+    CoalesceAssign,
 }
 
 public enum OutputKind
@@ -217,6 +233,7 @@ public enum BinaryOperator
     LogicalOr,
     PipeRight,
     PipeLeft,
+    Coalesce,
 }
 
 public enum RangeKind
@@ -224,6 +241,31 @@ public enum RangeKind
     Inclusive,
     RightExclusive,
     ExplicitInclusive,
+}
+
+// Slices inside an indexer must state whether the end is included (spec §15.2).
+public enum SliceKind
+{
+    // `a..` or `..`: to the end.
+    Open,
+    // `a..<b` or `..<b`.
+    Exclusive,
+    // `a..=b` or `..=b`.
+    Inclusive,
+    // `a..b` or `..b`: rejected (PSCP2303), kept for error recovery.
+    Ambiguous,
+}
+
+// How a call was written. Pipes are desugared into calls; the binder uses the kind for helper receiver insertion.
+public enum PipeKind
+{
+    None,
+    // `lhs |> target`: `lhs` is the first argument.
+    Forward,
+    // `target <| rhs`: `rhs` is the last argument.
+    Backward,
+    // `lhs |> (e)`: the parenthesized target is invoked with `lhs`.
+    Delegate,
 }
 
 public enum ArgumentModifier
@@ -286,7 +328,8 @@ public sealed record MethodMember(
     IReadOnlyList<ParameterSyntax> Parameters,
     MethodBody Body,
     bool IsConstructor,
-    string? InitializerText = null) : TypeMember;
+    string? InitializerText = null,
+    string? ConstraintText = null) : TypeMember;
 
 public sealed record OperatorMember(
     IReadOnlyList<string> Modifiers,
@@ -297,18 +340,25 @@ public sealed record OperatorMember(
 
 public sealed record NestedTypeMember(TypeDeclaration Declaration) : TypeMember;
 
+// Body text passed through unchanged: `enum` members and `interface` members.
+public sealed record RawTypeMember(string Text) : TypeMember;
+
 public abstract record MethodBody;
 
 public sealed record BlockMethodBody(BlockStatement Block) : MethodBody;
 
 public sealed record ExpressionMethodBody(Expression Expression) : MethodBody;
 
+// `TypeParameterText` (`<T>`) and `ConstraintText` (`where T : IComparable<T>`) are C# pass-through text.
+// An expression body (`=> e`) is parsed as a block whose only statement is `e`.
 public sealed record FunctionDeclaration(
     bool IsRecursive,
     TypeSyntax ReturnType,
     string Name,
     IReadOnlyList<ParameterSyntax> Parameters,
-    BlockStatement Body);
+    BlockStatement Body,
+    string? TypeParameterText = null,
+    string? ConstraintText = null);
 
 public sealed record ParameterSyntax(
     ArgumentModifier Modifier,
@@ -372,6 +422,13 @@ public sealed record ContinueStatement() : Statement;
 
 public sealed record LocalFunctionStatement(FunctionDeclaration Function) : Statement;
 
+// `try` / `catch` / `finally` / `throw` are C# pass-through (spec §12.6).
+public sealed record TryStatement(BlockStatement Body, IReadOnlyList<CatchClause> Catches, BlockStatement? Finally) : Statement;
+
+public sealed record CatchClause(TypeSyntax? Type, string? Name, Expression? Filter, BlockStatement Body);
+
+public sealed record ThrowStatement(Expression? Expression) : Statement;
+
 public abstract record Expression;
 
 public sealed record LiteralExpression(LiteralKind Kind, string RawText) : Expression;
@@ -382,7 +439,8 @@ public abstract record InterpolatedStringPart;
 
 public sealed record InterpolatedStringTextPart(string Text) : InterpolatedStringPart;
 
-public sealed record InterpolatedStringInterpolationPart(Expression Expression) : InterpolatedStringPart;
+// `{expr,alignment:format}`. Without a format the hole uses the PSCP rendering rules (spec §19).
+public sealed record InterpolatedStringInterpolationPart(Expression Expression, string? Alignment = null, string? Format = null) : InterpolatedStringPart;
 
 public sealed record IdentifierExpression(string Name) : Expression;
 
@@ -425,21 +483,29 @@ public sealed record RangeExpression(
     Expression End,
     RangeKind Kind) : Expression;
 
-public sealed record IsPatternExpression(
-    Expression Left,
-    IsPatternSyntax Pattern,
-    bool Negated) : Expression;
+// `x is pattern`. Patterns are C# 10 pass-through text (spec §13.9); `Designations` are the names the pattern
+// declares, with their type when the pattern states one (`int v`).
+public sealed record IsPatternExpression(Expression Left, PatternSyntax Pattern) : Expression;
 
-public abstract record IsPatternSyntax;
+public sealed record PatternDesignation(string Name, TypeSyntax? Type);
 
-public sealed record TypePatternSyntax(TypeSyntax Type) : IsPatternSyntax;
+public sealed record PatternSyntax(string Text, IReadOnlyList<PatternDesignation> Designations)
+{
+    // The pattern is exactly a type, optionally with a designation (`int`, `int v`, `Point p`).
+    public TypeSyntax? SimpleType { get; init; }
+}
 
-public sealed record ConstantPatternSyntax(Expression Expression) : IsPatternSyntax;
+public sealed record CastExpression(TypeSyntax Type, Expression Operand) : Expression;
+
+public sealed record AsExpression(Expression Operand, TypeSyntax Type) : Expression;
+
+public sealed record NullForgivingExpression(Expression Operand) : Expression;
 
 public sealed record CallExpression(
     Expression Callee,
     IReadOnlyList<ArgumentSyntax> Arguments,
-    bool IsSpaceSeparated) : Expression;
+    bool IsSpaceSeparated,
+    PipeKind Pipe = PipeKind.None) : Expression;
 
 public abstract record ArgumentSyntax(string? Name, ArgumentModifier Modifier);
 
@@ -453,9 +519,9 @@ public sealed record OutDeclarationArgumentSyntax(
     TypeSyntax Type,
     BindingTarget Target) : ArgumentSyntax(Name, ArgumentModifier.Out);
 
-public sealed record MemberAccessExpression(Expression Receiver, string MemberName) : Expression;
+public sealed record MemberAccessExpression(Expression Receiver, string MemberName, bool IsNullConditional = false) : Expression;
 
-public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expression> Arguments) : Expression;
+public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expression> Arguments, bool IsNullConditional = false) : Expression;
 
 public sealed record WithExpression(Expression Receiver, IReadOnlyList<WithAssignment> Assignments) : Expression;
 
@@ -463,13 +529,12 @@ public sealed record WithAssignment(string MemberName, Expression Value);
 
 public sealed record SwitchExpression(Expression Receiver, IReadOnlyList<SwitchArm> Arms) : Expression;
 
-// Patterns are C# pass-through text; `Designations` are the names the pattern declares (`int x`, `var (a, b)`),
-// which are in scope for the guard and the result.
-public sealed record SwitchArm(string PatternText, IReadOnlyList<string> Designations, Expression? Guard, Expression Result);
+// The pattern's designations (`int x`, `var (a, b)`) are in scope for the guard and the result.
+public sealed record SwitchArm(PatternSyntax Pattern, Expression? Guard, Expression Result);
 
 public sealed record FromEndExpression(Expression Operand) : Expression;
 
-public sealed record SliceExpression(Expression? Start, Expression? End) : Expression;
+public sealed record SliceExpression(Expression? Start, Expression? End, SliceKind Kind) : Expression;
 
 public sealed record TupleProjectionExpression(Expression Receiver, int Position) : Expression;
 
@@ -477,7 +542,15 @@ public sealed record LambdaExpression(
     IReadOnlyList<LambdaParameter> Parameters,
     LambdaBody Body) : Expression;
 
-public sealed record NewExpression(TypeSyntax? Type, IReadOnlyList<ArgumentSyntax> Arguments) : Expression;
+public sealed record NewExpression(
+    TypeSyntax? Type,
+    IReadOnlyList<ArgumentSyntax> Arguments,
+    IReadOnlyList<WithAssignment>? Initializer = null) : Expression;
+
+public sealed record ThrowExpression(Expression Expression) : Expression;
+
+// Stands for an expression the parser could not read. It has no type and produces no further diagnostics.
+public sealed record ErrorExpression : Expression;
 
 public sealed record NewArrayExpression(TypeSyntax ElementType, IReadOnlyList<Expression> Dimensions) : Expression;
 

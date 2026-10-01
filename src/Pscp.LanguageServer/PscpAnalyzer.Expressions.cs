@@ -272,7 +272,7 @@ internal sealed partial class PscpAnalyzer
 
         if (IsAggregationName(state.Tokens, tokenIndex))
         {
-            state.MarkToken(tokenIndex, "function", "defaultLibrary");
+            state.MarkToken(tokenIndex, "function", ["defaultLibrary", "intrinsic"]);
             if (PscpIntrinsics.HoverDocs.TryGetValue(token.Text, out string? hover))
             {
                 state.SetHover(tokenIndex, hover);
@@ -288,7 +288,7 @@ internal sealed partial class PscpAnalyzer
         {
             if (PscpIntrinsics.IntrinsicFunctions.TryGetValue(token.Text, out PscpCompletionEntry? intrinsicFunction))
             {
-                state.MarkToken(tokenIndex, "function", "defaultLibrary");
+                state.MarkToken(tokenIndex, "function", ["defaultLibrary", "intrinsic"]);
                 state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs.TryGetValue(token.Text, out string? hover)
                     ? hover
                     : $"```pscp\n{intrinsicFunction.Detail}\n```\n\n{intrinsicFunction.Documentation}");
@@ -308,6 +308,10 @@ internal sealed partial class PscpAnalyzer
                 state.MarkToken(tokenIndex, "variable");
             }
 
+            // The analysis is a single pass, so a name declared further down the file is not in its scope
+            // yet. Spec §7.3 and §10.2 make a top-level binding and a local function visible regardless of
+            // order, so the token is retried once the whole file has been walked (guide §10.1).
+            state.AddPendingResolution(tokenIndex, scope);
             return;
         }
 
@@ -324,7 +328,7 @@ internal sealed partial class PscpAnalyzer
                 state.MarkToken(tokenIndex, "parameter");
                 break;
             case PscpServerSymbolKind.Intrinsic:
-                state.MarkToken(tokenIndex, token.Text == "Array" ? "type" : "variable", "defaultLibrary");
+                state.MarkToken(tokenIndex, token.Text == "Array" ? "type" : "variable", ["defaultLibrary", "intrinsic"]);
                 break;
             default:
                 state.MarkToken(tokenIndex, "variable", symbol.IsMutable ? new[] { "mutable" } : Array.Empty<string>());
@@ -378,7 +382,7 @@ internal sealed partial class PscpAnalyzer
 
         if (PscpIntrinsics.ComparatorMembers.ContainsKey(state.Tokens[tokenIndex].Text) && PscpIntrinsics.IsTypeLikeReceiverName(receiverName))
         {
-            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", ["defaultLibrary", "intrinsic"]);
             state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs[$"comparer.{state.Tokens[tokenIndex].Text}"]);
             return;
         }
@@ -386,7 +390,7 @@ internal sealed partial class PscpAnalyzer
         if (IsCollectionLikeReceiver(receiverName, instanceContext)
             && PscpIntrinsics.CollectionMembers.TryGetValue(state.Tokens[tokenIndex].Text, out PscpCompletionEntry? collectionMember))
         {
-            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", ["defaultLibrary", "intrinsic"]);
             state.AddIntrinsicMember(tokenIndex, collectionMember);
             state.SetHover(tokenIndex, PscpIntrinsics.HoverDocs[$"collection.{state.Tokens[tokenIndex].Text}"]);
             return;
@@ -394,7 +398,7 @@ internal sealed partial class PscpAnalyzer
 
         if (TryGetIntrinsicMember(receiverName, state.Tokens[tokenIndex].Text, out PscpCompletionEntry? completion, out string? hoverKey))
         {
-            state.MarkToken(tokenIndex, isCallable ? "method" : "property", "defaultLibrary");
+            state.MarkToken(tokenIndex, isCallable ? "method" : "property", ["defaultLibrary", "intrinsic"]);
             state.AddIntrinsicMember(tokenIndex, completion!);
             if (hoverKey is not null && PscpIntrinsics.HoverDocs.TryGetValue(hoverKey, out string? hover))
             {

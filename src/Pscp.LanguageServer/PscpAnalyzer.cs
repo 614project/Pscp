@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Pscp.Transpiler;
 
@@ -6,71 +7,272 @@ namespace Pscp.LanguageServer;
 internal sealed partial class PscpAnalyzer
 {
     private static readonly Regex IdentifierPattern = new("^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled);
+    private static readonly Regex SizedArrayPattern = new(@"\[[^\[\]]+\]", RegexOptions.Compiled);
 
     public PscpAnalysisResult Analyze(DocumentSnapshot snapshot)
     {
-        Lexer lexer = new(snapshot.Text);
-        IReadOnlyList<Token> tokens = lexer.Lex();
-        Parser parser = new(tokens);
-        PscpProgram program = parser.ParseProgram();
-
-        AnalyzerState state = new(snapshot, tokens);
-        foreach (Diagnostic diagnostic in lexer.Diagnostics)
+        // Diagnostics come from the same front end as `pscp check`, so the editor and the CLI agree on every
+        // judgement (guide §2). The token walk below only builds symbols, references and classifications.
+        PscpFrontEndResult frontEnd = RunFrontEnd(snapshot.Text);
+        AnalyzerState state = new(snapshot, frontEnd.Tokens);
+        foreach (Diagnostic diagnostic in frontEnd.Diagnostics)
         {
-            state.AddDiagnostic("PSCP1000", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
-        }
-
-        foreach (Diagnostic diagnostic in parser.Diagnostics)
-        {
-            state.AddDiagnostic("PSCP1001", diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity));
+            state.AddDiagnostic(diagnostic.EffectiveCode, diagnostic.Message, diagnostic.Span, ToServerSeverity(diagnostic.Severity), relatedSpan: diagnostic.RelatedSpan);
         }
 
         Scope globalScope = state.CreateScope(null, 0, snapshot.Text.Length);
         InitializeIntrinsics(state, globalScope);
-        AnalyzeStatements(state, globalScope, 0, tokens.Count - 1, null, topLevel: true, loopDepth: 0);
-        if (!lexer.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
-            && !parser.Diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
-        {
-            AddTranspilerDiagnostics(state, tokens, program);
-        }
-
+        AnalyzeStatements(state, globalScope, 0, frontEnd.Tokens.Count - 1, null, topLevel: true, loopDepth: 0);
+        ResolveForwardReferences(state);
         AddDefaultTokenClassifications(state);
-        return state.Build();
+        AddRewriteHovers(state);
+        AddDeprecationMarks(state, frontEnd.Diagnostics);
+        PscpAnalysisResult result = state.Build();
+        result.FrontEnd = frontEnd;
+        return result;
     }
 
-    // Reuses the already parsed program for the transpiler's semantic pass (no C# emission on every edit).
-    // Transpiler errors are reported unless the editor analysis already flagged that range, so `pscp check`
-    // and the editor agree on what fails to compile.
-    private static void AddTranspilerDiagnostics(AnalyzerState state, IReadOnlyList<Token> tokens, PscpProgram program)
+    // Guide §10.1: a name used before its declaration (a top-level variable, a local function) resolves once
+    // every scope is complete. Position no longer restricts the lookup, because the spec's visibility rules
+    // do not depend on order for these.
+    private static void ResolveForwardReferences(AnalyzerState state)
     {
-        IReadOnlyList<Diagnostic> diagnostics;
-        try
+        foreach ((int tokenIndex, Scope scope) in state.PendingResolutions)
         {
-            diagnostics = PscpTranspiler.AnalyzeSemantics(tokens, program);
-        }
-        catch
-        {
-            return;
-        }
-
-        foreach (Diagnostic diagnostic in diagnostics)
-        {
-            if (diagnostic.Severity == DiagnosticSeverity.Error)
+            if (state.HasSymbolAt(tokenIndex) || tokenIndex >= state.Tokens.Count)
             {
-                if (!state.HasDiagnosticOverlapping(diagnostic.Span))
-                {
-                    state.AddDiagnostic("PSCP3002", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Error);
-                }
-
                 continue;
             }
 
-            state.AddDiagnostic("PSCP3001", diagnostic.Message, diagnostic.Span, ServerDiagnosticSeverity.Warning);
+            if (!state.TryResolve(scope, state.Tokens[tokenIndex].Text, int.MaxValue, out PscpServerSymbol? symbol) || symbol is null)
+            {
+                continue;
+            }
+
+            state.AddReference(symbol, tokenIndex, isDeclaration: false, isWrite: false);
+            state.MarkToken(tokenIndex, symbol.Kind switch
+            {
+                PscpServerSymbolKind.Function => "function",
+                PscpServerSymbolKind.Type => "type",
+                PscpServerSymbolKind.Parameter => "parameter",
+                PscpServerSymbolKind.Property => "property",
+                _ => "variable",
+            });
         }
     }
 
-    private static ServerDiagnosticSeverity ToServerSeverity(DiagnosticSeverity severity)
-        => severity == DiagnosticSeverity.Warning ? ServerDiagnosticSeverity.Warning : ServerDiagnosticSeverity.Error;
+    // A rewrite is used as a value when it sits inside brackets or after a keyword that wants one, rather
+    // than starting a statement of its own.
+    private static bool IsValuePosition(IReadOnlyList<Token> tokens, int operatorIndex)
+    {
+        int depth = 0;
+        for (int i = operatorIndex - 1; i >= 0; i--)
+        {
+            switch (tokens[i].Kind)
+            {
+                case TokenKind.CloseParen:
+                case TokenKind.CloseBracket:
+                    depth++;
+                    continue;
+                case TokenKind.OpenParen:
+                case TokenKind.OpenBracket:
+                    if (depth == 0)
+                    {
+                        return true;
+                    }
+
+                    depth--;
+                    continue;
+                case TokenKind.NewLine:
+                case TokenKind.Semicolon:
+                case TokenKind.OpenBrace:
+                case TokenKind.CloseBrace:
+                    if (depth == 0)
+                    {
+                        return false;
+                    }
+
+                    continue;
+                case TokenKind.Return:
+                case TokenKind.Equal:
+                case TokenKind.ColonEqual:
+                case TokenKind.Then:
+                case TokenKind.Else:
+                case TokenKind.Not:
+                case TokenKind.If:
+                    if (depth == 0)
+                    {
+                        return true;
+                    }
+
+                    continue;
+            }
+        }
+
+        return false;
+    }
+
+    // The hint goes after the whole rewrite: after the value for `+=`/`-=`, after the receiver for `~`/`--`.
+    private static TextSpan RewriteHintSpan(IReadOnlyList<Token> tokens, TokenKind kind, int operatorIndex, int receiverIndex)
+    {
+        if (kind is TokenKind.Tilde or TokenKind.MinusMinus)
+        {
+            return tokens[receiverIndex].Span;
+        }
+
+        int last = operatorIndex;
+        int depth = 0;
+        for (int i = operatorIndex + 1; i < tokens.Count; i++)
+        {
+            switch (tokens[i].Kind)
+            {
+                case TokenKind.OpenParen:
+                case TokenKind.OpenBracket:
+                    depth++;
+                    break;
+                case TokenKind.CloseParen:
+                case TokenKind.CloseBracket:
+                    if (depth == 0)
+                    {
+                        return tokens[last].Span;
+                    }
+
+                    depth--;
+                    break;
+                case TokenKind.NewLine:
+                case TokenKind.Semicolon:
+                case TokenKind.EndOfFile:
+                case TokenKind.Then:
+                case TokenKind.CloseBrace:
+                    if (depth == 0)
+                    {
+                        return tokens[last].Span;
+                    }
+
+                    break;
+            }
+
+            last = i;
+        }
+
+        return tokens[last].Span;
+    }
+
+    // Guide §7.2 and §11.3: a deprecated name carries the `deprecated` modifier and says what replaces it
+    // (spec appendix C). The judgement itself is the front end's PSCP2900 warning.
+    private static void AddDeprecationMarks(AnalyzerState state, IReadOnlyList<Diagnostic> diagnostics)
+    {
+        foreach (Diagnostic diagnostic in diagnostics)
+        {
+            if (diagnostic.EffectiveCode != DiagnosticCodes.Deprecated)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < state.Tokens.Count; i++)
+            {
+                Token token = state.Tokens[i];
+                if (token.Position != diagnostic.Span.Start || token.Kind != TokenKind.Identifier)
+                {
+                    continue;
+                }
+
+                state.MarkToken(i, state.ClassificationOf(i) ?? "function", ["deprecated"]);
+                string replacement = PscpCodeActions.GetReplacement(token.Text) is { } name ? $"Use `{name}` instead." : diagnostic.Message;
+                state.SetHover(i, $"```pscp\n{token.Text}\n```\n\nDeprecated: it is removed in v0.8. {replacement}\n\n[Spec appendix C]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("부록-c-폐기-예정-목록")})");
+                break;
+            }
+        }
+    }
+
+    // Guide §7.2: a data-structure rewrite operator shows the .NET method it calls and that method's return
+    // type. The receiver's static type is only known once the statement walk has bound the names, so the
+    // hover is filled in here (spec §26.2).
+    private static void AddRewriteHovers(AnalyzerState state)
+    {
+        for (int i = 0; i < state.Tokens.Count; i++)
+        {
+            TokenKind kind = state.Tokens[i].Kind;
+            if (kind is not (TokenKind.PlusEqual or TokenKind.MinusEqual or TokenKind.Tilde or TokenKind.MinusMinus))
+            {
+                continue;
+            }
+
+            // `+=` and `-=` follow the receiver; `~` and prefix `--` precede it.
+            int receiverIndex = kind is TokenKind.PlusEqual or TokenKind.MinusEqual
+                ? PreviousNonTriviaIndex(state.Tokens, i - 1)
+                : NextNonTriviaIndex(state.Tokens, i + 1);
+            if (receiverIndex < 0 || state.Tokens[receiverIndex].Kind != TokenKind.Identifier)
+            {
+                continue;
+            }
+
+            if (state.TryGetSymbolAt(receiverIndex, out PscpServerSymbol? symbol)
+                && PscpOperatorHovers.ForRewrite(kind, symbol!.TypeDisplay) is { } hover)
+            {
+                state.SetHover(i, hover);
+                state.MarkToken(i, "operator", "rewrite");
+
+                // Guide §12.1: the result type is shown only where the rewrite is used as a value; as a
+                // statement of its own the result is discarded and the hint would be noise.
+                if (PscpOperatorHovers.RewriteResultType(kind, symbol.TypeDisplay) is { } resultType
+                    && resultType != "void"
+                    && IsValuePosition(state.Tokens, i))
+                {
+                    state.AddInlayHint(
+                        RewriteHintSpan(state.Tokens, kind, i, receiverIndex),
+                        $": {resultType}",
+                        PscpInlayHintKind.RewriteResult,
+                        $"The data-structure rewrite returns `{resultType}` (spec §26.2).");
+                }
+            }
+        }
+    }
+
+    private static int PreviousNonTriviaIndex(IReadOnlyList<Token> tokens, int index)
+    {
+        while (index >= 0 && tokens[index].Kind is TokenKind.NewLine or TokenKind.Semicolon)
+        {
+            index--;
+        }
+
+        return index;
+    }
+
+    private static int NextNonTriviaIndex(IReadOnlyList<Token> tokens, int index)
+    {
+        while (index < tokens.Count && tokens[index].Kind is TokenKind.NewLine or TokenKind.Semicolon)
+        {
+            index++;
+        }
+
+        return index < tokens.Count ? index : -1;
+    }
+
+    // An internal failure of the binder or the semantic pass must not take the editor features down with it:
+    // the lexer and parser results are still reported.
+    private static PscpFrontEndResult RunFrontEnd(string text)
+    {
+        try
+        {
+            return PscpTranspiler.Analyze(text);
+        }
+        catch (Exception)
+        {
+            Lexer lexer = new(text);
+            IReadOnlyList<Token> tokens = lexer.Lex();
+            Parser parser = new(tokens);
+            PscpProgram program = parser.ParseProgram();
+            return new PscpFrontEndResult(tokens, program, parser.Spans, [.. lexer.Diagnostics, .. parser.Diagnostics]);
+        }
+    }
+
+    private static ServerDiagnosticSeverity ToServerSeverity(DiagnosticSeverity severity) => severity switch
+    {
+        DiagnosticSeverity.Error => ServerDiagnosticSeverity.Error,
+        DiagnosticSeverity.Warning => ServerDiagnosticSeverity.Warning,
+        _ => ServerDiagnosticSeverity.Information,
+    };
 
     private void InitializeIntrinsics(AnalyzerState state, Scope globalScope)
     {
@@ -116,11 +318,6 @@ internal sealed partial class PscpAnalyzer
                 }
                 case TokenKind.Break:
                 case TokenKind.Continue:
-                    if (loopDepth == 0)
-                    {
-                        state.AddDiagnostic("PSCP2008", $"`{token.Text}` is valid only inside a loop.", token.Span, ServerDiagnosticSeverity.Error);
-                    }
-
                     state.MarkToken(index, "keyword");
                     index = FindStatementEnd(state.Tokens, index, endExclusive);
                     break;
@@ -140,20 +337,25 @@ internal sealed partial class PscpAnalyzer
                     break;
                 case TokenKind.Equal:
                 case TokenKind.PlusEqual:
-                    state.MarkToken(index, "operator");
-                    state.SetHover(index, token.Kind == TokenKind.Equal
-                        ? "```pscp\n= expr\n```\n\nWrites the rendered value without a trailing newline."
-                        : "```pscp\n+= expr\n```\n\nWrites the rendered value followed by a newline.");
-                    AnalyzeExpression(state, scope, index + 1, FindStatementEnd(state.Tokens, index, endExclusive), functionContext, loopDepth);
-                    index = FindStatementEnd(state.Tokens, index, endExclusive);
+                {
+                    state.MarkToken(index, "operator", "shorthand");
+                    int outputEnd = FindStatementEnd(state.Tokens, index, endExclusive);
+                    state.SetHover(index, BuildOutputShorthandHover(
+                        token.Kind == TokenKind.Equal,
+                        InferExpressionType(state, scope, index + 1, outputEnd)));
+                    AnalyzeExpression(state, scope, index + 1, outputEnd, functionContext, loopDepth);
+                    index = outputEnd;
                     break;
+                }
                 default:
                     if (TryAnalyzeTypeDeclaration(state, scope, ref index, endExclusive, topLevel))
                     {
                         break;
                     }
 
-                    if (topLevel && TryAnalyzeFunction(state, scope, ref index, endExclusive))
+                    // Spec §10.2: a local function is declared inside a function body, so a function
+                    // declaration is recognised at every level, not only at the top.
+                    if (TryAnalyzeFunction(state, scope, ref index, endExclusive))
                     {
                         break;
                     }
@@ -187,8 +389,10 @@ internal sealed partial class PscpAnalyzer
             cursor++;
         }
 
+        bool isStruct = false;
         if (cursor < endExclusive && state.Tokens[cursor].Kind is TokenKind.Class or TokenKind.Struct)
         {
+            isStruct = state.Tokens[cursor].Kind == TokenKind.Struct;
             state.MarkToken(cursor, "keyword");
             cursor++;
         }
@@ -219,7 +423,17 @@ internal sealed partial class PscpAnalyzer
             }
         }
 
-        int openBraceIndex = FindTopLevelToken(state.Tokens, cursor, endExclusive, TokenKind.OpenBrace);
+        // The body brace has to belong to this declaration. Searching the rest of the file would find the next
+        // function's brace and treat that function's body as this type's members.
+        int braceCandidate = cursor;
+        while (braceCandidate < endExclusive && state.Tokens[braceCandidate].Kind == TokenKind.NewLine)
+        {
+            braceCandidate++;
+        }
+
+        int openBraceIndex = braceCandidate < endExclusive && state.Tokens[braceCandidate].Kind == TokenKind.OpenBrace
+            ? braceCandidate
+            : -1;
         int closeBraceIndex = -1;
         int declarationEnd;
         if (openBraceIndex >= 0)
@@ -248,17 +462,15 @@ internal sealed partial class PscpAnalyzer
         state.MarkToken(nameIndex, "type", "declaration");
         state.AddReference(typeSymbol, nameIndex, isDeclaration: true, isWrite: false);
 
-        if (topLevel)
-        {
-            state.AddDocumentSymbol(new PscpDocumentSymbol(
-                typeName,
-                23,
-                declarationSpan,
-                state.Tokens[nameIndex].Span,
-                Array.Empty<PscpDocumentSymbol>()));
-        }
+        // Guide §10.4: SymbolKind Struct (23) for a struct or record struct, Class (5) otherwise.
+        int typeKind = isStruct ? 23 : 5;
+        string typeDetail = (isRecord ? "record " : string.Empty) + (isStruct ? "struct" : "class");
+        AnalyzerState.DocumentSymbolScope? outline = topLevel
+            ? state.PushDocumentSymbol(typeName, typeKind, declarationSpan, state.Tokens[nameIndex].Span, typeDetail)
+            : null;
 
         Scope typeScope = state.CreateScope(scope, state.Tokens[nameIndex].Position, declarationSpan.End);
+        typeScope.TypeName = typeName;
         foreach (ParameterInfo parameter in primaryParameters)
         {
             foreach (int typeToken in parameter.TypeTokenIndices)
@@ -287,6 +499,13 @@ internal sealed partial class PscpAnalyzer
             state.MarkToken(parameter.NameTokenIndex, "property", "declaration");
             state.AddReference(memberSymbol, parameter.NameTokenIndex, isDeclaration: true, isWrite: false);
             state.AddTypeMember(typeName, memberSymbol);
+            state.AddDocumentSymbol(new PscpDocumentSymbol(
+                parameter.Name,
+                7,
+                state.Tokens[parameter.NameTokenIndex].Span,
+                state.Tokens[parameter.NameTokenIndex].Span,
+                Array.Empty<PscpDocumentSymbol>(),
+                parameter.TypeDisplay));
         }
 
         if (primaryOpenParen >= 0)
@@ -294,6 +513,25 @@ internal sealed partial class PscpAnalyzer
             state.MarkToken(primaryOpenParen, "operator");
         }
 
+        // The body's declarations are the type's members: they belong in the outline under the type, and in
+        // the member table so that `value.field` completes (guide §10.4, §8.1).
+        if (openBraceIndex >= 0 && closeBraceIndex > openBraceIndex)
+        {
+            int before = state.SymbolCount;
+            AnalyzeStatements(state, typeScope, openBraceIndex + 1, closeBraceIndex, null, topLevel: true, loopDepth: 0);
+            foreach (PscpServerSymbol member in state.SymbolsAddedSince(before).ToArray())
+            {
+                if (member.ContainerSymbolId is null
+                    && member.Kind is PscpServerSymbolKind.Local or PscpServerSymbolKind.Function or PscpServerSymbolKind.Property
+                    && member.DeclarationSpan.Start > state.Tokens[openBraceIndex].Position
+                    && member.DeclarationSpan.Start < declarationSpan.End)
+                {
+                    state.AddTypeMember(typeName, member);
+                }
+            }
+        }
+
+        outline?.Dispose();
         index = declarationEnd;
         return true;
     }
@@ -301,6 +539,7 @@ internal sealed partial class PscpAnalyzer
     private bool TryAnalyzeFunction(AnalyzerState state, Scope scope, ref int index, int endExclusive)
     {
         int saved = index;
+        SkipMemberModifiers(state, ref index, endExclusive);
         bool isRecursive = state.Match(ref index, TokenKind.Rec, out int recIndex);
         if (isRecursive)
         {
@@ -364,12 +603,19 @@ internal sealed partial class PscpAnalyzer
             documentation: $"```pscp\n{returnType} {nameToken.Text}({string.Join(", ", parameters.Select(p => $"{p.TypeDisplay} {p.Name}"))})\n```");
 
         state.MarkToken(nameIndex, "function", "declaration");
-        state.AddDocumentSymbol(new PscpDocumentSymbol(
+        // Without this the declaration's own name has no symbol, so hover and go-to-definition on it do
+        // nothing and `references` leaves the declaration out (guide §10.1).
+        state.AddReference(functionSymbol, nameIndex, isDeclaration: true, isWrite: false);
+        // Guide §10.4: a function is Function (12), and its local functions are its children. A member of a
+        // type body is a Method (6) instead, or a Constructor (9) when it is named after the type.
+        string signature = $"({string.Join(", ", parameters.Select(p => p.TypeDisplay))}) : {returnType}";
+        int functionKind = scope.TypeName is null ? 12 : nameToken.Text == scope.TypeName ? 9 : 6;
+        using AnalyzerState.DocumentSymbolScope outline = state.PushDocumentSymbol(
             nameToken.Text,
-            12,
+            functionKind,
             new TextSpan(state.Tokens[saved].Position, Math.Max(0, EndOf(state.Tokens[closeBraceIndex]) - state.Tokens[saved].Position)),
             new TextSpan(nameToken.Position, nameToken.Text.Length),
-            Array.Empty<PscpDocumentSymbol>()));
+            signature);
 
         Scope functionScope = state.CreateScope(scope, state.Tokens[openBraceIndex].Position, EndOf(state.Tokens[closeBraceIndex]));
         FunctionContext functionContext = new(functionSymbol, isRecursive, returnType);
@@ -403,9 +649,8 @@ internal sealed partial class PscpAnalyzer
             state.AddReference(paramSymbol, parameter.NameTokenIndex, isDeclaration: true, isWrite: false);
         }
 
-        state.Signatures[functionSymbol.Name] = new PscpSignatureEntry(
+        state.Signatures[functionSymbol.Name] = PscpSignatureEntry.FromSignature(
             $"{returnType} {functionSymbol.Name}({string.Join(", ", parameters.Select(p => $"{p.TypeDisplay} {p.Name}"))})",
-            parameters.Select(p => p.Name).ToArray(),
             "User-defined function.");
 
         AnalyzeStatements(state, functionScope, openBraceIndex + 1, closeBraceIndex, functionContext, topLevel: false, loopDepth: 0);
@@ -416,23 +661,28 @@ internal sealed partial class PscpAnalyzer
     private bool TryAnalyzeDeclaration(AnalyzerState state, Scope scope, ref int index, int endExclusive, bool topLevel)
     {
         int saved = index;
+        SkipMemberModifiers(state, ref index, endExclusive);
         bool isMutable;
         string? explicitType = null;
         List<int> typeTokens = [];
 
+        string declarationKeyword;
         if (state.Match(ref index, TokenKind.Let, out int letIndex))
         {
             isMutable = false;
+            declarationKeyword = "let";
             state.MarkToken(letIndex, "keyword");
         }
         else if (state.Match(ref index, TokenKind.Var, out int varIndex))
         {
             isMutable = true;
+            declarationKeyword = "var";
             state.MarkToken(varIndex, "keyword");
         }
         else
         {
             bool sawMut = state.Match(ref index, TokenKind.Mut, out int mutIndex);
+            declarationKeyword = sawMut ? "mut" : string.Empty;
             if (sawMut)
             {
                 state.MarkToken(mutIndex, "keyword");
@@ -488,37 +738,57 @@ internal sealed partial class PscpAnalyzer
                 PscpServerSymbolKind.Local,
                 state.Tokens[binding.TokenIndex].Span,
                 state.Tokens[binding.TokenIndex].Span,
-                new ScopeSpan(state.Tokens[binding.TokenIndex].Position, scope.EndOffset),
+                // Spec §7.3: a top-level binding is in scope for the whole program, so a function declared
+                // above it still resolves the name. Completion still filters by declaration position.
+                new ScopeSpan(topLevel ? 0 : state.Tokens[binding.TokenIndex].Position, scope.EndOffset),
                 explicitType ?? inferredType,
                 isMutable,
                 isIntrinsic: false,
                 containerSymbolId: null,
-                documentation: BuildSymbolDocumentation(binding.Name, explicitType ?? inferredType, isMutable, isInputShorthand));
+                documentation: BuildSymbolDocumentation(
+                    binding.Name,
+                    explicitType ?? inferredType,
+                    isMutable,
+                    isInputShorthand,
+                    declarationKeyword,
+                    explicitType,
+                    topLevel,
+                    equalIndex >= 0 && !isInputShorthand && IsCompileTimeConstant(state, equalIndex + 1, statementEnd)));
             state.MarkToken(binding.TokenIndex, "variable", isMutable ? new[] { "declaration", "mutable" } : new[] { "declaration", "readonly" });
             state.AddReference(symbol, binding.TokenIndex, isDeclaration: true, isWrite: false);
             if (explicitType is null && !string.IsNullOrWhiteSpace(inferredType))
             {
                 TextSpan span = state.Tokens[binding.TokenIndex].Span;
-                state.AddInlayHint(span, $": {inferredType}");
+                state.AddInlayHint(span, $": {inferredType}", PscpInlayHintKind.InferredType, $"Inferred type of `{binding.Name}`.");
             }
 
             if (topLevel)
             {
+                // Guide §10.4: a compile-time constant is Constant (14), a type member's binding is Field (8)
+                // or Property (7), and any other top-level binding is Variable (13).
+                bool isConstant = !isMutable && equalIndex >= 0 && !isInputShorthand && IsCompileTimeConstant(state, equalIndex + 1, statementEnd);
+                int bindingKind = scope.TypeName is not null
+                    ? (isMutable ? 8 : 7)
+                    : isConstant ? 14 : 13;
+                string? detail = isInputShorthand
+                    ? $"{explicitType ?? "input"} (input)"
+                    : explicitType ?? inferredType;
                 state.AddDocumentSymbol(new PscpDocumentSymbol(
                     binding.Name,
-                    13,
+                    bindingKind,
                     new TextSpan(state.Tokens[saved].Position, Math.Max(0, EndOf(state.Tokens[Math.Max(statementEnd - 1, saved)]) - state.Tokens[saved].Position)),
                     state.Tokens[binding.TokenIndex].Span,
-                    Array.Empty<PscpDocumentSymbol>()));
+                    Array.Empty<PscpDocumentSymbol>(),
+                    detail));
             }
         }
 
         if (equalIndex >= 0)
         {
-            state.MarkToken(equalIndex, "operator");
+            state.MarkToken(equalIndex, "operator", isInputShorthand ? ["shorthand"] : Array.Empty<string>());
             if (isInputShorthand)
             {
-                state.SetHover(equalIndex, $"```pscp\n{snapshotText(state, saved, statementEnd)}\n```\n\nDeclaration-based input shorthand. This lowers to the corresponding `stdin.*` helper.");
+                state.SetHover(equalIndex, BuildInputShorthandHover(snapshotText(state, saved, statementEnd), explicitType, bindings.Count));
             }
             else
             {
@@ -643,7 +913,17 @@ internal sealed partial class PscpAnalyzer
 
         state.MarkToken(inIndex, "keyword");
         int doIndex = FindTopLevelToken(state.Tokens, cursor, endExclusive, TokenKind.Do);
-        int openBraceIndex = FindTopLevelToken(state.Tokens, cursor, endExclusive, TokenKind.OpenBrace);
+        // The body brace has to belong to this declaration. Searching the rest of the file would find the next
+        // function's brace and treat that function's body as this type's members.
+        int braceCandidate = cursor;
+        while (braceCandidate < endExclusive && state.Tokens[braceCandidate].Kind == TokenKind.NewLine)
+        {
+            braceCandidate++;
+        }
+
+        int openBraceIndex = braceCandidate < endExclusive && state.Tokens[braceCandidate].Kind == TokenKind.OpenBrace
+            ? braceCandidate
+            : -1;
         int sourceEnd = doIndex >= 0 && (openBraceIndex < 0 || doIndex < openBraceIndex) ? doIndex : openBraceIndex;
         if (sourceEnd < 0)
         {
@@ -865,31 +1145,6 @@ internal sealed partial class PscpAnalyzer
         }
 
         state.AddReference(symbol!, tokenIndex, isDeclaration: false, isWrite: true);
-        if (!symbol!.IsMutable
-            && symbol.Kind is not PscpServerSymbolKind.Function and not PscpServerSymbolKind.Intrinsic
-            && !IsKnownCollectionMutationAssignment(symbol.TypeDisplay, assignmentKind))
-        {
-            state.AddDiagnostic("PSCP2007", $"Cannot assign to immutable binding `{symbol.Name}`.", state.Tokens[tokenIndex].Span, ServerDiagnosticSeverity.Error, symbol.Id);
-        }
-    }
-
-    private static bool IsKnownCollectionMutationAssignment(string? typeDisplay, TokenKind assignmentKind)
-    {
-        if (assignmentKind is not (TokenKind.PlusEqual or TokenKind.MinusEqual)
-            || string.IsNullOrWhiteSpace(typeDisplay))
-        {
-            return false;
-        }
-
-        string normalized = PscpExternalMetadata.NormalizeTypeReceiver(typeDisplay!);
-        return normalized is "List"
-            or "LinkedList"
-            or "Queue"
-            or "Stack"
-            or "HashSet"
-            or "SortedSet"
-            or "Dictionary"
-            or "PriorityQueue";
     }
 
     private string? InferLoopVariableType(AnalyzerState state, Scope scope, int start, int endExclusive)
@@ -913,21 +1168,219 @@ internal sealed partial class PscpAnalyzer
         };
     }
 
-    private static string BuildSymbolDocumentation(string name, string? typeDisplay, bool isMutable, bool isInputShorthand)
+    // Guide §7.2: the output shorthand shows `write` or `writeln` and the rendering rule that the value's
+    // static type selects (spec §18.3).
+    private static string BuildOutputShorthandHover(bool isWrite, string? valueType)
     {
-        List<string> lines = [$"`{name}`"];
-        if (!string.IsNullOrWhiteSpace(typeDisplay))
+        string method = isWrite ? "write" : "writeln";
+        string newline = isWrite ? "without a trailing newline" : "followed by a newline";
+        List<string> lines =
+        [
+            $"```pscp\n{(isWrite ? "=" : "+=")} expr\n```",
+            $"Output shorthand: it writes the rendered value {newline}.",
+        ];
+
+        if (RenderingRule(valueType) is { } rule)
         {
-            lines.Add($"type: `{typeDisplay}`");
+            lines.Add($"`{SizedArrayPattern.Replace(valueType!, "[]")}` renders as {rule}.");
         }
 
-        lines.Add(isMutable ? "mutable binding" : "immutable binding");
+        lines.Add($"→ C#: `__pscp_stdout.{method}(expr)`");
+        lines.Add($"[Spec §18.3 렌더링 규칙]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("183-렌더링-규칙")})");
+        return string.Join("\n\n", lines);
+    }
+
+    // Spec §18.3. Only the shapes the analyzer can name from a static type are described.
+    private static string? RenderingRule(string? valueType)
+    {
+        if (string.IsNullOrWhiteSpace(valueType))
+        {
+            return null;
+        }
+
+        // A declared array carries its size expressions (`char[n][n]`); the rendering rule depends only on
+        // the element type.
+        valueType = SizedArrayPattern.Replace(valueType!, "[]");
+
+        if (valueType is "int" or "long" or "short" or "byte" or "sbyte" or "uint" or "ulong" or "ushort" or "decimal")
+        {
+            return "a decimal number";
+        }
+
+        if (valueType is "double" or "float")
+        {
+            return "the shortest round-trippable decimal form, never in exponent notation";
+        }
+
+        if (valueType is "bool")
+        {
+            return "`true` or `false`, lowercase";
+        }
+
+        if (valueType is "char" or "string")
+        {
+            return "the characters themselves";
+        }
+
+        if (valueType.StartsWith('(') || valueType.StartsWith("KeyValuePair", StringComparison.Ordinal))
+        {
+            return "its elements joined by one space";
+        }
+
+        string? element = CollectionElementType(valueType);
+        if (element is null)
+        {
+            return null;
+        }
+
+        if (element is "char")
+        {
+            return "its characters joined with no separator";
+        }
+
+        return CollectionElementType(element) is not null || element.StartsWith('(')
+            ? "one element per line, each element by the rules above"
+            : "its elements joined by one space";
+    }
+
+    private static string? CollectionElementType(string type)
+    {
+        if (type.EndsWith("[]", StringComparison.Ordinal))
+        {
+            return type[..^2];
+        }
+
+        foreach (string name in (string[])["List<", "IEnumerable<", "HashSet<", "SortedSet<", "Queue<", "Stack<", "LinkedList<"])
+        {
+            if (type.StartsWith(name, StringComparison.Ordinal) && type.EndsWith('>'))
+            {
+                return type[name.Length..^1];
+            }
+        }
+
+        return null;
+    }
+
+    // Guide §7.2: the input shorthand `=` shows how each element is read, how many are read, and the
+    // element-by-element lowering (spec §17.1).
+    private static string BuildInputShorthandHover(string shape, string? declaredType, int bindingCount)
+    {
+        string element = declaredType is null ? "value" : declaredType.Split('[')[0].TrimEnd('?');
+        string reader = element switch
+        {
+            "int" => "readInt()",
+            "long" => "readLong()",
+            "double" => "readDouble()",
+            "decimal" => "readDecimal()",
+            "bool" => "readBool()",
+            "string" => "readString()   // one whitespace-delimited token",
+            "char" => "readChar()   // one character, whitespace skipped",
+            _ => "read the element",
+        };
+
+        // `int[n][m] grid =` reads `n × m` elements in row-major order; `int a, b =` reads one per name.
+        int dimensions = declaredType is null ? 0 : declaredType.Count(character => character == '[');
+        string count = dimensions switch
+        {
+            0 when bindingCount > 1 => $"{bindingCount} values, one per name, in declaration order",
+            0 => "one value",
+            1 => "one value per element, in order",
+            _ => $"one value per element in {dimensions} dimensions, in row-major order",
+        };
+
+        return $"```pscp\n{shape}\n```\n\nInput shorthand: it reads {count} from `stdin`. A `char` element is read character by character, so a grid reads the same whether or not its rows carry spaces.\n\n→ C#: `__pscp_stdin.{reader}` per element\n\n[Spec §17.1 선언 기반 입력 shorthand]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("171-선언-기반-입력-shorthand")})";
+    }
+
+    // Guide §7.2: a binding shows its declaration form, its type, whether it is immutable, and what the
+    // binding lowers to (spec §9.6).
+    private static string BuildSymbolDocumentation(
+        string name,
+        string? typeDisplay,
+        bool isMutable,
+        bool isInputShorthand,
+        string declarationKeyword = "",
+        string? explicitType = null,
+        bool topLevel = false,
+        bool isCompileTimeConstant = false)
+    {
+        string prefix = declarationKeyword.Length > 0 ? declarationKeyword + " " : string.Empty;
+        string shape = explicitType is null
+            ? $"{prefix}{name}{(typeDisplay is null ? string.Empty : $": {typeDisplay}")}"
+            : $"{prefix}{explicitType} {name}";
+
+        List<string> lines =
+        [
+            $"```pscp\n{shape}\n```",
+            isMutable ? "Mutable binding." : "Immutable binding.",
+        ];
+
         if (isInputShorthand)
         {
-            lines.Add("declared via input shorthand");
+            lines.Add("Declared by the input shorthand: the value is read from `stdin`.");
         }
 
+        // Spec §9.6: an immutable binding whose initializer is a compile-time constant becomes `const`, and a
+        // `const` binding is the only one a type declaration can see (spec §9.5). Everything else stays a
+        // local of the generated entry-point method.
+        string type = typeDisplay ?? "var";
+        if (!isMutable && isCompileTimeConstant)
+        {
+            lines.Add($"→ C#: `const {type} {name} = ...;`");
+            lines.Add("A compile-time constant, so it is visible inside a type declaration as well.");
+        }
+        else
+        {
+            lines.Add($"→ C#: `{type} {name} = ...;`{(topLevel ? "  (a local of the generated entry point)" : string.Empty)}");
+        }
+
+        lines.Add($"[Spec §9.6 const / readonly lowering]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("96-const--readonly-lowering")})");
         return string.Join("\n\n", lines);
+    }
+
+    // Spec §9.6: only a literal-and-operator expression is a compile-time constant.
+    private static bool IsCompileTimeConstant(AnalyzerState state, int start, int endExclusive)
+    {
+        bool sawValue = false;
+        for (int i = start; i < endExclusive; i++)
+        {
+            switch (state.Tokens[i].Kind)
+            {
+                case TokenKind.IntegerLiteral:
+                case TokenKind.FloatLiteral:
+                case TokenKind.StringLiteral:
+                case TokenKind.CharLiteral:
+                case TokenKind.True:
+                case TokenKind.False:
+                    sawValue = true;
+                    break;
+                case TokenKind.Plus:
+                case TokenKind.Minus:
+                case TokenKind.Star:
+                case TokenKind.Slash:
+                case TokenKind.Percent:
+                case TokenKind.OpenParen:
+                case TokenKind.CloseParen:
+                case TokenKind.NewLine:
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        return sawValue;
+    }
+
+    // A type member may carry `public`, `static`, `readonly` and friends before its type (spec §26.1). They
+    // are keywords to the classifier and otherwise skipped.
+    private static void SkipMemberModifiers(AnalyzerState state, ref int index, int endExclusive)
+    {
+        while (index < endExclusive
+            && state.Tokens[index].Kind == TokenKind.Identifier
+            && IsTypeModifier(state.Tokens[index].Text))
+        {
+            state.MarkToken(index, "modifier");
+            index++;
+        }
     }
 
     private static bool IsTypeModifier(string text)
@@ -943,7 +1396,36 @@ internal sealed partial class PscpAnalyzer
             or "unsafe";
 
     private static string snapshotText(AnalyzerState state, int startTokenIndex, int endTokenIndexExclusive)
-        => string.Concat(state.Tokens.Skip(startTokenIndex).Take(Math.Max(0, endTokenIndexExclusive - startTokenIndex)).Select(token => token.Text == "\n" ? "\n" : token.Text + (NeedsTrailingSpace(token.Kind) ? " " : string.Empty))).Trim();
+    {
+        int end = Math.Min(endTokenIndexExclusive, state.Tokens.Count);
+        StringBuilder text = new();
+        for (int i = startTokenIndex; i < end; i++)
+        {
+            Token token = state.Tokens[i];
+            if (token.Text == "\n")
+            {
+                text.Append('\n');
+                continue;
+            }
+
+            text.Append(token.Text);
+            // `char[n][n] board` must not come out as `char [n ][n ]board`: a bracket, a separator or a
+            // member access binds tight to what precedes it.
+            TokenKind next = i + 1 < end ? state.Tokens[i + 1].Kind : TokenKind.EndOfFile;
+            bool tightNext = next is TokenKind.CloseBracket or TokenKind.CloseParen
+                or TokenKind.OpenBracket or TokenKind.OpenParen or TokenKind.Comma or TokenKind.Dot
+                or TokenKind.Semicolon or TokenKind.LessThan or TokenKind.GreaterThan or TokenKind.EndOfFile;
+            // `char[n][n] board`: a closing bracket still needs a space before the name that follows it.
+            bool closingBeforeName = token.Kind is TokenKind.CloseBracket or TokenKind.CloseParen or TokenKind.GreaterThan
+                && next is TokenKind.Identifier;
+            if (closingBeforeName || (NeedsTrailingSpace(token.Kind) && !tightNext))
+            {
+                text.Append(' ');
+            }
+        }
+
+        return text.ToString().Trim();
+    }
 
     private static bool NeedsTrailingSpace(TokenKind kind)
         => kind is TokenKind.Identifier or TokenKind.IntegerLiteral or TokenKind.FloatLiteral or TokenKind.StringLiteral or TokenKind.CharLiteral

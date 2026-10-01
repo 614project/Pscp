@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 
 namespace Pscp.Transpiler;
 
@@ -13,19 +13,36 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<string> _declaredValueNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Stack<string>> _identifierAliases = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectScalarWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectScalarWritelnKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectNullableScalarWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectNullableScalarWritelnKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectArrayWriteKinds = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _stdoutDirectArrayWritelnKinds = new(StringComparer.Ordinal);
     private string _className = string.Empty;
     private string _runMethodName = "Run";
     private bool _emitStdin;
     private bool _emitStdout;
-    private bool _stdoutNeedsBlankLine;
-    private bool _stdoutNeedsFallbackHelpers;
     private int _temporaryId;
+
+    // Return types of the functions being emitted: a `return` value and a tail value are target-typed (§22.6).
+    private readonly Stack<TypeSyntax?> _returnTypes = new();
+
+    private TypeSyntax? CurrentReturnType => _returnTypes.Count > 0 ? _returnTypes.Peek() : null;
+
+    private T WithReturnType<T>(TypeSyntax? returnType, Func<T> emit)
+    {
+        _returnTypes.Push(returnType is null || GetIsVoid(returnType) ? null : returnType);
+        try
+        {
+            return emit();
+        }
+        finally
+        {
+            _returnTypes.Pop();
+        }
+    }
+
+    private void WithReturnType(TypeSyntax? returnType, Action emit)
+        => WithReturnType(returnType, () =>
+        {
+            emit();
+            return 0;
+        });
 
     private sealed record ConstructorShape(int ParameterCount);
 
@@ -52,9 +69,16 @@ internal sealed partial class CSharpEmitter
         CollectHoistedGlobalDeclarations(program);
         ChooseGeneratedMemberNames();
 
+        CollectTypeVisibleConstants(program);
         foreach (string usingLine in CollectUsings(program))
         {
             _writer.WriteLine(usingLine);
+        }
+
+        // Types see the top-level constants they use (spec §7.4) through the program class.
+        if (_typeVisibleConstants.Count > 0)
+        {
+            _writer.WriteLine($"using static {program.NamespaceName ?? _options.Namespace}.{_className};");
         }
 
         _writer.WriteLine();
@@ -78,14 +102,16 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine($"public static class {_className}");
         _writer.WriteLine("{");
         _writer.Indent();
+        // Generated names use the reserved `__pscp` prefix, so they never collide with user names (spec §5.4).
+        // They are internal so type declarations can reach them through `using static`.
         if (_emitStdin)
         {
-            _writer.WriteLine("private static readonly __PscpStdin stdin = new();");
+            _writer.WriteLine($"internal static readonly __PscpStdin {PscpBinder.StdinName} = new();");
         }
 
         if (_emitStdout)
         {
-            _writer.WriteLine("private static readonly __PscpStdout stdout = new();");
+            _writer.WriteLine($"internal static readonly __PscpStdout {PscpBinder.StdoutName} = new();");
         }
 
         if (_emitStdin || _emitStdout)
@@ -93,6 +119,7 @@ internal sealed partial class CSharpEmitter
             _writer.WriteLine();
         }
 
+        EmitTypeVisibleConstants();
         EmitHoistedGlobalFields();
 
         foreach (FunctionDeclaration function in program.Functions)
@@ -215,6 +242,52 @@ internal sealed partial class CSharpEmitter
         return string.Join("\n", result);
     }
 
+    // Top-level `let` constants read inside type declarations become class-level constants (spec §7.5).
+    private readonly List<DeclarationStatement> _typeVisibleConstants = [];
+
+    private void CollectTypeVisibleConstants(PscpProgram program)
+    {
+        if (_semantic is null || _semantic.ConstantsUsedByTypes.Count == 0)
+        {
+            return;
+        }
+
+        foreach (DeclarationStatement declaration in program.GlobalStatements.OfType<DeclarationStatement>())
+        {
+            if (declaration is { IsInputShorthand: false, Initializer: not null, Targets.Count: 1 }
+                && declaration.Targets[0] is NameTarget name
+                && _semantic.ConstantsUsedByTypes.Contains(name.Name))
+            {
+                _typeVisibleConstants.Add(declaration);
+            }
+        }
+    }
+
+    private void EmitTypeVisibleConstants()
+    {
+        foreach (DeclarationStatement declaration in _typeVisibleConstants)
+        {
+            string name = ((NameTarget)declaration.Targets[0]).Name;
+            TypeSyntax? type = GetDeclarationEmissionType(declaration);
+            string typeText = type is null ? "object" : EmitType(type);
+            if (TryGetConstInitializer(declaration.Initializer!, out string? constText, out string? constType)
+                && (type is null ? constType : TryGetConstTypeText(type)) is string constTypeText
+                && IsConstInitializerCompatible(constTypeText, constType!))
+            {
+                _writer.WriteLine($"public const {constTypeText} {name} = {constText};");
+            }
+            else
+            {
+                _writer.WriteLine($"public static readonly {typeText} {name} = {EmitExpression(declaration.Initializer!, type)};");
+            }
+        }
+
+        if (_typeVisibleConstants.Count > 0)
+        {
+            _writer.WriteLine();
+        }
+    }
+
     private void CollectHoistedGlobalDeclarations(PscpProgram program)
     {
         HashSet<string> referencedNames = [];
@@ -225,7 +298,7 @@ internal sealed partial class CSharpEmitter
 
         foreach (DeclarationStatement declaration in program.GlobalStatements.OfType<DeclarationStatement>())
         {
-            if (CanHoistGlobalDeclaration(declaration) && IsReferencedOutsideMain(declaration, referencedNames))
+            if (!_typeVisibleConstants.Contains(declaration) && CanHoistGlobalDeclaration(declaration) && IsReferencedOutsideMain(declaration, referencedNames))
             {
                 _hoistedGlobalDeclarations.Add(declaration);
             }
@@ -346,229 +419,40 @@ internal sealed partial class CSharpEmitter
 
     private static void CollectReferencedNames(BlockStatement block, HashSet<string> names)
     {
-        foreach (Statement statement in block.Statements)
-        {
-            CollectReferencedNames(statement, names);
-        }
+        IdentifierCollector collector = new(names);
+        collector.VisitBlock(block);
     }
 
-    private static void CollectReferencedNames(Statement statement, HashSet<string> names)
+    // Names of all identifiers referenced below a node.
+    private sealed class IdentifierCollector : SyntaxRewriter
     {
-        switch (statement)
+        private readonly HashSet<string> _names;
+
+        public IdentifierCollector(HashSet<string> names)
+            : base(SyntaxSpans.Empty)
         {
-            case BlockStatement block:
-                CollectReferencedNames(block, names);
-                break;
-            case DeclarationStatement declaration when declaration.Initializer is not null:
-                CollectReferencedNames(declaration.Initializer, names);
-                break;
-            case ExpressionStatement expressionStatement:
-                CollectReferencedNames(expressionStatement.Expression, names);
-                break;
-            case AssignmentStatement assignment:
-                CollectReferencedNames(assignment.Target, names);
-                CollectReferencedNames(assignment.Value, names);
-                break;
-            case OutputStatement output:
-                CollectReferencedNames(output.Expression, names);
-                break;
-            case IfStatement ifStatement:
-                CollectReferencedNames(ifStatement.Condition, names);
-                CollectReferencedNames(ifStatement.ThenBranch, names);
-                if (ifStatement.ElseBranch is not null) CollectReferencedNames(ifStatement.ElseBranch, names);
-                break;
-            case WhileStatement whileStatement:
-                CollectReferencedNames(whileStatement.Condition, names);
-                CollectReferencedNames(whileStatement.Body, names);
-                break;
-            case ForInStatement forIn:
-                CollectReferencedNames(forIn.Source, names);
-                CollectReferencedNames(forIn.Body, names);
-                break;
-            case FastForStatement fastFor:
-                CollectReferencedNames(fastFor.Source, names);
-                CollectReferencedNames(fastFor.Body, names);
-                break;
-            case ReturnStatement { Expression: not null } returnStatement:
-                CollectReferencedNames(returnStatement.Expression!, names);
-                break;
-            case LocalFunctionStatement localFunction:
-                CollectReferencedNames(localFunction.Function.Body, names);
-                break;
+            _names = names;
+        }
+
+        public override Expression VisitIdentifier(IdentifierExpression identifier)
+        {
+            _names.Add(identifier.Name);
+            return identifier;
         }
     }
 
-    private static void CollectReferencedNames(Expression expression, HashSet<string> names)
-    {
-        switch (expression)
-        {
-            case IdentifierExpression identifier:
-                names.Add(identifier.Name);
-                break;
-            case TupleExpression tuple:
-                foreach (Expression element in tuple.Elements) CollectReferencedNames(element, names);
-                break;
-            case BlockExpression block:
-                CollectReferencedNames(block.Block, names);
-                break;
-            case IfExpression ifExpression:
-                CollectReferencedNames(ifExpression.Condition, names);
-                CollectReferencedNames(ifExpression.ThenExpression, names);
-                CollectReferencedNames(ifExpression.ElseExpression, names);
-                break;
-            case ConditionalExpression conditional:
-                CollectReferencedNames(conditional.Condition, names);
-                CollectReferencedNames(conditional.WhenTrue, names);
-                CollectReferencedNames(conditional.WhenFalse, names);
-                break;
-            case UnaryExpression unary:
-                CollectReferencedNames(unary.Operand, names);
-                break;
-            case AssignmentExpression assignment:
-                CollectReferencedNames(assignment.Target, names);
-                CollectReferencedNames(assignment.Value, names);
-                break;
-            case PrefixExpression prefix:
-                CollectReferencedNames(prefix.Operand, names);
-                break;
-            case PostfixExpression postfix:
-                CollectReferencedNames(postfix.Operand, names);
-                break;
-            case BinaryExpression binary:
-                CollectReferencedNames(binary.Left, names);
-                CollectReferencedNames(binary.Right, names);
-                break;
-            case RangeExpression range:
-                CollectReferencedNames(range.Start, names);
-                if (range.Step is not null) CollectReferencedNames(range.Step, names);
-                CollectReferencedNames(range.End, names);
-                break;
-            case IsPatternExpression isPattern:
-                CollectReferencedNames(isPattern.Left, names);
-                if (isPattern.Pattern is ConstantPatternSyntax constantPattern) CollectReferencedNames(constantPattern.Expression, names);
-                break;
-            case CallExpression call:
-                CollectReferencedNames(call.Callee, names);
-                foreach (ArgumentSyntax argument in call.Arguments)
-                {
-                    switch (argument)
-                    {
-                        case ExpressionArgumentSyntax expressionArgument:
-                            CollectReferencedNames(expressionArgument.Expression, names);
-                            break;
-                    }
-                }
-                break;
-            case MemberAccessExpression member:
-                CollectReferencedNames(member.Receiver, names);
-                break;
-            case IndexExpression index:
-                CollectReferencedNames(index.Receiver, names);
-                foreach (Expression argument in index.Arguments) CollectReferencedNames(argument, names);
-                break;
-            case WithExpression @with:
-                CollectReferencedNames(@with.Receiver, names);
-                foreach (WithAssignment assignment in @with.Assignments) CollectReferencedNames(assignment.Value, names);
-                break;
-            case SwitchExpression @switch:
-                CollectReferencedNames(@switch.Receiver, names);
-                foreach (SwitchArm arm in @switch.Arms)
-                {
-                    if (arm.Guard is not null) CollectReferencedNames(arm.Guard, names);
-                    CollectReferencedNames(arm.Result, names);
-                }
-                break;
-            case FromEndExpression fromEnd:
-                CollectReferencedNames(fromEnd.Operand, names);
-                break;
-            case SliceExpression slice:
-                if (slice.Start is not null) CollectReferencedNames(slice.Start, names);
-                if (slice.End is not null) CollectReferencedNames(slice.End, names);
-                break;
-            case TupleProjectionExpression projection:
-                CollectReferencedNames(projection.Receiver, names);
-                break;
-            case LambdaExpression lambda:
-                switch (lambda.Body)
-                {
-                    case LambdaExpressionBody expressionBody:
-                        CollectReferencedNames(expressionBody.Expression, names);
-                        break;
-                    case LambdaBlockBody blockBody:
-                        CollectReferencedNames(blockBody.Block, names);
-                        break;
-                }
-                break;
-            case NewExpression creation:
-                foreach (ArgumentSyntax argument in creation.Arguments)
-                {
-                    if (argument is ExpressionArgumentSyntax expressionArgument)
-                    {
-                        CollectReferencedNames(expressionArgument.Expression, names);
-                    }
-                }
-                break;
-            case NewArrayExpression newArray:
-                foreach (Expression dimension in newArray.Dimensions) CollectReferencedNames(dimension, names);
-                break;
-            case TargetTypedNewArrayExpression targetTypedNewArray:
-                foreach (Expression dimension in targetTypedNewArray.Dimensions) CollectReferencedNames(dimension, names);
-                break;
-            case CollectionExpression collection:
-                foreach (CollectionElement element in collection.Elements)
-                {
-                    switch (element)
-                    {
-                        case ExpressionElement expressionElement:
-                            CollectReferencedNames(expressionElement.Expression, names);
-                            break;
-                        case RangeElement rangeElement:
-                            CollectReferencedNames(rangeElement.Range, names);
-                            break;
-                        case SpreadElement spreadElement:
-                            CollectReferencedNames(spreadElement.Expression, names);
-                            break;
-                        case BuilderElement builderElement:
-                            CollectReferencedNames(builderElement.Source, names);
-                            switch (builderElement.Body)
-                            {
-                                case LambdaExpressionBody expressionBody:
-                                    CollectReferencedNames(expressionBody.Expression, names);
-                                    break;
-                                case LambdaBlockBody blockBody:
-                                    CollectReferencedNames(blockBody.Block, names);
-                                    break;
-                            }
-                            break;
-                    }
-                }
-                break;
-            case AggregationExpression aggregation:
-                CollectReferencedNames(aggregation.Source, names);
-                if (aggregation.WhereExpression is not null) CollectReferencedNames(aggregation.WhereExpression, names);
-                CollectReferencedNames(aggregation.Body, names);
-                break;
-            case GeneratorExpression generator:
-                CollectReferencedNames(generator.Source, names);
-                switch (generator.Body)
-                {
-                    case LambdaExpressionBody expressionBody:
-                        CollectReferencedNames(expressionBody.Expression, names);
-                        break;
-                    case LambdaBlockBody blockBody:
-                        CollectReferencedNames(blockBody.Block, names);
-                        break;
-                }
-                break;
-        }
-    }
-
-    private void EmitTypeDeclaration(TypeDeclaration declaration)
+    private void EmitTypeDeclaration(TypeDeclaration declaration, bool isNested = false)
     {
         _currentTypeStack.Push(declaration);
+        string emittedHeader = GetEmittedTypeHeader(declaration);
+        if (isNested && !HasAccessModifier(emittedHeader))
+        {
+            emittedHeader = "public " + emittedHeader;
+        }
+
         if (!declaration.HasBody)
         {
-            string header = GetEmittedTypeHeader(declaration);
+            string header = emittedHeader;
             _writer.WriteLine(header.EndsWith(";", StringComparison.Ordinal)
                 ? header
                 : header + ";");
@@ -576,7 +460,7 @@ internal sealed partial class CSharpEmitter
             return;
         }
 
-        _writer.WriteLine(GetEmittedTypeHeader(declaration));
+        _writer.WriteLine(emittedHeader);
         _writer.WriteLine("{");
         _writer.Indent();
         foreach (TypeMember member in declaration.Members)
@@ -588,12 +472,18 @@ internal sealed partial class CSharpEmitter
         _currentTypeStack.Pop();
     }
 
+    private static bool HasAccessModifier(string header)
+        => System.Text.RegularExpressions.Regex.IsMatch(header, @"^\s*(?:[a-z]+\s+)*?(?:public|private|protected|internal|file)\b");
+
     private void EmitTypeMember(TypeMember member)
     {
         switch (member)
         {
             case NestedTypeMember nested:
-                EmitTypeDeclaration(nested.Declaration);
+                EmitTypeDeclaration(nested.Declaration, isNested: true);
+                break;
+            case RawTypeMember raw:
+                _writer.WriteLine(raw.Text.Trim());
                 break;
             case FieldMember field:
                 EmitDeclaration(field.Declaration, isField: true, modifiers: field.Modifiers);
@@ -622,25 +512,33 @@ internal sealed partial class CSharpEmitter
         {
             string leftName = ordering.ParameterNames[0];
             string rightName = ordering.ParameterNames[1];
-            EmitMethodLike($"public static int CompareTo({currentType} {leftName}, {currentType} {rightName})", ordering.Body, isVoidLike: false);
+            WithReturnType(new NamedTypeSyntax("int", Immutable.List<TypeSyntax>()), () => EmitMethodLike($"public static int CompareTo({currentType} {leftName}, {currentType} {rightName})", ordering.Body, isVoidLike: false));
             _writer.WriteLine($"public int CompareTo({currentType} other) => CompareTo(this, other);");
         }
         else
         {
             string otherName = ordering.ParameterNames.Count == 0 ? "other" : ordering.ParameterNames[0];
-            EmitMethodLike($"public int CompareTo({currentType} {otherName})", ordering.Body, isVoidLike: false);
+            WithReturnType(new NamedTypeSyntax("int", Immutable.List<TypeSyntax>()), () => EmitMethodLike($"public int CompareTo({currentType} {otherName})", ordering.Body, isVoidLike: false));
             _writer.WriteLine($"public static int CompareTo({currentType} left, {currentType} right) => left.CompareTo(right);");
         }
 
-        _writer.WriteLine($"public static bool operator <({currentType} left, {currentType} right) => CompareTo(left, right) < 0;");
-        _writer.WriteLine($"public static bool operator >({currentType} left, {currentType} right) => CompareTo(left, right) > 0;");
-        _writer.WriteLine($"public static bool operator <=({currentType} left, {currentType} right) => CompareTo(left, right) <= 0;");
-        _writer.WriteLine($"public static bool operator >=({currentType} left, {currentType} right) => CompareTo(left, right) >= 0;");
+        // Spec §25.3: relational operators follow the order unless the type declares them itself.
+        HashSet<string> declaredOperators = _currentTypeStack.Peek().Members.OfType<OperatorMember>().Select(member => member.OperatorTokenText.Trim()).ToHashSet(StringComparer.Ordinal);
+        foreach (string op in new[] { "<", ">", "<=", ">=" })
+        {
+            if (!declaredOperators.Contains(op))
+            {
+                _writer.WriteLine($"public static bool operator {op}({currentType} left, {currentType} right) => CompareTo(left, right) {op} 0;");
+            }
+        }
     }
 
     private void EmitMethodMember(MethodMember method)
     {
-        string modifiers = method.Modifiers.Count == 0 ? "public " : string.Join(" ", method.Modifiers) + " ";
+        // Explicit interface implementations and static constructors take no access modifier.
+        string modifiers = method.Name.Contains('.') || (method.IsConstructor && method.Modifiers.Contains("static", StringComparer.Ordinal))
+            ? (method.Modifiers.Count == 0 ? string.Empty : string.Join(" ", method.Modifiers) + " ")
+            : FormatMemberModifiers(method.Modifiers);
         string parameters = string.Join(", ", method.Parameters.Select(EmitParameter));
         string signature = method.IsConstructor
             ? $"{modifiers}{method.Name}({parameters})"
@@ -650,19 +548,29 @@ internal sealed partial class CSharpEmitter
             signature += " " + method.InitializerText;
         }
 
-        EmitMethodLike(signature, method.Body, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType)));
+        if (!string.IsNullOrWhiteSpace(method.ConstraintText))
+        {
+            signature += " " + method.ConstraintText;
+        }
+
+        WithReturnType(method.IsConstructor ? null : method.ReturnType, () => EmitMethodLike(signature, method.Body, method.IsConstructor || (method.ReturnType is not null && GetIsVoid(method.ReturnType))));
     }
 
     private void EmitPropertyMember(PropertyMember property)
     {
-        string modifiers = property.Modifiers.Count == 0 ? "public " : string.Join(" ", property.Modifiers) + " ";
+        string modifiers = FormatMemberModifiers(property.Modifiers);
         string signature = $"{modifiers}{EmitType(property.Type)} {property.Name}";
-        switch (property.Body)
+        WithReturnType(property.Type, () => EmitPropertyBody(signature, property.Body));
+    }
+
+    private void EmitPropertyBody(string signature, MethodBody body)
+    {
+        switch (body)
         {
             case ExpressionMethodBody expressionBody:
                 if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike: false, isProperty: true))
                 {
-                    _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                    _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression, CurrentReturnType)};");
                 }
                 break;
             case BlockMethodBody blockBody:
@@ -690,7 +598,7 @@ internal sealed partial class CSharpEmitter
         }
 
         string signature = $"{string.Join(" ", modifiers)} {EmitType(@operator.ReturnType)} operator {@operator.OperatorTokenText}({string.Join(", ", @operator.Parameters.Select(EmitParameter))})";
-        EmitMethodLike(signature, @operator.Body, isVoidLike: GetIsVoid(@operator.ReturnType));
+        WithReturnType(@operator.ReturnType, () => EmitMethodLike(signature, @operator.Body, isVoidLike: GetIsVoid(@operator.ReturnType)));
     }
 
     private void EmitMethodLike(string signature, MethodBody body, bool isVoidLike)
@@ -700,7 +608,7 @@ internal sealed partial class CSharpEmitter
             case ExpressionMethodBody expressionBody:
                 if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike, isProperty: false))
                 {
-                    _writer.WriteLine($"{signature} => {EmitExpression(expressionBody.Expression)};");
+                    _writer.WriteLine($"{signature} => {(isVoidLike ? EmitExpression(expressionBody.Expression) : EmitExpression(expressionBody.Expression, CurrentReturnType))};");
                 }
                 break;
             case BlockMethodBody blockBody:
@@ -721,101 +629,72 @@ internal sealed partial class CSharpEmitter
         }
     }
 
+    // The body of a function that returns a value: its tail statement returns (spec §10.5).
     private void EmitValueAwareBlockContents(BlockStatement block)
     {
-        bool emittedTerminalReturn = false;
-        for (int i = 0; i < block.Statements.Count; i++)
+        for (int i = 0; i < block.Statements.Count - 1; i++)
         {
-            bool isTerminal = i == block.Statements.Count - 1;
-            if (EmitValueAwareStatement(block.Statements[i], isTerminal))
-            {
-                emittedTerminalReturn = isTerminal;
-                continue;
-            }
-
             EmitStatement(block.Statements[i]);
         }
 
-        if (!emittedTerminalReturn && !ContainsExplicitReturn(block))
+        if (block.Statements.Count > 0)
         {
-            _writer.WriteLine("return default!;");
+            EmitTailStatement(block.Statements[^1]);
         }
     }
 
-    private bool EmitValueAwareStatement(Statement statement, bool isTerminal)
+    // Tail position: the last statement of the body, of a nested block in tail position, and each branch of an
+    // `if` with `else` in tail position. Loops and `try` do not propagate it.
+    private void EmitTailStatement(Statement statement)
     {
         switch (statement)
         {
-            case ExpressionStatement { HasSemicolon: false } expressionStatement when isTerminal && IsImplicitReturnEligibleExpression(expressionStatement.Expression):
-                _writer.WriteLine($"return {EmitExpression(expressionStatement.Expression)};");
-                return true;
-            case BlockStatement block when isTerminal:
+            case ExpressionStatement expressionStatement when IsTailReturnEligible(expressionStatement.Expression):
+                EmitStatement(new ReturnStatement(expressionStatement.Expression));
+                return;
+            case BlockStatement block:
                 _writer.WriteLine("{");
                 _writer.Indent();
                 EmitValueAwareBlockContents(block);
                 _writer.Unindent();
                 _writer.WriteLine("}");
-                return true;
-            case IfStatement ifStatement when ifStatement.ElseBranch is null && CanEmitReturningStatement(ifStatement.ThenBranch):
-                _writer.WriteLine($"if ({EmitExpression(ifStatement.Condition)})");
-                EmitReturningEmbeddedStatement(ifStatement.ThenBranch);
-                return true;
-            case IfStatement ifStatement when isTerminal && ifStatement.ElseBranch is not null && CanEmitReturningStatement(ifStatement.ThenBranch) && CanEmitReturningStatement(ifStatement.ElseBranch):
-                _writer.WriteLine($"if ({EmitExpression(ifStatement.Condition)})");
-                EmitReturningEmbeddedStatement(ifStatement.ThenBranch);
-                _writer.WriteLine("else");
-                EmitReturningEmbeddedStatement(ifStatement.ElseBranch);
-                return true;
+                return;
+            case IfStatement { ElseBranch: not null } ifStatement:
+                EmitStatementWithHoisting(ifStatement.Condition, null, () => EmitTailIf(ifStatement, isElseIf: false));
+                return;
             default:
-                return false;
+                EmitStatement(statement);
+                return;
         }
     }
 
-    private bool CanEmitReturningStatement(Statement statement)
-        => statement switch
-        {
-            ReturnStatement => true,
-            ExpressionStatement { HasSemicolon: false } expressionStatement => IsImplicitReturnEligibleExpression(expressionStatement.Expression),
-            BlockStatement block => block.Statements.Count > 0 && CanEmitReturningStatement(block.Statements[^1]),
-            IfStatement ifStatement when ifStatement.ElseBranch is not null
-                => CanEmitReturningStatement(ifStatement.ThenBranch) && CanEmitReturningStatement(ifStatement.ElseBranch),
-            _ => false,
-        };
-
-    private void EmitReturningEmbeddedStatement(Statement statement)
+    private void EmitTailIf(IfStatement ifStatement, bool isElseIf)
     {
-        if (statement is ExpressionStatement { HasSemicolon: false } expressionStatement
-            && IsImplicitReturnEligibleExpression(expressionStatement.Expression))
+        _writer.WriteLine($"{(isElseIf ? "else if" : "if")} ({EmitExpression(ifStatement.Condition)})");
+        EmitTailEmbedded(ifStatement.ThenBranch);
+        if (ifStatement.ElseBranch is IfStatement { ElseBranch: not null } elseIf)
         {
-            _writer.WriteLine("{");
-            _writer.Indent();
-            _writer.WriteLine($"return {EmitExpression(expressionStatement.Expression)};");
-            _writer.Unindent();
-            _writer.WriteLine("}");
+            EmitTailIf(elseIf, isElseIf: true);
             return;
         }
 
+        _writer.WriteLine("else");
+        EmitTailEmbedded(ifStatement.ElseBranch!);
+    }
+
+    private void EmitTailEmbedded(Statement statement)
+    {
         if (statement is BlockStatement block)
         {
-            _writer.WriteLine("{");
-            _writer.Indent();
-            EmitValueAwareBlockContents(block);
-            _writer.Unindent();
-            _writer.WriteLine("}");
+            EmitTailStatement(block);
             return;
         }
 
-        if (statement is IfStatement nestedIf && nestedIf.ElseBranch is not null && CanEmitReturningStatement(nestedIf.ThenBranch) && CanEmitReturningStatement(nestedIf.ElseBranch))
-        {
-            _writer.WriteLine("{");
-            _writer.Indent();
-            EmitValueAwareStatement(nestedIf, isTerminal: true);
-            _writer.Unindent();
-            _writer.WriteLine("}");
-            return;
-        }
-
-        EmitEmbeddedStatement(statement);
+        _writer.WriteLine("{");
+        _writer.Indent();
+        EmitTailStatement(statement);
+        _writer.Unindent();
+        _writer.WriteLine("}");
     }
 
     private void EmitFunction(FunctionDeclaration function, bool includeAccessibility, bool isStatic)
@@ -827,17 +706,20 @@ internal sealed partial class CSharpEmitter
             prefix += "static ";
         }
 
-        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}({parameters})");
+        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}{function.TypeParameterText}({parameters}){(function.ConstraintText is null ? string.Empty : " " + function.ConstraintText)}");
         _writer.WriteLine("{");
         _writer.Indent();
-        if (GetIsVoid(function.ReturnType))
+        WithReturnType(function.ReturnType, () =>
         {
-            EmitBlockContents(function.Body, isVoidLike: true);
-        }
-        else
-        {
-            EmitValueAwareBlockContents(function.Body);
-        }
+            if (GetIsVoid(function.ReturnType))
+            {
+                EmitBlockContents(function.Body, isVoidLike: true);
+            }
+            else
+            {
+                EmitValueAwareBlockContents(function.Body);
+            }
+        });
         _writer.Unindent();
         _writer.WriteLine("}");
     }
@@ -850,7 +732,7 @@ internal sealed partial class CSharpEmitter
             => _declaredValueNames.Contains(name) || _declaredTypeNames.Contains(name);
 
         string className = _options.ClassName;
-        while (IsTaken(className) || className is "Main" or "stdin" or "stdout")
+        while (IsTaken(className) || className is "Main")
         {
             className += "Program";
         }
@@ -887,7 +769,7 @@ internal sealed partial class CSharpEmitter
 
         if (_emitStdout)
         {
-            _writer.WriteLine("stdout.flush();");
+            _writer.WriteLine("__pscp_stdout.flush();");
         }
         _writer.Unindent();
         _writer.WriteLine("}");
@@ -902,51 +784,35 @@ internal sealed partial class CSharpEmitter
 
     private void EmitTopLevelBlockContents(BlockStatement block)
     {
-        Expression? implicitReturn = GetImplicitReturnExpression(block);
-        int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
-
-        for (int i = 0; i < regularCount; i++)
+        foreach (Statement statement in block.Statements)
         {
-            if (block.Statements[i] is DeclarationStatement declaration && _hoistedGlobalDeclarations.Contains(declaration))
+            if (statement is DeclarationStatement typeConstant && _typeVisibleConstants.Contains(typeConstant))
+            {
+                continue;
+            }
+
+            if (statement is DeclarationStatement declaration && _hoistedGlobalDeclarations.Contains(declaration))
             {
                 EmitHoistedDeclarationInitialization(declaration);
             }
             else
             {
-                EmitStatement(block.Statements[i]);
+                EmitStatement(statement);
             }
-        }
-
-        if (implicitReturn is not null)
-        {
-            _writer.WriteLine($"{EmitStatementExpression(implicitReturn)};");
         }
     }
 
     private void EmitBlockContents(BlockStatement block, bool isVoidLike)
     {
-        Expression? implicitReturn = GetImplicitReturnExpression(block);
-        int regularCount = implicitReturn is null ? block.Statements.Count : block.Statements.Count - 1;
-
-        for (int i = 0; i < regularCount; i++)
+        if (!isVoidLike)
         {
-            EmitStatement(block.Statements[i]);
+            EmitValueAwareBlockContents(block);
+            return;
         }
 
-        if (implicitReturn is not null)
+        foreach (Statement statement in block.Statements)
         {
-            if (isVoidLike)
-            {
-                _writer.WriteLine($"{EmitStatementExpression(implicitReturn)};");
-            }
-            else
-            {
-                EmitStatementWithHoisting(implicitReturn, null, () => _writer.WriteLine($"return {EmitExpression(implicitReturn)};"));
-            }
-        }
-        else if (!isVoidLike && !ContainsExplicitReturn(block))
-        {
-            _writer.WriteLine("return default!;");
+            EmitStatement(statement);
         }
     }
 
@@ -1004,9 +870,9 @@ internal sealed partial class CSharpEmitter
                 EmitFastForStatement(fastFor);
                 break;
             case ReturnStatement returnStatement:
-                EmitStatementWithHoisting(returnStatement.Expression, null, () => _writer.WriteLine(returnStatement.Expression is null
+                EmitStatementWithHoisting(returnStatement.Expression, CurrentReturnType, () => _writer.WriteLine(returnStatement.Expression is null
                     ? "return;"
-                    : $"return {EmitExpression(returnStatement.Expression)};"));
+                    : $"return {EmitExpression(returnStatement.Expression, CurrentReturnType)};"));
                 break;
             case BreakStatement:
                 _writer.WriteLine("break;");
@@ -1017,7 +883,41 @@ internal sealed partial class CSharpEmitter
             case LocalFunctionStatement localFunction:
                 EmitFunction(localFunction.Function, includeAccessibility: false, isStatic: false);
                 break;
+            case TryStatement tryStatement:
+                EmitTryStatement(tryStatement);
+                break;
+            case ThrowStatement throwStatement:
+                EmitStatementWithHoisting(throwStatement.Expression, null, () => _writer.WriteLine(throwStatement.Expression is null
+                    ? "throw;"
+                    : $"throw {EmitExpression(throwStatement.Expression)};"));
+                break;
         }
+    }
+
+    // `try`/`catch`/`finally` pass through (spec §12); catch filters are PSCP expressions.
+    private void EmitTryStatement(TryStatement tryStatement)
+    {
+        _writer.WriteLine("try");
+        EmitEmbeddedStatement(tryStatement.Body);
+        foreach (CatchClause catchClause in tryStatement.Catches)
+        {
+            _writer.WriteLine(EmitCatchHeader(catchClause));
+            EmitEmbeddedStatement(catchClause.Body);
+        }
+
+        if (tryStatement.Finally is not null)
+        {
+            _writer.WriteLine("finally");
+            EmitEmbeddedStatement(tryStatement.Finally);
+        }
+    }
+
+    private string EmitCatchHeader(CatchClause catchClause)
+    {
+        string header = catchClause.Type is null
+            ? "catch"
+            : $"catch ({EmitType(catchClause.Type)}{(catchClause.Name is null ? string.Empty : " " + catchClause.Name)})";
+        return catchClause.Filter is null ? header : $"{header} when ({EmitExpression(catchClause.Filter)})";
     }
 
     private void EmitEmbeddedStatement(Statement statement)
@@ -1037,15 +937,11 @@ internal sealed partial class CSharpEmitter
 
     private void EmitDeclaration(DeclarationStatement declaration, bool isField, IReadOnlyList<string>? modifiers)
     {
-        string prefix = modifiers is { Count: > 0 }
-            ? string.Join(" ", modifiers) + " "
-            : isField ? GetImplicitFieldAccessibilityPrefix() : string.Empty;
-
         if (declaration.IsInputShorthand)
         {
             if (isField)
             {
-                _writer.WriteLine($"{prefix}// input shorthand is not supported for fields");
+                _writer.WriteLine("// input shorthand is not supported for fields");
             }
             else
             {
@@ -1056,7 +952,7 @@ internal sealed partial class CSharpEmitter
 
         if (isField)
         {
-            EmitFieldDeclaration(prefix, declaration);
+            EmitFieldDeclaration(modifiers ?? [], declaration);
             return;
         }
 
@@ -1143,8 +1039,19 @@ internal sealed partial class CSharpEmitter
         return true;
     }
 
-    private static bool TryGetConstInitializer(Expression expression, out string? initializerText, out string? literalType)
+    private bool TryGetConstInitializer(Expression expression, out string? initializerText, out string? literalType)
     {
+        // A constant expression over literals (`1L << 20`, `2 * 5`) keeps its C# form; its type is the analyzed
+        // type. Arithmetic wraps like at run time (spec §8.1), so it is written in an `unchecked` context.
+        if (expression is BinaryExpression && PscpSyntaxFacts.IsConstantExpression(expression)
+            && _semantic?.GetExpressionType(expression) is NamedTypeSyntax { TypeArguments.Count: 0 } constantType
+            && TryGetConstTypeText(constantType) is string constantTypeText)
+        {
+            initializerText = constantTypeText is "string" or "bool" ? EmitExpression(expression) : $"unchecked({EmitExpression(expression)})";
+            literalType = constantTypeText;
+            return true;
+        }
+
         if (expression is LiteralExpression literal)
         {
             return TryGetLiteralConstInitializer(literal, prefix: null, out initializerText, out literalType);
@@ -1197,16 +1104,6 @@ internal sealed partial class CSharpEmitter
     private static bool IsConstInitializerCompatible(string typeText, string literalType)
         => typeText == literalType
             || literalType == "int" && typeText is "long" or "double" or "decimal";
-
-    private string GetImplicitFieldAccessibilityPrefix()
-    {
-        if (_currentTypeStack.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        return IsValueTypeDeclaration(_currentTypeStack.Peek().HeaderText) ? "public " : string.Empty;
-    }
 
     private void CollectDeclaredTypeNames(IReadOnlyList<TypeDeclaration> types)
     {
@@ -1552,68 +1449,67 @@ internal sealed partial class CSharpEmitter
         return true;
     }
 
-    private void EmitFieldDeclaration(string prefix, DeclarationStatement declaration)
+    // Spec §28.2 and §9.6: an immutable field is `const` when its initializer is a compile-time constant,
+    // `static readonly` or `readonly` otherwise, unless it is assigned outside a constructor. A known
+    // auto-constructible field is created empty, and a sized array field is allocated.
+    private void EmitFieldDeclaration(IReadOnlyList<string> modifiers, DeclarationStatement declaration)
     {
-        if (TryGetFieldEntries(declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries))
+        if (!TryGetFieldEntries(declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries))
         {
-            foreach ((string fieldName, TypeSyntax fieldType, Expression? fieldInitializer) in entries!)
+            _writer.WriteLine($"// unsupported field declaration");
+            return;
+        }
+
+        string typeName = _currentTypeStack.Count > 0 ? _currentTypeStack.Peek().Name : string.Empty;
+        bool isStatic = modifiers.Contains("static", StringComparer.Ordinal);
+        foreach ((string fieldName, TypeSyntax fieldType, Expression? fieldInitializer) in entries!)
+        {
+            TypeSyntax emittedType = NormalizeSizedType(fieldType);
+            string typeText = EmitType(emittedType);
+            bool immutable = declaration.Mutability == MutabilityKind.Immutable
+                && _semantic?.MutatedImmutableFields.Contains(typeName + "." + fieldName) != true
+                && !modifiers.Contains("const", StringComparer.Ordinal)
+                && !modifiers.Contains("readonly", StringComparer.Ordinal);
+
+            string? initializer = fieldInitializer is null
+                ? declaration.ExplicitType switch
+                {
+                    SizedArrayTypeSyntax sized => EmitSizedArrayCreationExpression(sized),
+                    NamedTypeSyntax named when IsKnownAutoConstructType(named) => EmitAutoConstruction(named, targetTyped: true),
+                    _ => null,
+                }
+                : null;
+
+            if (immutable
+                && fieldInitializer is not null
+                && TryGetConstInitializer(fieldInitializer, out string? constText, out string? constType)
+                && TryGetConstTypeText(emittedType) is string fieldConstType
+                && IsConstInitializerCompatible(fieldConstType, constType!))
             {
-                string emittedTypeText = EmitType(fieldType);
-                if (fieldInitializer is null)
-                {
-                    if (fieldType is NamedTypeSyntax namedFieldType && IsKnownAutoConstructType(namedFieldType))
-                    {
-                        _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName} = new();");
-                    }
-                    else
-                    {
-                        _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName};");
-                    }
-                }
-                else
-                {
-                    string initializerText = EmitExpression(fieldInitializer, fieldType);
-                    _writer.WriteLine($"{prefix}{emittedTypeText} {fieldName} = {initializerText};");
-                }
+                List<string> constModifiers = [.. modifiers.Where(modifier => modifier != "static")];
+                _writer.WriteLine($"{FormatMemberModifiers(constModifiers)}const {typeText} {fieldName} = {constText};");
+                continue;
             }
 
-            return;
+            List<string> fieldModifiers = [.. modifiers];
+            if (immutable)
+            {
+                fieldModifiers.Add("readonly");
+            }
+
+            initializer ??= fieldInitializer is null ? null : EmitExpression(fieldInitializer, emittedType);
+            _writer.WriteLine(initializer is null
+                ? $"{FormatMemberModifiers(fieldModifiers)}{typeText} {fieldName};"
+                : $"{FormatMemberModifiers(fieldModifiers)}{typeText} {fieldName} = {initializer};");
         }
+    }
 
-        if (declaration.Targets.Count != 1 || declaration.Targets[0] is not NameTarget and not DiscardTarget)
-        {
-            string comment = declaration.Initializer is null
-                ? "unsupported field declaration"
-                : EmitExpression(declaration.Initializer, declaration.ExplicitType);
-            _writer.WriteLine($"{prefix}// {comment}");
-            return;
-        }
-
-        if (declaration.Targets[0] is DiscardTarget)
-        {
-            return;
-        }
-
-        string name = EmitBindingPattern(declaration.Targets[0]);
-        string typeText = declaration.ExplicitType is null ? "object" : EmitType(NormalizeSizedType(declaration.ExplicitType));
-        string initializer = declaration.Initializer is null
-            ? EmitImplicitInitializer(declaration.ExplicitType)
-            : EmitExpression(declaration.Initializer, declaration.ExplicitType);
-
-        if (declaration.ExplicitType is SizedArrayTypeSyntax sizedType && declaration.Initializer is null)
-        {
-            initializer = EmitSizedArrayCreationExpression(sizedType);
-            typeText = EmitType(new ArrayTypeSyntax(sizedType.ElementType, sizedType.Dimensions.Count));
-        }
-
-        if (declaration.Initializer is null
-            && !(declaration.ExplicitType is NamedTypeSyntax namedExplicitType && IsKnownAutoConstructType(namedExplicitType)))
-        {
-            _writer.WriteLine($"{prefix}{typeText} {name};");
-            return;
-        }
-
-        _writer.WriteLine($"{prefix}{typeText} {name} = {initializer};");
+    // Spec §28.2: a member without an access modifier is `public`.
+    private static string FormatMemberModifiers(IReadOnlyList<string> modifiers)
+    {
+        bool hasAccess = modifiers.Any(modifier => modifier is "public" or "private" or "protected" or "internal" or "file");
+        IEnumerable<string> all = hasAccess ? modifiers : modifiers.Prepend("public");
+        return string.Join(" ", all) + " ";
     }
 
     private bool TryGetFieldEntries(DeclarationStatement declaration, out IReadOnlyList<(string Name, TypeSyntax Type, Expression? Initializer)>? entries)
@@ -1689,7 +1585,7 @@ internal sealed partial class CSharpEmitter
     {
         if (explicitType is NamedTypeSyntax named && IsKnownAutoConstructType(named))
         {
-            return "new()";
+            return EmitAutoConstruction(named, targetTyped: true);
         }
 
         return "default!";
@@ -1751,11 +1647,11 @@ internal sealed partial class CSharpEmitter
         string indexName = NextTemporary("i");
         string elementTypeText = EmitType(arrayType.ElementType);
         _writer.WriteLine($"int {lengthName} = {EmitExpression(targetTypedNewArray.Dimensions[0])};");
-        _writer.WriteLine($"{name} = new {elementTypeText}[{lengthName}];");
+        _writer.WriteLine($"{name} = {NewArray(elementTypeText, lengthName)};");
         _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
         _writer.WriteLine("{");
         _writer.Indent();
-        _writer.WriteLine($"{name}[{indexName}] = new {elementTypeText}();");
+        _writer.WriteLine($"{name}[{indexName}] = {EmitAutoConstruction(namedElementType, targetTyped: false)};");
         _writer.Unindent();
         _writer.WriteLine("}");
         return true;
@@ -1783,13 +1679,13 @@ internal sealed partial class CSharpEmitter
 
         switch (collection.Elements[0])
         {
-            case RangeElement rangeElement when !IsLongRange(rangeElement.Range, declaredType):
+            case RangeElement rangeElement:
             {
                 string itemName = NextTemporary("value");
                 EmitRangeArrayInitialization(name, typeText, elementType, rangeElement.Range, itemName, null, itemName, declareVariable: false);
                 return true;
             }
-            case BuilderElement builderElement when builderElement.Source is RangeExpression range && !IsLongRange(range, declaredType):
+            case BuilderElement builderElement when builderElement.Source is RangeExpression range:
             {
                 string itemName = ChooseBindingName(builderElement.ItemTarget, "item");
                 string? indexName = builderElement.IndexTarget is null ? null : ChooseBindingName(builderElement.IndexTarget, "index");
@@ -1817,11 +1713,11 @@ internal sealed partial class CSharpEmitter
         string indexName = NextTemporary("i");
         string elementTypeText = EmitType(arrayType.ElementType);
         _writer.WriteLine($"int {lengthName} = {EmitExpression(targetTypedNewArray.Dimensions[0])};");
-        _writer.WriteLine($"{typeText} {name} = new {elementTypeText}[{lengthName}];");
+        _writer.WriteLine($"{typeText} {name} = {NewArray(elementTypeText, lengthName)};");
         _writer.WriteLine($"for (int {indexName} = 0; {indexName} < {lengthName}; {indexName}++)");
         _writer.WriteLine("{");
         _writer.Indent();
-        _writer.WriteLine($"{name}[{indexName}] = new {elementTypeText}();");
+        _writer.WriteLine($"{name}[{indexName}] = {EmitAutoConstruction(namedElementType, targetTyped: false)};");
         _writer.Unindent();
         _writer.WriteLine("}");
         return true;
@@ -1848,13 +1744,13 @@ internal sealed partial class CSharpEmitter
         {
             switch (collection.Elements[0])
             {
-                case RangeElement rangeElement when !IsLongRange(rangeElement.Range, declaredType):
+                case RangeElement rangeElement:
                 {
                     string itemName = NextTemporary("value");
                     EmitRangeArrayInitialization(name, typeText, elementType, rangeElement.Range, itemName, null, itemName);
                     return true;
                 }
-                case BuilderElement builderElement when builderElement.Source is RangeExpression range && !IsLongRange(range, declaredType):
+                case BuilderElement builderElement when builderElement.Source is RangeExpression range:
                 {
                     string itemName = ChooseBindingName(builderElement.ItemTarget, "item");
                     string? indexName = builderElement.IndexTarget is null ? null : ChooseBindingName(builderElement.IndexTarget, "index");
@@ -1921,83 +1817,8 @@ internal sealed partial class CSharpEmitter
 
     private void EmitRangeArrayInitialization(string name, string typeText, TypeSyntax elementType, RangeExpression range, string itemName, string? indexName, string valueExpression, bool declareVariable = true)
     {
-        string startName = NextTemporary("start");
-        string endName = NextTemporary("end");
-        string countName = NextTemporary("count");
-        string slotName = NextTemporary("slot");
-        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-        string EmitArrayAllocation(string lengthExpression)
-            => declareVariable
-                ? $"{typeText} {name} = new {EmitType(elementType)}[{lengthExpression}];"
-                : $"{name} = new {EmitType(elementType)}[{lengthExpression}];";
-
-        if (range.Step is null)
-        {
-            if (CanInlineDirectRangeExpression(range.Start) && CanInlineDirectRangeExpression(range.End))
-            {
-                string directStart = EmitExpression(range.Start);
-                string directEnd = EmitExpression(range.End);
-                string directCount = EmitDefaultRangeCountExpression(directStart, directEnd, range.Kind);
-                _writer.WriteLine(EmitArrayAllocation(directCount));
-                string directLoopHeader = indexName is null
-                    ? $"for (int {itemName} = {directStart}, {slotName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {slotName}++)"
-                    : $"for (int {itemName} = {directStart}, {indexName} = 0; {itemName} {comparison} {directEnd}; {itemName}++, {indexName}++)";
-                string slotExpression = indexName ?? slotName;
-                _writer.WriteLine(directLoopHeader);
-                _writer.WriteLine("{");
-                _writer.Indent();
-                _writer.WriteLine($"{name}[{slotExpression}] = {valueExpression};");
-                _writer.Unindent();
-                _writer.WriteLine("}");
-                return;
-            }
-
-            _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
-            _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
-            string countExpression = EmitDefaultRangeCountExpression(startName, endName, range.Kind);
-            _writer.WriteLine($"int {countName} = {countExpression};");
-            _writer.WriteLine(EmitArrayAllocation(countName));
-            _writer.WriteLine($"int {slotName} = 0;");
-            string defaultLoopHeader = indexName is null
-                ? $"for (int {itemName} = {startName}; {itemName} {comparison} {endName}; {itemName}++)"
-                : $"for (int {itemName} = {startName}, {indexName} = 0; {itemName} {comparison} {endName}; {itemName}++, {indexName}++)";
-            _writer.WriteLine(defaultLoopHeader);
-            _writer.WriteLine("{");
-            _writer.Indent();
-            _writer.WriteLine($"{name}[{slotName}++] = {valueExpression};");
-            _writer.Unindent();
-            _writer.WriteLine("}");
-            return;
-        }
-
-        _writer.WriteLine($"int {startName} = {EmitExpression(range.Start)};");
-        _writer.WriteLine($"int {endName} = {EmitExpression(range.End)};");
-        string stepName = NextTemporary("step");
-        string absStepName = NextTemporary("absStep");
-        string forwardCount = range.Kind == RangeKind.RightExclusive
-            ? $"{startName} < {endName} ? (({endName} - {startName} - 1) / {stepName}) + 1 : 0"
-            : $"{startName} <= {endName} ? (({endName} - {startName}) / {stepName}) + 1 : 0";
-        string backwardCount = range.Kind == RangeKind.RightExclusive
-            ? $"{startName} > {endName} ? (({startName} - {endName} - 1) / {absStepName}) + 1 : 0"
-            : $"{startName} >= {endName} ? (({startName} - {endName}) / {absStepName}) + 1 : 0";
-        string backwardOp = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
-        _writer.WriteLine($"int {stepName} = {EmitExpression(range.Step)};");
-        _writer.WriteLine("#if DEBUG");
-        _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
-        _writer.WriteLine("#endif");
-        _writer.WriteLine($"int {absStepName} = {stepName} > 0 ? {stepName} : -{stepName};");
-        _writer.WriteLine($"int {countName} = {stepName} > 0 ? {forwardCount} : {backwardCount};");
-        _writer.WriteLine(EmitArrayAllocation(countName));
-        _writer.WriteLine($"int {slotName} = 0;");
-        string loopHeader = indexName is null
-            ? $"for (int {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {backwardOp} {endName}; {itemName} += {stepName})"
-            : $"for (int {itemName} = {startName}, {indexName} = 0; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {backwardOp} {endName}; {itemName} += {stepName}, {indexName}++)";
-        _writer.WriteLine(loopHeader);
-        _writer.WriteLine("{");
-        _writer.Indent();
-        _writer.WriteLine($"{name}[{slotName}++] = {valueExpression};");
-        _writer.Unindent();
-        _writer.WriteLine("}");
+        RangePlan plan = PlanRange(range, new ArrayTypeSyntax(elementType, 1));
+        EmitRangeArrayFill(plan, name, typeText, EmitType(elementType), itemName, indexName, () => valueExpression, declareVariable);
     }
 
     private bool TryEmitLoweredCallDeclaration(string name, string typeText, TypeSyntax declaredType, CallExpression call)
@@ -2032,15 +1853,15 @@ internal sealed partial class CSharpEmitter
                     indexName,
                     sumGenerator.ItemTarget,
                     itemName,
-                    valueExpression => $"{name} += {valueExpression};",
+                    valueExpression => AccumulateStatement(name, valueExpression, declaredType),
                     out string loweredLoopBody)
                     ? loweredLoopBody
-                    : $"{name} += {EmitLambdaBodyExpression(sumGenerator.Body, sumGenerator.IndexTarget, indexName, sumGenerator.ItemTarget, itemName)};";
+                    : AccumulateStatement(name, EmitLambdaBodyExpression(sumGenerator.Body, sumGenerator.IndexTarget, indexName, sumGenerator.ItemTarget, itemName), declaredType);
                 _writer.WriteLine(EmitLoopOverSource(sumGenerator.Source, itemName, loopBody, indexName));
             }
             else
             {
-                _writer.WriteLine(EmitLoopOverSource(sumSource!, itemName, $"{name} += {itemName};"));
+                _writer.WriteLine(EmitLoopOverSource(sumSource!, itemName, AccumulateStatement(name, itemName, declaredType)));
             }
             return true;
         }
@@ -2081,7 +1902,7 @@ internal sealed partial class CSharpEmitter
             string itemName = ChooseBindingName(sumBySelector!.Parameters[0].Target, "item");
             string selectorExpression = EmitLambdaBodyExpression(sumBySelector.Body, null, null, sumBySelector.Parameters[0].Target, itemName);
             _writer.WriteLine($"{typeText} {name} = default;");
-            _writer.WriteLine(EmitLoopOverSource(sumBySource!, itemName, $"{name} += {selectorExpression};"));
+            _writer.WriteLine(EmitLoopOverSource(sumBySource!, itemName, AccumulateStatement(name, selectorExpression, declaredType)));
             return true;
         }
 
@@ -2156,76 +1977,17 @@ internal sealed partial class CSharpEmitter
             }
         }
 
-        if (intrinsicName == "sort" && TryGetSourceOnlyCall(receiver, call.Arguments, out Expression? sortSource))
+        // `sort` copies and sorts in place when an unstable sort cannot be observed: numbers other than `decimal`
+        // (equal values print alike), `char`, `bool`, and strings in ordinal order. Other element types use the
+        // stable runtime sort (spec §24).
+        if (intrinsicName == "sort"
+            && TryGetSourceOnlyCall(receiver, call.Arguments, out Expression? sortSource)
+            && GetCollectionElementType(declaredType) is NamedTypeSyntax { TypeArguments.Count: 0 } sortElement
+            && (sortElement.Name == "bool" || (sortElement.Name != "decimal" && GetOrderKind(sortElement) is OrderKind.Numeric or OrderKind.String)))
         {
+            OrderKind sortKind = GetOrderKind(sortElement);
             EmitSortedArrayDeclaration(name, typeText, sortSource!);
-            _writer.WriteLine($"Array.Sort({name});");
-            return true;
-        }
-
-        if (intrinsicName == "sortBy" && TryGetSourceAndUnaryLambdaCall(receiver, call.Arguments, out Expression? sortBySource, out LambdaExpression? sortBySelector))
-        {
-            TypeSyntax? keyType = sortBySelector!.Body switch
-            {
-                LambdaExpressionBody expressionBody => _semantic?.GetExpressionType(expressionBody.Expression),
-                LambdaBlockBody blockBody => blockBody.Block.Statements.LastOrDefault() is ExpressionStatement { HasSemicolon: false } tail
-                    ? _semantic?.GetExpressionType(tail.Expression)
-                    : null,
-                _ => null,
-            };
-
-            if (keyType is null)
-            {
-                return false;
-            }
-
-            EmitSortedArrayDeclaration(name, typeText, sortBySource!);
-            string leftName = NextTemporary("left");
-            string rightName = NextTemporary("right");
-            if (sortBySelector.Body is LambdaExpressionBody selectorBody)
-            {
-                string leftKeyName = NextTemporary("leftKey");
-                string rightKeyName = NextTemporary("rightKey");
-                string leftAliases = EmitBindingAliasStatements(null, null, sortBySelector.Parameters[0].Target, leftName);
-                string rightAliases = EmitBindingAliasStatements(null, null, sortBySelector.Parameters[0].Target, rightName);
-                string keyExpression = EmitExpression(selectorBody.Expression);
-
-                _writer.WriteLine($"Array.Sort({name}, ({leftName}, {rightName}) =>");
-                _writer.WriteLine("{");
-                _writer.Indent();
-                _writer.WriteLine($"{EmitType(keyType)} {leftKeyName};");
-                _writer.WriteLine("{");
-                _writer.Indent();
-                if (!string.IsNullOrWhiteSpace(leftAliases))
-                {
-                    _writer.WriteLine(leftAliases);
-                }
-
-                _writer.WriteLine($"{leftKeyName} = {keyExpression};");
-                _writer.Unindent();
-                _writer.WriteLine("}");
-                _writer.WriteLine($"{EmitType(keyType)} {rightKeyName};");
-                _writer.WriteLine("{");
-                _writer.Indent();
-                if (!string.IsNullOrWhiteSpace(rightAliases))
-                {
-                    _writer.WriteLine(rightAliases);
-                }
-
-                _writer.WriteLine($"{rightKeyName} = {keyExpression};");
-                _writer.Unindent();
-                _writer.WriteLine("}");
-                _writer.WriteLine($"return System.Collections.Generic.Comparer<{EmitType(keyType)}>.Default.Compare({leftKeyName}, {rightKeyName});");
-                _writer.Unindent();
-                _writer.WriteLine("});");
-            }
-            else
-            {
-                string leftKey = EmitLambdaBodyExpression(sortBySelector.Body, null, null, sortBySelector.Parameters[0].Target, leftName);
-                string rightKey = EmitLambdaBodyExpression(sortBySelector.Body, null, null, sortBySelector.Parameters[0].Target, rightName);
-                _writer.WriteLine($"Array.Sort({name}, ({leftName}, {rightName}) => System.Collections.Generic.Comparer<{EmitType(keyType)}>.Default.Compare({leftKey}, {rightKey}));");
-            }
-
+            _writer.WriteLine(sortKind == OrderKind.String ? $"Array.Sort({name}, StringComparer.Ordinal);" : $"Array.Sort({name});");
             return true;
         }
 
@@ -2339,8 +2101,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutUsage(output.Kind, _semantic.GetExpressionType(call));
-        _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        _writer.WriteLine($"{PscpBinder.StdoutName}.{ChooseStdoutWrite(output.Kind == OutputKind.Write ? "write" : "writeln", _semantic.GetExpressionType(call))}({tempName});");
         return true;
     }
 
@@ -2353,8 +2114,7 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        RegisterStdoutUsage(output.Kind, aggregationType);
-        _writer.WriteLine($"stdout.{(output.Kind == OutputKind.Write ? "write" : "writeln")}({tempName});");
+        _writer.WriteLine($"{PscpBinder.StdoutName}.{ChooseStdoutWrite(output.Kind == OutputKind.Write ? "write" : "writeln", aggregationType)}({tempName});");
         return true;
     }
 
@@ -2379,94 +2139,49 @@ internal sealed partial class CSharpEmitter
         => _writer.WriteLine($"{EmitStatementAssignmentExpression(new AssignmentExpression(assignment.Target, assignment.Operator, assignment.Value, false))};");
 
     private string EmitOutputInvocation(OutputKind kind, Expression expression)
+        => $"{PscpBinder.StdoutName}.{ChooseStdoutWrite(kind == OutputKind.Write ? "write" : "writeln", _semantic?.GetExpressionType(expression))}({EmitExpression(expression)});";
+
+    // Stdout members the program uses, as pruning keys: `writeln(int)`, `writeValue`, `lines`, ... (spec §31).
+    private readonly HashSet<string> _stdoutMembers = new(StringComparer.Ordinal) { "flush" };
+
+    // `write`/`writeln` bind to the overload for the static type; other values use the run-time renderer.
+    private string ChooseStdoutWrite(string method, TypeSyntax? type)
     {
-        RegisterStdoutUsage(kind, _semantic?.GetExpressionType(expression));
-        return $"stdout.{(kind == OutputKind.Write ? "write" : "writeln")}({EmitExpression(expression)});";
+        string? parameter = GetStdoutOverloadParameter(type);
+        if (parameter is null)
+        {
+            _stdoutMembers.Add(method + "Value");
+            return method + "Value";
+        }
+
+        _stdoutMembers.Add($"{method}({parameter})");
+        return method;
     }
 
-    private void RegisterExplicitStdoutCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments)
+    private static string? GetStdoutOverloadParameter(TypeSyntax? type)
+        => type switch
+        {
+            NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "float" or "decimal" or "bool" or "char" } named => named.Name,
+            NamedTypeSyntax { TypeArguments.Count: 0, Name: "string" } => "string?",
+            NullableTypeSyntax { InnerType: NamedTypeSyntax { TypeArguments.Count: 0, Name: "string" } } => "string?",
+            ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { TypeArguments.Count: 0, Name: "char" or "int" or "long" or "string" } element } => element.Name + "[]",
+            _ => null,
+        };
+
+    // An explicit `stdout.member(...)` call: `write`/`writeln` with one value pick their overload like `=`/`+=`.
+    private string? TryEmitExplicitStdoutCall(string memberName, IReadOnlyList<ArgumentSyntax> arguments)
     {
-        switch (memberName)
+        if (memberName is "write" or "writeln"
+            && arguments.Count == 1
+            && arguments[0] is ExpressionArgumentSyntax { Modifier: ArgumentModifier.None, Name: null } value)
         {
-            case "write":
-            case "writeln":
-                if (arguments.Count == 1 && arguments[0] is ExpressionArgumentSyntax expressionArgument)
-                {
-                    RegisterStdoutUsage(memberName == "write" ? OutputKind.Write : OutputKind.WriteLine, _semantic?.GetExpressionType(expressionArgument.Expression));
-                }
-                else if (memberName == "writeln" && arguments.Count == 0)
-                {
-                    _stdoutNeedsBlankLine = true;
-                }
-                else
-                {
-                    _stdoutNeedsFallbackHelpers = true;
-                }
-                break;
-            case "flush":
-                break;
-            default:
-                _stdoutNeedsFallbackHelpers = true;
-                break;
+            string chosen = ChooseStdoutWrite(memberName, _semantic?.GetExpressionType(value.Expression));
+            return $"{PscpBinder.StdoutName}.{chosen}({EmitExpression(value.Expression)})";
         }
+
+        _stdoutMembers.Add(memberName == "writeln" && arguments.Count == 0 ? "writeln()" : memberName);
+        return null;
     }
-
-    private void RegisterStdoutUsage(OutputKind kind, TypeSyntax? type)
-    {
-        if (type is NullableTypeSyntax nullable
-            && UnwrapNullableType(nullable.InnerType) is NamedTypeSyntax { TypeArguments.Count: 0 } nullableNamed
-            && IsDirectStdoutScalar(nullableNamed.Name))
-        {
-            RegisterStdoutScalarUsage(kind, nullableNamed.Name);
-            if (nullableNamed.Name != "string")
-            {
-                RegisterStdoutNullableScalarUsage(kind, nullableNamed.Name);
-            }
-            return;
-        }
-
-        TypeSyntax? normalized = UnwrapNullableType(type);
-        if (normalized is NamedTypeSyntax { TypeArguments.Count: 0 } named && IsDirectStdoutScalar(named.Name))
-        {
-            RegisterStdoutScalarUsage(kind, named.Name);
-            return;
-        }
-
-        if (normalized is ArrayTypeSyntax { Depth: 1, ElementType: NamedTypeSyntax { TypeArguments.Count: 0 } elementNamed }
-            && IsDirectStdoutScalar(elementNamed.Name))
-        {
-            _stdoutDirectScalarWriteKinds.Add(elementNamed.Name);
-            _stdoutDirectArrayWriteKinds.Add(elementNamed.Name);
-            if (kind == OutputKind.WriteLine)
-            {
-                _stdoutDirectArrayWritelnKinds.Add(elementNamed.Name);
-            }
-            return;
-        }
-
-        _stdoutNeedsFallbackHelpers = true;
-    }
-
-    private void RegisterStdoutScalarUsage(OutputKind kind, string scalarKind)
-    {
-        _stdoutDirectScalarWriteKinds.Add(scalarKind);
-        if (kind == OutputKind.WriteLine)
-        {
-            _stdoutDirectScalarWritelnKinds.Add(scalarKind);
-        }
-    }
-
-    private void RegisterStdoutNullableScalarUsage(OutputKind kind, string scalarKind)
-    {
-        _stdoutDirectNullableScalarWriteKinds.Add(scalarKind);
-        if (kind == OutputKind.WriteLine)
-        {
-            _stdoutDirectNullableScalarWritelnKinds.Add(scalarKind);
-        }
-    }
-
-    private static bool IsDirectStdoutScalar(string name)
-        => name is "int" or "long" or "double" or "decimal" or "bool" or "char" or "string";
 
     private void EmitExplainSourceHeader(string source)
     {
@@ -2569,355 +2284,47 @@ PSCP source:"
 
     private static (bool NeedsStdin, bool NeedsStdout) AnalyzeRuntimeUsage(PscpProgram program)
     {
-        bool needsStdin = false;
-        bool needsStdout = false;
-
-        foreach (TypeDeclaration type in program.Types)
-        {
-            AnalyzeRuntimeUsage(type, ref needsStdin, ref needsStdout);
-        }
-
-        foreach (FunctionDeclaration function in program.Functions)
-        {
-            AnalyzeRuntimeUsage(function.Body, ref needsStdin, ref needsStdout);
-        }
-
-        foreach (Statement statement in program.GlobalStatements)
-        {
-            AnalyzeRuntimeUsage(statement, ref needsStdin, ref needsStdout);
-        }
-
-        return (needsStdin, needsStdout);
+        RuntimeUsageWalker walker = new();
+        walker.VisitProgram(program);
+        return (walker.NeedsStdin, walker.NeedsStdout);
     }
 
-    private static void AnalyzeRuntimeUsage(TypeDeclaration declaration, ref bool needsStdin, ref bool needsStdout)
+    // Whether the program reads input or writes output, so only the used runtime objects are generated.
+    private sealed class RuntimeUsageWalker : SyntaxRewriter
     {
-        foreach (TypeMember member in declaration.Members)
+        public RuntimeUsageWalker()
+            : base(SyntaxSpans.Empty)
         {
-            switch (member)
-            {
-                case OrderingShorthandMember ordering:
-                    AnalyzeRuntimeUsage(ordering.Body, ref needsStdin, ref needsStdout);
-                    break;
-                case FieldMember field:
-                    AnalyzeRuntimeUsage(field.Declaration, ref needsStdin, ref needsStdout);
-                    break;
-                case PropertyMember property:
-                    AnalyzeRuntimeUsage(property.Body, ref needsStdin, ref needsStdout);
-                    break;
-                case MethodMember method:
-                    AnalyzeRuntimeUsage(method.Body, ref needsStdin, ref needsStdout);
-                    break;
-                case OperatorMember @operator:
-                    AnalyzeRuntimeUsage(@operator.Body, ref needsStdin, ref needsStdout);
-                    break;
-                case NestedTypeMember nested:
-                    AnalyzeRuntimeUsage(nested.Declaration, ref needsStdin, ref needsStdout);
-                    break;
-            }
         }
-    }
 
-    private static void AnalyzeRuntimeUsage(MethodBody body, ref bool needsStdin, ref bool needsStdout)
-    {
-        switch (body)
+        public bool NeedsStdin { get; private set; }
+
+        public bool NeedsStdout { get; private set; }
+
+        public override Statement VisitDeclarationStatement(DeclarationStatement declaration)
         {
-            case BlockMethodBody blockBody:
-                AnalyzeRuntimeUsage(blockBody.Block, ref needsStdin, ref needsStdout);
-                break;
-            case ExpressionMethodBody expressionBody:
-                AnalyzeRuntimeUsage(expressionBody.Expression, ref needsStdin, ref needsStdout);
-                break;
+            NeedsStdin |= declaration.IsInputShorthand;
+            return base.VisitDeclarationStatement(declaration);
         }
-    }
 
-    private static void AnalyzeRuntimeUsage(BlockStatement block, ref bool needsStdin, ref bool needsStdout)
-    {
-        foreach (Statement statement in block.Statements)
+        public override Statement VisitOutputStatement(OutputStatement statement)
         {
-            AnalyzeRuntimeUsage(statement, ref needsStdin, ref needsStdout);
+            NeedsStdout = true;
+            return base.VisitOutputStatement(statement);
         }
-    }
 
-    private static void AnalyzeRuntimeUsage(Statement statement, ref bool needsStdin, ref bool needsStdout)
-    {
-        switch (statement)
+        public override Statement VisitCStyleForStatement(CStyleForStatement statement)
         {
-            case BlockStatement block:
-                AnalyzeRuntimeUsage(block, ref needsStdin, ref needsStdout);
-                break;
-            case DeclarationStatement declaration:
-                if (declaration.IsInputShorthand)
-                {
-                    needsStdin = true;
-                }
-
-                if (declaration.Initializer is not null)
-                {
-                    AnalyzeRuntimeUsage(declaration.Initializer, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case ExpressionStatement expressionStatement:
-                AnalyzeRuntimeUsage(expressionStatement.Expression, ref needsStdin, ref needsStdout);
-                break;
-            case AssignmentStatement assignment:
-                AnalyzeRuntimeUsage(assignment.Target, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(assignment.Value, ref needsStdin, ref needsStdout);
-                break;
-            case OutputStatement output:
-                needsStdout = true;
-                AnalyzeRuntimeUsage(output.Expression, ref needsStdin, ref needsStdout);
-                break;
-            case ReturnStatement @return when @return.Expression is not null:
-                AnalyzeRuntimeUsage(@return.Expression, ref needsStdin, ref needsStdout);
-                break;
-            case IfStatement ifStatement:
-                AnalyzeRuntimeUsage(ifStatement.Condition, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(ifStatement.ThenBranch, ref needsStdin, ref needsStdout);
-                if (ifStatement.ElseBranch is not null)
-                {
-                    AnalyzeRuntimeUsage(ifStatement.ElseBranch, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case WhileStatement whileStatement:
-                AnalyzeRuntimeUsage(whileStatement.Condition, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(whileStatement.Body, ref needsStdin, ref needsStdout);
-                break;
-            case CStyleForStatement cStyleFor:
-                if (cStyleFor.HeaderText.Contains("stdin", StringComparison.Ordinal))
-                {
-                    needsStdin = true;
-                }
-
-                if (cStyleFor.HeaderText.Contains("stdout", StringComparison.Ordinal))
-                {
-                    needsStdout = true;
-                }
-
-                AnalyzeRuntimeUsage(cStyleFor.Body, ref needsStdin, ref needsStdout);
-                break;
-            case ForInStatement forIn:
-                AnalyzeRuntimeUsage(forIn.Source, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(forIn.Body, ref needsStdin, ref needsStdout);
-                break;
-            case FastForStatement fastFor:
-                AnalyzeRuntimeUsage(fastFor.Source, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(fastFor.Body, ref needsStdin, ref needsStdout);
-                break;
+            NeedsStdin |= statement.HeaderText.Contains("stdin", StringComparison.Ordinal);
+            NeedsStdout |= statement.HeaderText.Contains("stdout", StringComparison.Ordinal);
+            return base.VisitCStyleForStatement(statement);
         }
-    }
 
-    private static void AnalyzeRuntimeUsage(Expression expression, ref bool needsStdin, ref bool needsStdout)
-    {
-        switch (expression)
+        public override Expression VisitIdentifier(IdentifierExpression identifier)
         {
-            case IdentifierExpression identifier:
-                if (identifier.Name == "stdin")
-                {
-                    needsStdin = true;
-                }
-                else if (identifier.Name == "stdout")
-                {
-                    needsStdout = true;
-                }
-                break;
-            case InterpolatedStringExpression interpolated:
-                foreach (InterpolatedStringPart part in interpolated.Parts)
-                {
-                    if (part is InterpolatedStringInterpolationPart interpolation)
-                    {
-                        AnalyzeRuntimeUsage(interpolation.Expression, ref needsStdin, ref needsStdout);
-                    }
-                }
-                break;
-            case TupleExpression tuple:
-                foreach (Expression element in tuple.Elements)
-                {
-                    AnalyzeRuntimeUsage(element, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case BlockExpression block:
-                AnalyzeRuntimeUsage(block.Block, ref needsStdin, ref needsStdout);
-                break;
-            case IfExpression ifExpression:
-                AnalyzeRuntimeUsage(ifExpression.Condition, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(ifExpression.ThenExpression, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(ifExpression.ElseExpression, ref needsStdin, ref needsStdout);
-                break;
-            case ConditionalExpression conditional:
-                AnalyzeRuntimeUsage(conditional.Condition, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(conditional.WhenTrue, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(conditional.WhenFalse, ref needsStdin, ref needsStdout);
-                break;
-            case UnaryExpression unary:
-                AnalyzeRuntimeUsage(unary.Operand, ref needsStdin, ref needsStdout);
-                break;
-            case AssignmentExpression assignment:
-                AnalyzeRuntimeUsage(assignment.Target, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(assignment.Value, ref needsStdin, ref needsStdout);
-                break;
-            case PrefixExpression prefix:
-                AnalyzeRuntimeUsage(prefix.Operand, ref needsStdin, ref needsStdout);
-                break;
-            case PostfixExpression postfix:
-                AnalyzeRuntimeUsage(postfix.Operand, ref needsStdin, ref needsStdout);
-                break;
-            case BinaryExpression binary:
-                AnalyzeRuntimeUsage(binary.Left, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(binary.Right, ref needsStdin, ref needsStdout);
-                break;
-            case RangeExpression range:
-                AnalyzeRuntimeUsage(range.Start, ref needsStdin, ref needsStdout);
-                AnalyzeRuntimeUsage(range.End, ref needsStdin, ref needsStdout);
-                if (range.Step is not null)
-                {
-                    AnalyzeRuntimeUsage(range.Step, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case IsPatternExpression isPattern:
-                AnalyzeRuntimeUsage(isPattern.Left, ref needsStdin, ref needsStdout);
-                if (isPattern.Pattern is ConstantPatternSyntax constantPattern)
-                {
-                    AnalyzeRuntimeUsage(constantPattern.Expression, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case CallExpression call:
-                AnalyzeRuntimeUsage(call.Callee, ref needsStdin, ref needsStdout);
-                foreach (ArgumentSyntax argument in call.Arguments)
-                {
-                    if (argument is ExpressionArgumentSyntax expressionArgument)
-                    {
-                        AnalyzeRuntimeUsage(expressionArgument.Expression, ref needsStdin, ref needsStdout);
-                    }
-                }
-                break;
-            case MemberAccessExpression member:
-                AnalyzeRuntimeUsage(member.Receiver, ref needsStdin, ref needsStdout);
-                break;
-            case IndexExpression index:
-                AnalyzeRuntimeUsage(index.Receiver, ref needsStdin, ref needsStdout);
-                foreach (Expression argument in index.Arguments)
-                {
-                    AnalyzeRuntimeUsage(argument, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case WithExpression @with:
-                AnalyzeRuntimeUsage(@with.Receiver, ref needsStdin, ref needsStdout);
-                foreach (WithAssignment assignment in @with.Assignments)
-                {
-                    AnalyzeRuntimeUsage(assignment.Value, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case SwitchExpression @switch:
-                AnalyzeRuntimeUsage(@switch.Receiver, ref needsStdin, ref needsStdout);
-                foreach (SwitchArm arm in @switch.Arms)
-                {
-                    if (arm.Guard is not null)
-                    {
-                        AnalyzeRuntimeUsage(arm.Guard, ref needsStdin, ref needsStdout);
-                    }
-
-                    AnalyzeRuntimeUsage(arm.Result, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case FromEndExpression fromEnd:
-                AnalyzeRuntimeUsage(fromEnd.Operand, ref needsStdin, ref needsStdout);
-                break;
-            case SliceExpression slice:
-                if (slice.Start is not null)
-                {
-                    AnalyzeRuntimeUsage(slice.Start, ref needsStdin, ref needsStdout);
-                }
-
-                if (slice.End is not null)
-                {
-                    AnalyzeRuntimeUsage(slice.End, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case TupleProjectionExpression projection:
-                AnalyzeRuntimeUsage(projection.Receiver, ref needsStdin, ref needsStdout);
-                break;
-            case LambdaExpression lambda:
-                switch (lambda.Body)
-                {
-                    case LambdaExpressionBody expressionBody:
-                        AnalyzeRuntimeUsage(expressionBody.Expression, ref needsStdin, ref needsStdout);
-                        break;
-                    case LambdaBlockBody blockBody:
-                        AnalyzeRuntimeUsage(blockBody.Block, ref needsStdin, ref needsStdout);
-                        break;
-                }
-                break;
-            case NewExpression creation:
-                foreach (ArgumentSyntax argument in creation.Arguments)
-                {
-                    if (argument is ExpressionArgumentSyntax expressionArgument)
-                    {
-                        AnalyzeRuntimeUsage(expressionArgument.Expression, ref needsStdin, ref needsStdout);
-                    }
-                }
-                break;
-            case NewArrayExpression newArray:
-                foreach (Expression dimension in newArray.Dimensions)
-                {
-                    AnalyzeRuntimeUsage(dimension, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case TargetTypedNewArrayExpression targetTypedNewArray:
-                foreach (Expression dimension in targetTypedNewArray.Dimensions)
-                {
-                    AnalyzeRuntimeUsage(dimension, ref needsStdin, ref needsStdout);
-                }
-                break;
-            case CollectionExpression collection:
-                foreach (CollectionElement element in collection.Elements)
-                {
-                    switch (element)
-                    {
-                        case ExpressionElement expressionElement:
-                            AnalyzeRuntimeUsage(expressionElement.Expression, ref needsStdin, ref needsStdout);
-                            break;
-                        case SpreadElement spreadElement:
-                            AnalyzeRuntimeUsage(spreadElement.Expression, ref needsStdin, ref needsStdout);
-                            break;
-                        case RangeElement rangeElement:
-                            AnalyzeRuntimeUsage(rangeElement.Range, ref needsStdin, ref needsStdout);
-                            break;
-                        case BuilderElement builderElement:
-                            AnalyzeRuntimeUsage(builderElement.Source, ref needsStdin, ref needsStdout);
-                            switch (builderElement.Body)
-                            {
-                                case LambdaExpressionBody expressionBody:
-                                    AnalyzeRuntimeUsage(expressionBody.Expression, ref needsStdin, ref needsStdout);
-                                    break;
-                                case LambdaBlockBody blockBody:
-                                    AnalyzeRuntimeUsage(blockBody.Block, ref needsStdin, ref needsStdout);
-                                    break;
-                            }
-                            break;
-                    }
-                }
-                break;
-            case AggregationExpression aggregation:
-                AnalyzeRuntimeUsage(aggregation.Source, ref needsStdin, ref needsStdout);
-                if (aggregation.WhereExpression is not null)
-                {
-                    AnalyzeRuntimeUsage(aggregation.WhereExpression, ref needsStdin, ref needsStdout);
-                }
-                AnalyzeRuntimeUsage(aggregation.Body, ref needsStdin, ref needsStdout);
-                break;
-            case GeneratorExpression generator:
-                AnalyzeRuntimeUsage(generator.Source, ref needsStdin, ref needsStdout);
-                switch (generator.Body)
-                {
-                    case LambdaExpressionBody expressionBody:
-                        AnalyzeRuntimeUsage(expressionBody.Expression, ref needsStdin, ref needsStdout);
-                        break;
-                    case LambdaBlockBody blockBody:
-                        AnalyzeRuntimeUsage(blockBody.Block, ref needsStdin, ref needsStdout);
-                        break;
-                }
-                break;
+            NeedsStdin |= identifier.Name == PscpBinder.StdinName;
+            NeedsStdout |= identifier.Name == PscpBinder.StdoutName;
+            return identifier;
         }
     }
 
@@ -2952,47 +2359,11 @@ PSCP source:"
     private void EmitRangeForStatement(BindingTarget iteratorTarget, RangeExpression range, Statement body)
     {
         string iterator = EmitLoopBindingPattern(iteratorTarget, "iter");
-        string iteratorType = IsLongRange(range, null) ? "long" : "int";
-        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-        // The start is only read by the loop initializer; the end is re-read by every condition check.
-        if (range.Step is null && CanInlineDirectRangeExpression(range.End))
-        {
-            _writer.WriteLine($"for ({iteratorType} {iterator} = {EmitExpression(range.Start)}; {iterator} {comparison} {EmitExpression(range.End)}; {iterator}++)");
-            EmitWithBindingAliases(null, null, iteratorTarget, iterator, () =>
-            {
-                EmitEmbeddedStatement(body);
-                return 0;
-            });
-            return;
-        }
-
-        string startName = NextTemporary("start");
-        string endName = NextTemporary("end");
-        _writer.WriteLine("{");
-        _writer.Indent();
-        _writer.WriteLine($"{iteratorType} {startName} = {EmitExpression(range.Start)};");
-        _writer.WriteLine($"{iteratorType} {endName} = {EmitExpression(range.End)};");
-        if (range.Step is null)
-        {
-            _writer.WriteLine($"for ({iteratorType} {iterator} = {startName}; {iterator} {comparison} {endName}; {iterator}++)");
-        }
-        else
-        {
-            string stepName = NextTemporary("step");
-            _writer.WriteLine($"{iteratorType} {stepName} = {EmitExpression(range.Step)};");
-            string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
-            _writer.WriteLine("#if DEBUG");
-            _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
-            _writer.WriteLine("#endif");
-            _writer.WriteLine($"for ({iteratorType} {iterator} = {startName}; {stepName} > 0 ? {iterator} {comparison} {endName} : {iterator} {decrementComparison} {endName}; {iterator} += {stepName})");
-        }
-        EmitWithBindingAliases(null, null, iteratorTarget, iterator, () =>
+        EmitRangeLoop(range, iterator, null, () => EmitWithBindingAliases(null, null, iteratorTarget, iterator, () =>
         {
             EmitEmbeddedStatement(body);
             return 0;
-        });
-        _writer.Unindent();
-        _writer.WriteLine("}");
+        }));
     }
 
     private void EmitFastForStatement(FastForStatement fastFor)
@@ -3038,25 +2409,16 @@ PSCP source:"
     {
         string itemName = ChooseBindingName(fastFor.ItemTarget, "item");
         string? indexName = fastFor.IndexTarget is null ? null : ChooseBindingName(fastFor.IndexTarget, "index");
-        bool useLong = IsLongRange(range, null);
-        string iteratorType = useLong ? "long" : "int";
-        string comparison = range.Kind == RangeKind.RightExclusive ? "<" : "<=";
-
-        // The start is only read by the loop initializer; the end is re-read by every condition check.
-        if (range.Step is null && CanInlineDirectRangeExpression(range.End))
+        EmitRangeLoop(range, itemName, indexName, () =>
         {
-            string directHeader = indexName is null
-                ? $"for ({iteratorType} {itemName} = {EmitExpression(range.Start)}; {itemName} {comparison} {EmitExpression(range.End)}; {itemName}++)"
-                : $"for ({iteratorType} {itemName} = {EmitExpression(range.Start)}, {indexName} = 0; {itemName} {comparison} {EmitExpression(range.End)}; {itemName}++, {indexName}++)";
-            _writer.WriteLine(directHeader);
             _writer.WriteLine("{");
             _writer.Indent();
             EmitWithBindingAliases(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName, () =>
             {
-                string directAliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
-                if (!string.IsNullOrWhiteSpace(directAliases))
+                string aliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
+                if (!string.IsNullOrWhiteSpace(aliases))
                 {
-                    _writer.WriteLine(directAliases);
+                    _writer.WriteLine(aliases);
                 }
 
                 EmitStatement(fastFor.Body);
@@ -3064,57 +2426,7 @@ PSCP source:"
             });
             _writer.Unindent();
             _writer.WriteLine("}");
-            return;
-        }
-
-        string startName = NextTemporary("start");
-        string endName = NextTemporary("end");
-
-        _writer.WriteLine("{");
-        _writer.Indent();
-        _writer.WriteLine($"{iteratorType} {startName} = {EmitExpression(range.Start)};");
-        _writer.WriteLine($"{iteratorType} {endName} = {EmitExpression(range.End)};");
-        if (indexName is not null)
-        {
-            _writer.WriteLine($"int {indexName} = 0;");
-        }
-
-        if (range.Step is null)
-        {
-            _writer.WriteLine($"for ({iteratorType} {itemName} = {startName}; {itemName} {comparison} {endName}; {itemName}++)");
-        }
-        else
-        {
-            string stepName = NextTemporary("step");
-            string decrementComparison = range.Kind == RangeKind.RightExclusive ? ">" : ">=";
-            _writer.WriteLine($"{iteratorType} {stepName} = {EmitExpression(range.Step)};");
-            _writer.WriteLine("#if DEBUG");
-            _writer.WriteLine($"if ({stepName} == 0) throw new InvalidOperationException(\"Range step cannot be zero.\");");
-            _writer.WriteLine("#endif");
-            _writer.WriteLine($"for ({iteratorType} {itemName} = {startName}; {stepName} > 0 ? {itemName} {comparison} {endName} : {itemName} {decrementComparison} {endName}; {itemName} += {stepName})");
-        }
-        _writer.WriteLine("{");
-        _writer.Indent();
-        EmitWithBindingAliases(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName, () =>
-        {
-            string aliases = EmitBindingAliasStatements(fastFor.IndexTarget, indexName, fastFor.ItemTarget, itemName);
-            if (!string.IsNullOrWhiteSpace(aliases))
-            {
-                _writer.WriteLine(aliases);
-            }
-
-            EmitStatement(fastFor.Body);
-            return 0;
         });
-        if (indexName is not null)
-        {
-            _writer.WriteLine($"{indexName}++;");
-        }
-
-        _writer.Unindent();
-        _writer.WriteLine("}");
-        _writer.Unindent();
-        _writer.WriteLine("}");
     }
 
     private string EmitParameter(ParameterSyntax parameter)
@@ -3140,37 +2452,23 @@ PSCP source:"
     private static TypeSyntax NormalizeSizedType(TypeSyntax type)
         => type is SizedArrayTypeSyntax sized ? new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count) : type;
 
-    private static bool IsBareInvocation(Expression expression)
-        => expression is CallExpression;
+    // Spec §10.5: a tail expression statement returns its value unless it is a plain assignment, compound
+    // assignment or increment. Known data-structure rewrites (`set += x`, `--q`) are calls and do return.
+    private bool IsTailReturnEligible(Expression expression)
+        => _semantic?.IsReturnEligible(expression)
+            ?? expression is not (AssignmentExpression { IsExplicitValueAssignment: false } or PrefixExpression or PostfixExpression);
 
-    private static bool IsImplicitReturnEligibleExpression(Expression expression)
-        => expression switch
-        {
-            AssignmentExpression assignment => assignment.IsExplicitValueAssignment,
-            PrefixExpression or PostfixExpression => false,
-            _ => !IsBareInvocation(expression),
-        };
-
-    private static Expression? GetImplicitReturnExpression(BlockStatement block)
-    {
-        if (block.Statements.Count == 0)
-        {
-            return null;
-        }
-
-        if (block.Statements[^1] is not ExpressionStatement { HasSemicolon: false } expressionStatement)
-        {
-            return null;
-        }
-
-        return IsImplicitReturnEligibleExpression(expressionStatement.Expression) ? expressionStatement.Expression : null;
-    }
+    private Expression? GetImplicitReturnExpression(BlockStatement block)
+        => block.Statements.LastOrDefault() is ExpressionStatement expressionStatement && IsTailReturnEligible(expressionStatement.Expression)
+            ? expressionStatement.Expression
+            : null;
 
     private static bool ContainsExplicitReturn(BlockStatement block)
         => block.Statements.Any(statement => statement is ReturnStatement);
 
+    // Generated locals use the reserved `__pscp` prefix (spec §5.4).
     private string NextTemporary(string prefix)
-        => $"__{prefix}{_temporaryId++}";
+        => $"__pscp_{prefix}{_temporaryId++}";
 
     private static string GetEmittedTypeHeader(TypeDeclaration declaration)
     {

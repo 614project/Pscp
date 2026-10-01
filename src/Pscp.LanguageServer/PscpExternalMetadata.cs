@@ -130,7 +130,8 @@ internal static class PscpExternalMetadata
             normalized = normalized[..^1];
         }
 
-        if (normalized.EndsWith("[]", StringComparison.Ordinal))
+        // `int[]`, and a sized array type `int[n]` as declared by `int[n] a =`.
+        if (normalized.EndsWith(']') && normalized.LastIndexOf('[') > 0)
         {
             return "Array";
         }

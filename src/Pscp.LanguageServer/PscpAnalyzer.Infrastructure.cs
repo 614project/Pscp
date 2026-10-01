@@ -113,6 +113,13 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.LessEqual:
                 case TokenKind.GreaterEqual:
                     state.MarkToken(i, "operator");
+                    // Guide §7.2: the PSCP-only operators explain their lowering. A data-structure rewrite
+                    // needs the receiver's static type, so it is filled in once the analysis knows it.
+                    if (PscpOperatorHovers.ForOperator(token.Kind) is { } operatorHover)
+                    {
+                        state.SetHover(i, operatorHover);
+                    }
+
                     break;
                 case TokenKind.Identifier when PscpIntrinsics.BuiltinTypes.Contains(token.Text):
                     state.MarkToken(i, "type", "defaultLibrary");
@@ -567,6 +574,9 @@ internal sealed class Scope
 
     public int EndOffset { get; }
 
+    // The type whose body this scope is, so a declaration inside it is reported as a member (guide §10.4).
+    public string? TypeName { get; set; }
+
     public void Add(PscpServerSymbol symbol)
     {
         if (!_symbols.TryGetValue(symbol.Name, out List<PscpServerSymbol>? list))
@@ -608,7 +618,8 @@ internal sealed class AnalyzerState
     private readonly List<PscpServerSymbol> _symbols = [];
     private readonly List<PscpServerReference> _references = [];
     private readonly Dictionary<int, TokenClassificationBuilder> _tokenClassifications = [];
-    private readonly List<PscpDocumentSymbol> _documentSymbols = [];
+    private readonly List<PscpDocumentSymbolBuilder> _documentSymbolRoots = [];
+    private readonly Stack<PscpDocumentSymbolBuilder> _documentSymbolStack = new();
     private readonly Dictionary<int, string> _tokenToSymbolId = [];
     private readonly Dictionary<int, PscpHoverEntry> _hoverByTokenIndex = [];
     private readonly Dictionary<int, PscpCompletionEntry> _intrinsicMembers = [];
@@ -633,8 +644,8 @@ internal sealed class AnalyzerState
     public Scope CreateScope(Scope? parent, int startOffset, int endOffset)
         => new(parent, startOffset, endOffset);
 
-    public void AddDiagnostic(string code, string message, TextSpan span, ServerDiagnosticSeverity severity, string? relatedSymbolId = null)
-        => _diagnostics.Add(new PscpServerDiagnostic(code, message, span, severity, relatedSymbolId));
+    public void AddDiagnostic(string code, string message, TextSpan span, ServerDiagnosticSeverity severity, string? relatedSymbolId = null, TextSpan? relatedSpan = null)
+        => _diagnostics.Add(new PscpServerDiagnostic(code, message, span, severity, relatedSymbolId, relatedSpan));
 
     public bool HasDiagnosticOverlapping(TextSpan span)
         => _diagnostics.Any(existing => existing.Span.Start < Math.Max(span.End, span.Start + 1)
@@ -681,6 +692,15 @@ internal sealed class AnalyzerState
 
     public bool TryResolve(Scope scope, string name, int position, out PscpServerSymbol? symbol)
         => scope.TryResolve(name, position, out symbol);
+
+    private readonly List<(int TokenIndex, Scope Scope)> _pendingResolutions = [];
+
+    public void AddPendingResolution(int tokenIndex, Scope scope)
+        => _pendingResolutions.Add((tokenIndex, scope));
+
+    public IReadOnlyList<(int TokenIndex, Scope Scope)> PendingResolutions => _pendingResolutions;
+
+    public bool HasSymbolAt(int tokenIndex) => _tokenToSymbolId.ContainsKey(tokenIndex);
 
     public void AddTypeMember(string typeName, PscpServerSymbol symbol)
     {
@@ -742,17 +762,68 @@ internal sealed class AnalyzerState
         }
     }
 
-    public void AddDocumentSymbol(PscpDocumentSymbol symbol)
-        => _documentSymbols.Add(symbol);
+    public bool TryGetSymbolAt(int tokenIndex, out PscpServerSymbol? symbol)
+    {
+        if (_tokenToSymbolId.TryGetValue(tokenIndex, out string? id))
+        {
+            symbol = _symbols.FirstOrDefault(candidate => candidate.Id == id);
+            return symbol is not null;
+        }
 
-    public void AddInlayHint(TextSpan span, string label)
-        => _inlayHints.Add(new PscpInlayHintEntry(span, label));
+        symbol = null;
+        return false;
+    }
+
+    // Guide §10.4: the outline is hierarchical, so a declaration analysed inside another one becomes its
+    // child. `PushDocumentSymbol` opens a parent and the returned scope closes it.
+    public void AddDocumentSymbol(PscpDocumentSymbol symbol)
+    {
+        PscpDocumentSymbolBuilder builder = new(symbol.Name, symbol.Kind, symbol.Range, symbol.SelectionRange, symbol.Detail);
+        Target().Add(builder);
+    }
+
+    public DocumentSymbolScope PushDocumentSymbol(string name, int kind, TextSpan range, TextSpan selectionRange, string? detail)
+    {
+        PscpDocumentSymbolBuilder builder = new(name, kind, range, selectionRange, detail);
+        Target().Add(builder);
+        _documentSymbolStack.Push(builder);
+        return new DocumentSymbolScope(this);
+    }
+
+    public void PopDocumentSymbol()
+    {
+        if (_documentSymbolStack.Count > 0)
+        {
+            _documentSymbolStack.Pop();
+        }
+    }
+
+    private List<PscpDocumentSymbolBuilder> Target()
+        => _documentSymbolStack.Count > 0 ? _documentSymbolStack.Peek().Children : _documentSymbolRoots;
+
+    public readonly struct DocumentSymbolScope(AnalyzerState state) : IDisposable
+    {
+        public void Dispose() => state.PopDocumentSymbol();
+    }
+
+    // The symbols added since `SymbolCount` was read, so a declaration can claim the ones its body declared.
+    public int SymbolCount => _symbols.Count;
+
+    public IEnumerable<PscpServerSymbol> SymbolsAddedSince(int count)
+        => _symbols.Skip(count);
+
+    public void AddInlayHint(TextSpan span, string label, PscpInlayHintKind kind = PscpInlayHintKind.InferredType, string? tooltip = null)
+        => _inlayHints.Add(new PscpInlayHintEntry(span, label, kind, tooltip));
 
     public void AddIntrinsicMember(int tokenIndex, PscpCompletionEntry completion)
         => _intrinsicMembers[tokenIndex] = completion;
 
     public void SetHover(int tokenIndex, string markdown)
         => _hoverByTokenIndex[tokenIndex] = new PscpHoverEntry(markdown);
+
+    // The token type already assigned to `tokenIndex`, so a later pass can add a modifier without changing it.
+    public string? ClassificationOf(int tokenIndex)
+        => _tokenClassifications.TryGetValue(tokenIndex, out TokenClassificationBuilder? builder) ? builder.TokenType : null;
 
     public void MarkToken(int tokenIndex, string tokenType, params string[] modifiers)
         => MarkToken(tokenIndex, tokenType, (IEnumerable<string>)modifiers);
@@ -790,7 +861,7 @@ internal sealed class AnalyzerState
                     pair.Value.TokenType,
                     pair.Value.Modifiers.OrderBy(x => x, StringComparer.Ordinal).ToArray()))
                 .ToArray(),
-            DocumentSymbols = _documentSymbols.OrderBy(symbol => symbol.Range.Start).ToArray(),
+            DocumentSymbols = _documentSymbolRoots.OrderBy(symbol => symbol.Range.Start).Select(symbol => symbol.Build()).ToArray(),
             TokenToSymbolId = new Dictionary<int, string>(_tokenToSymbolId),
             HoverByTokenIndex = new Dictionary<int, PscpHoverEntry>(_hoverByTokenIndex),
             IntrinsicMembers = new Dictionary<int, PscpCompletionEntry>(_intrinsicMembers),

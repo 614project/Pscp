@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Numerics;
 
 namespace Pscp.Transpiler;
@@ -80,6 +80,19 @@ public static class PscpNumericLiterals
         if (TryParseIntegerValue(digits) is { } parsed && parsed >= int.MinValue && parsed <= int.MaxValue)
         {
             value = (int)parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool TryGetInt64Value(string rawText, out long value)
+    {
+        value = 0;
+        string digits = rawText.Replace("_", string.Empty, StringComparison.Ordinal).ToLowerInvariant().TrimEnd('u', 'l');
+        if (TryParseIntegerValue(digits) is { } parsed && parsed >= long.MinValue && parsed <= long.MaxValue)
+        {
+            value = (long)parsed;
             return true;
         }
 

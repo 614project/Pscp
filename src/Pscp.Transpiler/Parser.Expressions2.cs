@@ -1,11 +1,11 @@
-﻿namespace Pscp.Transpiler;
+namespace Pscp.Transpiler;
 
 public sealed partial class Parser
 {
     private Expression ParseNewExpression()
     {
         Expect(TokenKind.New, "Expected 'new'.");
-        bool autoConstructElements = Match(TokenKind.Bang);
+        bool autoConstructElements = Current.Kind == TokenKind.Bang && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.Bang);
 
         if (Current.Kind == TokenKind.OpenBracket)
         {
@@ -13,15 +13,16 @@ public sealed partial class Parser
             return new TargetTypedNewArrayExpression(dimensions, autoConstructElements);
         }
 
-        if (Current.Kind == TokenKind.OpenParen)
-        {
-            Expect(TokenKind.OpenParen, "Expected '(' after new expression.");
-            return new NewExpression(null, ParseCallArgumentsTail());
-        }
-
         if (autoConstructElements)
         {
-            _diagnostics.Add(new Diagnostic("Expected '[' after 'new!'.", Current.Span));
+            AddDiagnostic(DiagnosticCodes.Syntax, "Expected '[' after 'new!'.", Current.Span);
+        }
+
+        if (Current.Kind == TokenKind.OpenParen)
+        {
+            Next();
+            IReadOnlyList<ArgumentSyntax> targetTypedArguments = ParseCallArgumentsTail();
+            return new NewExpression(null, targetTypedArguments, ParseOptionalObjectInitializer());
         }
 
         int typeStart = _position;
@@ -35,17 +36,23 @@ public sealed partial class Parser
 
         if (type is not null && Current.Kind == TokenKind.OpenParen)
         {
-            Expect(TokenKind.OpenParen, "Expected '(' after new expression.");
-            return new NewExpression(type, ParseCallArgumentsTail());
+            Next();
+            IReadOnlyList<ArgumentSyntax> arguments = ParseCallArgumentsTail();
+            return new NewExpression(type, arguments, ParseOptionalObjectInitializer());
         }
 
-        if (type is not null && CanStartSpaceArgument(Current.Kind) && LooksLikeExplicitTypeForSpaceSeparatedNew(type))
+        if (type is not null && Current.Kind == TokenKind.OpenBrace)
+        {
+            return new NewExpression(type, Immutable.List<ArgumentSyntax>(), ParseMemberInitializerList("new"));
+        }
+
+        if (type is not null && CanStartApplicationGroup() && LooksLikeExplicitTypeForSpaceSeparatedNew(type))
         {
             return new NewExpression(type, ParseSpaceSeparatedArguments());
         }
 
         Restore(typeStart, typeDiagnostics);
-        if (CanStartSpaceArgument(Current.Kind))
+        if (CanStartApplicationGroup())
         {
             return new NewExpression(null, ParseSpaceSeparatedArguments());
         }
@@ -55,13 +62,17 @@ public sealed partial class Parser
         return new NewExpression(fallbackType, ParseCallArgumentsTail());
     }
 
+    private IReadOnlyList<WithAssignment>? ParseOptionalObjectInitializer()
+        => Current.Kind == TokenKind.OpenBrace && !_inStatementHead
+            ? ParseMemberInitializerList("new")
+            : null;
+
     private IReadOnlyList<ArgumentSyntax> ParseSpaceSeparatedArguments()
     {
         List<ArgumentSyntax> arguments = [];
-        while (CanStartSpaceArgument(Current.Kind))
+        while (CanStartApplicationGroup())
         {
-            arguments.Add(ParseCallArgument(allowNamed: false, allowComplexExpression: false));
-            SkipSeparators();
+            ParseApplicationGroup(arguments);
         }
 
         return arguments;
@@ -77,21 +88,40 @@ public sealed partial class Parser
             _ => false
         };
 
+    // `[e1, ..spread, a..<b]` and the builder `[src -> x do e]` (spec §16.1, §16.2). A range written directly as
+    // an element expands; `..<b` without a start cannot be told apart from a spread and is an error.
     private CollectionExpression ParseCollectionExpression()
     {
         Expect(TokenKind.OpenBracket, "Expected '[' to start collection expression.");
-        List<CollectionElement> elements = [];
-        SkipSeparators();
-
-        if (!Match(TokenKind.CloseBracket))
+        List<CollectionElement> elements = WithNestedContext(() =>
         {
+            List<CollectionElement> parsed = [];
+            SkipSeparators();
+            if (Current.Kind == TokenKind.CloseBracket)
+            {
+                return parsed;
+            }
+
             do
             {
                 SkipSeparators();
+                int elementStart = _position;
                 if (Current.Kind == TokenKind.DotDot)
                 {
                     Next();
-                    elements.Add(new SpreadElement(ParseExpression()));
+                    parsed.Add(Mark(new SpreadElement(ParseExpression()), elementStart));
+                    SkipSeparators();
+                    continue;
+                }
+
+                if (Current.Kind is TokenKind.DotDotLess or TokenKind.DotDotEqual)
+                {
+                    AddDiagnostic(
+                        DiagnosticCodes.ExclusiveRangeInCollection,
+                        $"`{Current.Text}b` inside `[]` has no start. Write the start (`0{Current.Text}b`), or `..xs` to spread a sequence.",
+                        Current.Span);
+                    Next();
+                    parsed.Add(Mark(new SpreadElement(ParseExpression()), elementStart));
                     SkipSeparators();
                     continue;
                 }
@@ -99,42 +129,31 @@ public sealed partial class Parser
                 Expression expression = ParseExpression();
                 if (Match(TokenKind.Arrow))
                 {
-                    BindingTarget first = ParseBindingTarget();
-                    BindingTarget? indexTarget = null;
-                    BindingTarget itemTarget = first;
-
-                    if (Match(TokenKind.Comma))
-                    {
-                        indexTarget = first;
-                        itemTarget = ParseBindingTarget();
-                    }
-
+                    (BindingTarget? indexTarget, BindingTarget itemTarget) = ParseIterationBinding();
                     LambdaBody body;
                     if (Match(TokenKind.Do))
                     {
-                        body = Current.Kind == TokenKind.OpenBrace
-                            ? new LambdaBlockBody(ParseBlockStatement())
-                            : new LambdaExpressionBody(ParseExpression());
+                        body = ParseLambdaBody();
                     }
                     else if (Current.Kind == TokenKind.OpenBrace)
                     {
-                        body = new LambdaBlockBody(ParseBlockStatement());
+                        body = new LambdaBlockBody(WithNestedContext(ParseBlockStatement));
                     }
                     else
                     {
-                        _diagnostics.Add(new Diagnostic("Expected `do` or block body in collection builder.", Current.Span));
+                        AddDiagnostic(DiagnosticCodes.Syntax, "Expected `do` or a block body in the collection builder.", Current.Span);
                         body = new LambdaExpressionBody(ParseExpression());
                     }
 
-                    elements.Add(new BuilderElement(expression, indexTarget, itemTarget, body));
+                    parsed.Add(Mark(new BuilderElement(expression, indexTarget, itemTarget, body), elementStart));
                 }
                 else if (expression is RangeExpression range)
                 {
-                    elements.Add(new RangeElement(range));
+                    parsed.Add(Mark(new RangeElement(range), elementStart));
                 }
                 else
                 {
-                    elements.Add(new ExpressionElement(expression));
+                    parsed.Add(Mark(new ExpressionElement(expression), elementStart));
                 }
 
                 SkipSeparators();
@@ -142,9 +161,10 @@ public sealed partial class Parser
             while (Match(TokenKind.Comma));
 
             SkipSeparators();
-            Expect(TokenKind.CloseBracket, "Expected ']' after collection expression.");
-        }
+            return parsed;
+        });
 
+        Expect(TokenKind.CloseBracket, "Expected ']' after collection expression.");
         return new CollectionExpression(elements);
     }
 
@@ -152,16 +172,7 @@ public sealed partial class Parser
     {
         Expect(TokenKind.OpenBrace, "Expected '{' after aggregation name.");
         Expect(TokenKind.For, "Expected 'for' in aggregation expression.");
-        BindingTarget first = ParseBindingTarget();
-        BindingTarget? indexTarget = null;
-        BindingTarget itemTarget = first;
-
-        if (Match(TokenKind.Comma))
-        {
-            indexTarget = first;
-            itemTarget = ParseBindingTarget();
-        }
-
+        (BindingTarget? indexTarget, BindingTarget itemTarget) = ParseIterationBinding();
         Expect(TokenKind.In, "Expected 'in' in aggregation expression.");
         Expression source = ParseExpression();
         Expression? whereExpression = null;
@@ -180,20 +191,25 @@ public sealed partial class Parser
 
     private IReadOnlyList<ArgumentSyntax> ParseCallArgumentsTail()
     {
-        List<ArgumentSyntax> arguments = [];
-        SkipSeparators();
-        if (Match(TokenKind.CloseParen))
+        List<ArgumentSyntax> arguments = WithNestedContext(() =>
         {
-            return arguments;
-        }
+            List<ArgumentSyntax> parsed = [];
+            SkipSeparators();
+            if (Current.Kind == TokenKind.CloseParen)
+            {
+                return parsed;
+            }
 
-        do
-        {
-            SkipSeparators();
-            arguments.Add(ParseCallArgument(allowNamed: true, allowComplexExpression: true));
-            SkipSeparators();
-        }
-        while (Match(TokenKind.Comma));
+            do
+            {
+                SkipSeparators();
+                parsed.Add(ParseCallArgument(allowNamed: true, allowComplexExpression: true));
+                SkipSeparators();
+            }
+            while (Match(TokenKind.Comma));
+
+            return parsed;
+        });
 
         Expect(TokenKind.CloseParen, "Expected ')' after argument list.");
         return arguments;
@@ -201,15 +217,26 @@ public sealed partial class Parser
 
     private IReadOnlyList<Expression> ParseIndexArgumentsTail()
     {
+        bool savedHead = _inStatementHead;
+        int savedIndexDepth = _indexArgumentDepth;
+        _inStatementHead = false;
+        _indexArgumentDepth = 1;
         List<Expression> arguments = [];
-
-        do
+        try
         {
-            SkipSeparators();
-            arguments.Add(ParseIndexArgument());
-            SkipSeparators();
+            do
+            {
+                SkipSeparators();
+                arguments.Add(ParseIndexArgument());
+                SkipSeparators();
+            }
+            while (Match(TokenKind.Comma));
         }
-        while (Match(TokenKind.Comma));
+        finally
+        {
+            _inStatementHead = savedHead;
+            _indexArgumentDepth = savedIndexDepth;
+        }
 
         Expect(TokenKind.CloseBracket, "Expected ']' after index arguments.");
         return arguments;
@@ -220,7 +247,7 @@ public sealed partial class Parser
         List<Expression> dimensions = [];
         while (Match(TokenKind.OpenBracket))
         {
-            Expression dimension = ParseExpression();
+            Expression dimension = WithNestedContext(ParseExpression);
             Expect(TokenKind.CloseBracket, "Expected ']' after array dimension.");
             dimensions.Add(dimension);
         }
@@ -228,194 +255,132 @@ public sealed partial class Parser
         return dimensions;
     }
 
+    // An index or a slice (spec §15). Inside an indexer the end of a slice must be stated: `a..<b`, `a..=b`,
+    // `a..`, `..<b`, `..=b` or `..`. `a..b` and `..b` are ambiguous (PSCP2303); a stepped range is not a slice.
     private Expression ParseIndexArgument()
     {
-        if (Match(TokenKind.DotDot))
+        int start = _position;
+        switch (Current.Kind)
         {
-            Expression? end = Current.Kind is TokenKind.CloseBracket or TokenKind.Comma
-                ? null
-                : ParseIndexBoundaryExpression();
-            return new SliceExpression(null, end);
+            case TokenKind.DotDot:
+            {
+                Token dots = Next();
+                if (Current.Kind is TokenKind.CloseBracket or TokenKind.Comma)
+                {
+                    return Mark(new SliceExpression(null, null, SliceKind.Open), start);
+                }
+
+                Expression end = ParseSliceBound();
+                ReportAmbiguousSlice(start, dots, null, end);
+                return Mark(new SliceExpression(null, end, SliceKind.Ambiguous), start);
+            }
+            case TokenKind.DotDotLess:
+                Next();
+                return Mark(new SliceExpression(null, ParseSliceBound(), SliceKind.Exclusive), start);
+            case TokenKind.DotDotEqual:
+                Next();
+                return Mark(new SliceExpression(null, ParseSliceBound(), SliceKind.Inclusive), start);
         }
 
-        Expression start = ParseIndexBoundaryExpression();
-        if (!Match(TokenKind.DotDot))
+        Expression expression = ParseExpression();
+        if (Current.Kind == TokenKind.DotDot && Peek(1).Kind is TokenKind.CloseBracket or TokenKind.Comma)
         {
-            return start;
+            Next();
+            return Mark(new SliceExpression(expression, null, SliceKind.Open), start);
         }
 
-        Expression? endExpression = Current.Kind is TokenKind.CloseBracket or TokenKind.Comma
-            ? null
-            : ParseIndexBoundaryExpression();
-        return new SliceExpression(start, endExpression);
+        if (expression is not RangeExpression range)
+        {
+            return expression;
+        }
+
+        if (range.Step is not null)
+        {
+            AddDiagnostic(DiagnosticCodes.SteppedSlice, "A stepped range cannot be used as a slice. Use a loop or `filter` to pick every k-th element.", _spans.Get(range));
+            return Mark(new SliceExpression(range.Start, range.End, SliceKind.Exclusive), start);
+        }
+
+        switch (range.Kind)
+        {
+            case RangeKind.RightExclusive:
+                return Mark(new SliceExpression(range.Start, range.End, SliceKind.Exclusive), start);
+            case RangeKind.ExplicitInclusive:
+                return Mark(new SliceExpression(range.Start, range.End, SliceKind.Inclusive), start);
+            default:
+                ReportAmbiguousSlice(start, null, range.Start, range.End);
+                return Mark(new SliceExpression(range.Start, range.End, SliceKind.Ambiguous), start);
+        }
     }
 
-    private Expression ParseIndexBoundaryExpression()
+    private Expression ParseSliceBound()
+        => ParseShift();
+
+    private void ReportAmbiguousSlice(int startToken, Token? leadingDots, Expression? start, Expression end)
     {
-        if (Match(TokenKind.Caret))
+        string startText = start is null ? string.Empty : SourceTextOf(start);
+        string endText = SourceTextOf(end);
+        TextSpan span = new(_tokens[startToken].Position, Math.Max(1, _spans.Get(end).End - _tokens[startToken].Position));
+        AddDiagnostic(
+            DiagnosticCodes.AmbiguousSliceBound,
+            $"Inside an indexer `..` does not say whether the end is included. Write `[{startText}..<{endText}]` to exclude it or `[{startText}..={endText}]` to include it.",
+            span);
+    }
+
+    private string SourceTextOf(Expression expression)
+    {
+        TextSpan span = _spans.Get(expression);
+        if (span.Length == 0)
         {
-            return new FromEndExpression(ParseAdditive());
+            return "b";
         }
 
-        return ParseAdditive();
+        int first = -1;
+        int last = -1;
+        for (int i = 0; i < _tokens.Count; i++)
+        {
+            if (_tokens[i].Position >= span.Start && _tokens[i].Position < span.End && _tokens[i].Kind != TokenKind.NewLine)
+            {
+                if (first < 0)
+                {
+                    first = i;
+                }
+
+                last = i;
+            }
+        }
+
+        return first < 0 ? "b" : TokensToText(first, last + 1);
     }
 
     private ArgumentSyntax ParseCallArgument(bool allowNamed, bool allowComplexExpression)
     {
+        int start = _position;
         string? name = null;
-        ArgumentModifier modifier = ParseOptionalArgumentModifier();
-
-        if (allowNamed && modifier == ArgumentModifier.None && Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Colon)
+        if (allowNamed && Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Colon)
         {
             name = Next().Text;
             Expect(TokenKind.Colon, "Expected ':' after named argument label.");
         }
 
+        ArgumentModifier modifier = ParseOptionalArgumentModifier();
         if (modifier == ArgumentModifier.Out)
         {
-            int savedPosition = _position;
-            int savedDiagnostics = _diagnostics.Count;
-            TypeSyntax? outType = TryParseTypeSyntax(allowSizedArrays: false);
-            if (outType is not null && TryParseBindingTarget(out BindingTarget? target))
+            if (TryParseOutDeclaration(name, out ArgumentSyntax? declaration))
             {
-                return new OutDeclarationArgumentSyntax(name, outType, target!);
+                return Mark(declaration!, start);
             }
 
-            Restore(savedPosition, savedDiagnostics);
+            if (Current.Kind == TokenKind.Identifier && Current.Text == "_")
+            {
+                Next();
+                return Mark(new ExpressionArgumentSyntax(name, modifier, new DiscardExpression()), start);
+            }
         }
 
-        Expression expression;
-        if (modifier == ArgumentModifier.Out && Current.Kind == TokenKind.Identifier && Current.Text == "_")
-        {
-            Next();
-            expression = new DiscardExpression();
-        }
-        else
-        {
-            expression = allowComplexExpression && TryParseBareGeneratorExpression(out Expression? generator)
-                ? generator!
-                : allowComplexExpression ? ParseExpression() : ParseAtomicArgumentExpression();
-        }
+        Expression expression = allowComplexExpression && TryParseBareGeneratorExpression(out Expression? generator)
+            ? generator!
+            : allowComplexExpression ? ParseExpression() : ParsePostfix(allowLineLeadingMember: false);
 
-        return new ExpressionArgumentSyntax(name, modifier, expression);
+        return Mark(new ExpressionArgumentSyntax(name, modifier, expression), start);
     }
-
-    private Expression ParseAtomicArgumentExpression()
-    {
-        if (Current.Kind is TokenKind.PlusPlus or TokenKind.MinusMinus)
-        {
-            TokenKind kind = Next().Kind;
-            return new PrefixExpression(
-                kind == TokenKind.PlusPlus ? PostfixOperator.Increment : PostfixOperator.Decrement,
-                ParseAtomicArgumentExpression());
-        }
-
-        if (Current.Kind is TokenKind.Plus or TokenKind.Minus or TokenKind.Bang or TokenKind.Not or TokenKind.Tilde)
-        {
-            TokenKind kind = Next().Kind;
-            UnaryOperator op = kind switch
-            {
-                TokenKind.Plus => UnaryOperator.Plus,
-                TokenKind.Minus => UnaryOperator.Negate,
-                TokenKind.Tilde => UnaryOperator.Peek,
-                _ => UnaryOperator.LogicalNot,
-            };
-
-            return new UnaryExpression(op, ParseAtomicArgumentExpression());
-        }
-
-        Expression expression = ParsePrimary();
-
-        while (true)
-        {
-            if (Current.Kind == TokenKind.OpenParen && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.OpenParen))
-            {
-                expression = new CallExpression(expression, ParseCallArgumentsTail(), false);
-                continue;
-            }
-
-            if (Current.Kind == TokenKind.OpenBracket && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.OpenBracket))
-            {
-                expression = new IndexExpression(expression, ParseIndexArgumentsTail());
-                continue;
-            }
-
-            if (Current.Kind == TokenKind.Dot && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.Dot))
-            {
-                if (Current.Kind == TokenKind.IntegerLiteral)
-                {
-                    if (!int.TryParse(Current.Text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int position) || position < 1)
-                    {
-                        _diagnostics.Add(new Diagnostic("Tuple projection index must be a positive integer (`.1`, `.2`, ...).", Current.Span));
-                        position = 1;
-                    }
-
-                    Next();
-                    expression = new TupleProjectionExpression(expression, position);
-                }
-                else
-                {
-                    string memberName = ParseIdentifierWithOptionalGenericSuffix();
-                    expression = new MemberAccessExpression(expression, memberName);
-                }
-
-                continue;
-            }
-
-            if (Current.Kind == TokenKind.PlusPlus && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.PlusPlus))
-            {
-                expression = new PostfixExpression(expression, PostfixOperator.Increment);
-                continue;
-            }
-
-            if (Current.Kind == TokenKind.MinusMinus && IsCurrentAdjacentToPreviousToken() && Match(TokenKind.MinusMinus))
-            {
-                expression = new PostfixExpression(expression, PostfixOperator.Decrement);
-                continue;
-            }
-
-            break;
-        }
-
-        return expression;
-    }
-
-    private Expression AppendSpaceCallArgument(Expression expression, ArgumentSyntax argument)
-    {
-        if (expression is CallExpression { IsSpaceSeparated: true } call)
-        {
-            return new CallExpression(call.Callee, call.Arguments.Concat([argument]).ToArray(), true);
-        }
-
-        return new CallExpression(expression, Immutable.List(argument), true);
-    }
-
-    private bool CanContinueSpaceCall(Expression expression)
-        => expression is IdentifierExpression
-            or MemberAccessExpression
-            or IndexExpression
-            or TupleProjectionExpression
-            or WithExpression
-            or SwitchExpression
-            or CallExpression;
-
-    private static bool CanStartSpaceArgument(TokenKind kind)
-        => kind is TokenKind.Identifier
-            or TokenKind.IntegerLiteral
-            or TokenKind.FloatLiteral
-            or TokenKind.StringLiteral
-            or TokenKind.CharLiteral
-            or TokenKind.True
-            or TokenKind.False
-            or TokenKind.Null
-            or TokenKind.OpenParen
-            or TokenKind.OpenBracket
-            or TokenKind.If
-            or TokenKind.New
-            or TokenKind.Ref
-            or TokenKind.Out
-            or TokenKind.In;
 }
-
-
-
