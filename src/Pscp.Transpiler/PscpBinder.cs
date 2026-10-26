@@ -501,7 +501,8 @@ internal sealed class PscpBinder : SyntaxRewriter
 
     public override Expression VisitIdentifier(IdentifierExpression identifier)
     {
-        Symbol? symbol = Lookup(identifier.Name, out Scope? owner);
+        string lookupName = PscpIntrinsicCatalog.StripGenericSuffix(identifier.Name);
+        Symbol? symbol = Lookup(lookupName, out Scope? owner);
         if (symbol is null)
         {
             string? reserved = identifier.Name switch
@@ -577,9 +578,9 @@ internal sealed class PscpBinder : SyntaxRewriter
         }
 
         if (call.Callee is IdentifierExpression calleeIdentifier
-            && Lookup(calleeIdentifier.Name, out _) is { Kind: SymbolKind.Function, Declaration: FunctionDeclaration target })
+            && Lookup(PscpIntrinsicCatalog.StripGenericSuffix(calleeIdentifier.Name), out _) is { Kind: SymbolKind.Function, Declaration: FunctionDeclaration target })
         {
-            if (_currentFunction is not null && _lambdaDepth == 0 && _calls.TryGetValue(_currentFunction, out List<FunctionDeclaration>? edges))
+            if (_currentFunction is not null && _calls.TryGetValue(_currentFunction, out List<FunctionDeclaration>? edges))
             {
                 edges.Add(target);
             }
@@ -894,7 +895,8 @@ internal sealed class PscpBinder : SyntaxRewriter
     {
         foreach ((int statementIndex, FunctionDeclaration function, Expression call) in _topLevelCalls)
         {
-            if (!_globalReads.TryGetValue(function, out HashSet<string>? reads))
+            HashSet<string> reads = CollectTransitiveGlobalReads(function);
+            if (reads.Count == 0)
             {
                 continue;
             }
@@ -911,6 +913,39 @@ internal sealed class PscpBinder : SyntaxRewriter
                 }
             }
         }
+    }
+
+    private HashSet<string> CollectTransitiveGlobalReads(FunctionDeclaration root)
+    {
+        HashSet<string> reads = new(StringComparer.Ordinal);
+        HashSet<FunctionDeclaration> visited = new(ReferenceEqualityComparer.Instance);
+        Queue<FunctionDeclaration> pending = new();
+        visited.Add(root);
+        pending.Enqueue(root);
+
+        while (pending.Count > 0)
+        {
+            FunctionDeclaration current = pending.Dequeue();
+            if (_globalReads.TryGetValue(current, out HashSet<string>? directReads))
+            {
+                reads.UnionWith(directReads);
+            }
+
+            if (!_calls.TryGetValue(current, out List<FunctionDeclaration>? callees))
+            {
+                continue;
+            }
+
+            foreach (FunctionDeclaration callee in callees)
+            {
+                if (IsTopLevelFunction(callee) && visited.Add(callee))
+                {
+                    pending.Enqueue(callee);
+                }
+            }
+        }
+
+        return reads;
     }
 
     // A top-level `let` (or immutable explicitly typed declaration) whose initializer is a compile-time constant.

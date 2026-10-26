@@ -2800,7 +2800,10 @@ internal sealed partial class CSharpEmitter
             return $"System.Math.Pow({EmitExpression(value)}, {EmitExpression(exponent)})";
         }
 
-        TypeSyntax resultType = WidenAccumulator(valueType!);
+        TypeSyntax effectiveValueType = valueType is NamedTypeSyntax { Name: "long" } || exponentType is NamedTypeSyntax { Name: "long" }
+            ? new NamedTypeSyntax("long", Immutable.List<TypeSyntax>())
+            : valueType!;
+        TypeSyntax resultType = WidenAccumulator(effectiveValueType);
         string valueText = EmitExpression(value);
         if (!Equals(resultType, valueType))
         {

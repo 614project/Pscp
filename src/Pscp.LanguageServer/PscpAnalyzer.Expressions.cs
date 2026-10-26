@@ -592,7 +592,7 @@ internal sealed partial class PscpAnalyzer
         int topLevelRange = FindTopLevelRangeOperator(state.Tokens, start, endExclusive);
         if (topLevelRange >= 0)
         {
-            return "IEnumerable<int>";
+            return InferRangeEnumerableType(state, scope, start, topLevelRange, endExclusive);
         }
 
         int topLevelComparison = FindFirstTopLevelOperator(
@@ -651,7 +651,10 @@ internal sealed partial class PscpAnalyzer
             return PromoteNumericType(left, right);
         }
 
-        return null;
+        Token first = state.Tokens[start];
+        Token last = state.Tokens[endExclusive - 1];
+        TextSpan span = new(first.Position, Math.Max(0, last.Position + last.Text.Length - first.Position));
+        return state.FrontEnd?.GetExpressionTypeDisplay(span);
     }
 
     private static string? InferBitwiseType(string? left, string? right)
@@ -742,6 +745,26 @@ internal sealed partial class PscpAnalyzer
         return false;
     }
 
+    private string InferRangeEnumerableType(AnalyzerState state, Scope scope, int start, int firstRangeOp, int endExclusive)
+    {
+        int secondRangeOp = FindTopLevelRangeOperator(state.Tokens, firstRangeOp + 1, endExclusive);
+        string? startType = InferExpressionType(state, scope, start, firstRangeOp);
+        string? stepType = secondRangeOp >= 0 ? InferExpressionType(state, scope, firstRangeOp + 1, secondRangeOp) : null;
+        string? endType = InferExpressionType(state, scope, (secondRangeOp >= 0 ? secondRangeOp : firstRangeOp) + 1, endExclusive);
+
+        if (startType == "char" && endType == "char")
+        {
+            return "IEnumerable<char>";
+        }
+
+        if (startType == "long" || stepType == "long" || endType == "long")
+        {
+            return "IEnumerable<long>";
+        }
+
+        return "IEnumerable<int>";
+    }
+
     private bool TryInferArrowExpressionType(AnalyzerState state, Scope scope, int start, int endExclusive, out string? type)
     {
         type = null;
@@ -753,18 +776,9 @@ internal sealed partial class PscpAnalyzer
 
         string? itemType = InferLoopVariableType(state, scope, start, arrowIndex);
         int cursor = arrowIndex + 1;
-        cursor = SkipSeparators(state.Tokens, cursor, endExclusive);
-        if (!IsIdentifier(state.Tokens, cursor))
+        if (!TryReadIterationBindings(state, ref cursor, endExclusive, out List<BindingTargetInfo> indexBindings, out List<BindingTargetInfo> itemBindings, out bool itemIsTuple))
         {
             return false;
-        }
-
-        int firstBinding = cursor++;
-        int? secondBinding = null;
-        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.Comma && IsIdentifier(state.Tokens, cursor + 1))
-        {
-            secondBinding = cursor + 1;
-            cursor += 2;
         }
 
         cursor = SkipSeparators(state.Tokens, cursor, endExclusive);
@@ -773,11 +787,20 @@ internal sealed partial class PscpAnalyzer
             cursor++;
         }
 
-        Scope bodyScope = state.CreateScope(scope, state.Tokens[firstBinding].Position, scope.EndOffset);
-        AddSyntheticInferenceBinding(bodyScope, state.Tokens[firstBinding], secondBinding is null ? itemType : "int");
-        if (secondBinding is int second)
+        int firstBindingIndex = indexBindings.Count > 0 ? indexBindings[0].TokenIndex : itemBindings[0].TokenIndex;
+        Scope bodyScope = state.CreateScope(scope, state.Tokens[firstBindingIndex].Position, scope.EndOffset);
+        foreach (BindingTargetInfo indexBinding in indexBindings)
         {
-            AddSyntheticInferenceBinding(bodyScope, state.Tokens[second], itemType);
+            AddSyntheticInferenceBinding(bodyScope, state.Tokens[indexBinding.TokenIndex], "int");
+        }
+
+        IReadOnlyList<string>? tupleElementTypes = itemIsTuple ? SplitTupleElementTypes(itemType) : null;
+        for (int i = 0; i < itemBindings.Count; i++)
+        {
+            string? elementType = itemIsTuple
+                ? (tupleElementTypes is not null && i < tupleElementTypes.Count ? tupleElementTypes[i] : null)
+                : itemType;
+            AddSyntheticInferenceBinding(bodyScope, state.Tokens[itemBindings[i].TokenIndex], elementType);
         }
 
         string? bodyType;
@@ -877,12 +900,31 @@ internal sealed partial class PscpAnalyzer
             searchStart = nextDot + 1;
         }
 
-        if (dot < 0 || dot + 1 >= endExclusive || !IsIdentifier(state.Tokens, dot + 1))
+        if (dot < 0 || dot + 1 >= endExclusive)
         {
             return false;
         }
 
         string? receiverType = InferExpressionType(state, scope, start, dot);
+        if (state.Tokens[dot + 1].Kind == TokenKind.IntegerLiteral
+            && int.TryParse(state.Tokens[dot + 1].Text, out int tupleIndex)
+            && tupleIndex >= 1)
+        {
+            IReadOnlyList<string>? elements = SplitTupleElementTypes(receiverType);
+            if (elements is not null && tupleIndex - 1 < elements.Count)
+            {
+                type = elements[tupleIndex - 1];
+                return true;
+            }
+
+            return false;
+        }
+
+        if (!IsIdentifier(state.Tokens, dot + 1))
+        {
+            return false;
+        }
+
         if (!string.IsNullOrWhiteSpace(receiverType)
             && state.TryResolveTypeMember(receiverType!, state.Tokens[dot + 1].Text, out PscpServerSymbol? memberSymbol)
             && memberSymbol is not null)
@@ -1139,6 +1181,7 @@ internal sealed partial class PscpAnalyzer
             "char" or "readChar" => "char",
             "str" or "readString" => "string",
             "line" or "readLine" or "readRestOfLine" => "string",
+            "hasNext" or "hasNextLine" => "bool",
             "lines" or "readLines" => "string[]",
             "words" or "readWords" => "string[]",
             "chars" or "readChars" => "char[]",
@@ -1146,6 +1189,7 @@ internal sealed partial class PscpAnalyzer
             "gridLong" or "readGridLong" => "long[][]",
             "charGrid" or "readCharGrid" => "char[][]",
             "wordGrid" or "readWordGrid" => "string[][]",
+            "readTuple" => BuildTupleTypeFromGenericArguments(state.Tokens, start, openParen, 0),
             "tuple2" or "readTuple2" => BuildTupleTypeFromGenericArguments(state.Tokens, start, openParen, 2),
             "tuple3" or "readTuple3" => BuildTupleTypeFromGenericArguments(state.Tokens, start, openParen, 3),
             "tuples2" or "readTuples2" => BuildTupleTypeFromGenericArguments(state.Tokens, start, openParen, 2) is string tuple2 ? tuple2 + "[]" : "(object, object)[]",
@@ -1153,7 +1197,7 @@ internal sealed partial class PscpAnalyzer
             "array" or "readArray" => BuildGenericCollectionType(state.Tokens, start, openParen, "[]", "object[]"),
             "list" or "readList" => BuildGenericCollectionType(state.Tokens, start, openParen, prefix: "List<", suffix: ">", fallback: "List<object>"),
             "linkedList" or "readLinkedList" => BuildGenericCollectionType(state.Tokens, start, openParen, prefix: "LinkedList<", suffix: ">", fallback: "LinkedList<object>"),
-            "nestedArray" or "readNestedArray" => BuildNestedArrayType(state.Tokens, start, openParen),
+            "readGrid" or "nestedArray" or "readNestedArray" => BuildNestedArrayType(state.Tokens, start, openParen),
             _ => null,
         };
     }
@@ -1173,7 +1217,8 @@ internal sealed partial class PscpAnalyzer
             "find" or "minBy" or "maxBy" => InferFirstArgumentElementType(state, scope, openParen),
             "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" => InferFirstArgumentMaterializedType(state, scope, openParen),
             "abs" => InferFirstArgumentType(state, scope, openParen),
-            "sqrt" or "pow" => "double",
+            "sqrt" => "double",
+            "pow" => InferPowReturnType(state, scope, openParen),
             "clamp" => InferPromotedArgumentType(state, scope, openParen, 3),
             "gcd" or "lcm" => InferPromotedArgumentType(state, scope, openParen, 2),
             "floor" or "ceil" or "round" => InferMathRoundingReturnType(state, scope, openParen),
@@ -1181,6 +1226,28 @@ internal sealed partial class PscpAnalyzer
             "groupCount" or "freq" or "index" => InferDictionaryTypeFromFirstArgument(state, scope, openParen),
             _ => null,
         };
+    }
+
+    private string InferPowReturnType(AnalyzerState state, Scope scope, int openParen)
+    {
+        if (TryReadArgumentBounds(state.Tokens, openParen, 3, out _))
+        {
+            return "long";
+        }
+
+        if (TryReadArgumentBounds(state.Tokens, openParen, 2, out IReadOnlyList<(int Start, int EndExclusive)>? bounds) && bounds is { Count: 2 })
+        {
+            string? baseType = InferExpressionType(state, scope, bounds[0].Start, bounds[0].EndExclusive);
+            string? expType = InferExpressionType(state, scope, bounds[1].Start, bounds[1].EndExclusive);
+            bool baseIntegral = baseType is "int" or "long" or "char" or "short" or "byte";
+            bool expIntegral = expType is "int" or "long" or "char" or "short" or "byte";
+            if (baseIntegral && expIntegral)
+            {
+                return baseType == "long" || expType == "long" ? "long" : "int";
+            }
+        }
+
+        return "double";
     }
 
     private static string? InferArrayZeroReturnType(AnalyzerState state, Scope scope, int start)
@@ -1219,13 +1286,13 @@ internal sealed partial class PscpAnalyzer
     {
         if (!TryReadGenericArgumentSlice(tokens, start, openParen, out int genericStart, out int genericEnd))
         {
-            return arity == 2 ? "(object, object)" : "(object, object, object)";
+            return arity == 3 ? "(object, object, object)" : "(object, object)";
         }
 
         List<int> commas = FindTopLevelSeparators(tokens, genericStart, genericEnd, TokenKind.Comma);
-        if (commas.Count + 1 != arity)
+        if ((arity > 0 && commas.Count + 1 != arity) || commas.Count + 1 < 2)
         {
-            return arity == 2 ? "(object, object)" : "(object, object, object)";
+            return arity == 3 ? "(object, object, object)" : "(object, object)";
         }
 
         List<string> elements = [];
@@ -1578,9 +1645,22 @@ internal sealed partial class PscpAnalyzer
     private static string BuildCallName(IReadOnlyList<Token> tokens, int start, int endExclusive)
     {
         List<Token> pieces = [];
+        int angleDepth = 0;
         for (int i = start; i < endExclusive; i++)
         {
-            if (tokens[i].Kind is TokenKind.Identifier or TokenKind.Dot)
+            if (tokens[i].Kind == TokenKind.LessThan)
+            {
+                angleDepth++;
+                continue;
+            }
+
+            if (tokens[i].Kind == TokenKind.GreaterThan)
+            {
+                angleDepth = Math.Max(0, angleDepth - 1);
+                continue;
+            }
+
+            if (angleDepth == 0 && tokens[i].Kind is TokenKind.Identifier or TokenKind.Dot)
             {
                 pieces.Add(tokens[i]);
             }

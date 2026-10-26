@@ -365,8 +365,15 @@ static partial class PscpCli
 
         if (stdIn is not null)
         {
-            await process.StandardInput.WriteAsync(stdIn);
-            process.StandardInput.Close();
+            try
+            {
+                await process.StandardInput.WriteAsync(stdIn);
+                process.StandardInput.Close();
+            }
+            catch (IOException)
+            {
+                // The program exited without reading all of its input.
+            }
         }
 
         await process.WaitForExitAsync();

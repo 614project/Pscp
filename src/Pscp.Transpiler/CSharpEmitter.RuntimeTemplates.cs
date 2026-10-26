@@ -16,6 +16,7 @@ internal sealed partial class CSharpEmitter
             private byte[] _text = new byte[256];
             private int _length;
             private int _position;
+            private bool _started;
             internal bool _lineStart = true;
             private static readonly char[] WordSeparators = { ' ', '\t', '\f', '\v' };
 
@@ -202,6 +203,16 @@ internal sealed partial class CSharpEmitter
                     {
                         _length = 0;
                         return -1;
+                    }
+
+                    if (!_started)
+                    {
+                        _started = true;
+                        if (_length >= 3 && _buffer[0] == 0xEF && _buffer[1] == 0xBB && _buffer[2] == 0xBF)
+                        {
+                            _position = 3;
+                            if (_position == _length) return Peek();
+                        }
                     }
                 }
 

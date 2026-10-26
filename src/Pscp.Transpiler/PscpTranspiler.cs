@@ -10,6 +10,31 @@ public sealed record PscpFrontEndResult(
     public bool Success => Diagnostics.All(diagnostic => diagnostic.Severity != DiagnosticSeverity.Error);
 
     internal SemanticAnalysisResult? Semantic { get; init; }
+
+    public string? GetExpressionTypeDisplay(TextSpan span)
+    {
+        if (Semantic is null || Spans.FindExpression(span) is not Expression expression)
+        {
+            return null;
+        }
+
+        TypeSyntax? type = Semantic.GetExpressionType(expression);
+        return type is null || type is NamedTypeSyntax { Name: "void" or "object" or "Delegate" }
+            ? null
+            : FormatTypeDisplay(type);
+    }
+
+    private static string FormatTypeDisplay(TypeSyntax type)
+        => type switch
+        {
+            NamedTypeSyntax { TypeArguments.Count: 0 } named => named.Name,
+            NamedTypeSyntax named => $"{named.Name}<{string.Join(", ", named.TypeArguments.Select(FormatTypeDisplay))}>",
+            TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select(FormatTypeDisplay))})",
+            ArrayTypeSyntax array => FormatTypeDisplay(array.ElementType) + string.Concat(Enumerable.Repeat("[]", array.Depth)),
+            NullableTypeSyntax nullable => FormatTypeDisplay(nullable.InnerType) + "?",
+            SizedArrayTypeSyntax sized => FormatTypeDisplay(sized.ElementType) + string.Concat(Enumerable.Repeat("[]", sized.Dimensions.Count)),
+            _ => "object",
+        };
 }
 
 public static class PscpTranspiler
