@@ -410,6 +410,18 @@ internal sealed partial class PscpAnalyzer
 
         int nameIndex = cursor++;
         string typeName = state.Tokens[nameIndex].Text;
+        if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.LessThan)
+        {
+            int closeGeneric = FindMatching(state.Tokens, cursor, TokenKind.LessThan, TokenKind.GreaterThan, endExclusive);
+            if (closeGeneric < 0)
+            {
+                index = saved;
+                return false;
+            }
+
+            cursor = closeGeneric + 1;
+        }
+
         int primaryOpenParen = -1;
         List<ParameterInfo> primaryParameters = [];
         if (cursor < endExclusive && state.Tokens[cursor].Kind == TokenKind.OpenParen)
@@ -421,6 +433,12 @@ internal sealed partial class PscpAnalyzer
                 index = saved;
                 return false;
             }
+        }
+
+        while (cursor < endExclusive
+            && state.Tokens[cursor].Kind is not (TokenKind.OpenBrace or TokenKind.Semicolon or TokenKind.NewLine or TokenKind.EndOfFile))
+        {
+            cursor++;
         }
 
         // The body brace has to belong to this declaration. Searching the rest of the file would find the next
@@ -552,13 +570,28 @@ internal sealed partial class PscpAnalyzer
             return false;
         }
 
-        if (!IsIdentifier(state.Tokens, index))
+        int nameIndex;
+        if (!isRecursive
+            && scope.TypeName is not null
+            && typeTokens.Count == 1
+            && state.Tokens[typeTokens[0]].Text == scope.TypeName
+            && index < endExclusive
+            && state.Tokens[index].Kind == TokenKind.OpenParen)
+        {
+            nameIndex = typeTokens[0];
+            typeTokens.Clear();
+            returnType = scope.TypeName;
+        }
+        else if (IsIdentifier(state.Tokens, index))
+        {
+            nameIndex = index++;
+        }
+        else
         {
             index = saved;
             return false;
         }
 
-        int nameIndex = index++;
         if (index < endExclusive && state.Tokens[index].Kind == TokenKind.LessThan)
         {
             int closeGeneric = FindMatching(state.Tokens, index, TokenKind.LessThan, TokenKind.GreaterThan, endExclusive);
@@ -583,11 +616,26 @@ internal sealed partial class PscpAnalyzer
             return false;
         }
 
-        if (index < endExclusive && state.Tokens[index].Kind == TokenKind.Where)
+        if (index < endExclusive && state.Tokens[index].Kind is TokenKind.Where or TokenKind.Colon)
         {
-            while (index < endExclusive
-                && state.Tokens[index].Kind is not (TokenKind.OpenBrace or TokenKind.FatArrow or TokenKind.NewLine or TokenKind.EndOfFile))
+            int depth = 0;
+            while (index < endExclusive)
             {
+                TokenKind kind = state.Tokens[index].Kind;
+                if (depth == 0 && kind is TokenKind.OpenBrace or TokenKind.FatArrow or TokenKind.NewLine or TokenKind.EndOfFile)
+                {
+                    break;
+                }
+
+                if (kind is TokenKind.OpenParen or TokenKind.OpenBracket)
+                {
+                    depth++;
+                }
+                else if (kind is TokenKind.CloseParen or TokenKind.CloseBracket)
+                {
+                    depth = Math.Max(0, depth - 1);
+                }
+
                 index++;
             }
         }

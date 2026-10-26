@@ -13,15 +13,22 @@ public sealed record PscpFrontEndResult(
 
     public string? GetExpressionTypeDisplay(TextSpan span)
     {
-        if (Semantic is null || Spans.FindExpression(span) is not Expression expression)
+        if (Semantic is null)
         {
             return null;
         }
 
-        TypeSyntax? type = Semantic.GetExpressionType(expression);
-        return type is null || type is NamedTypeSyntax { Name: "void" or "object" or "Delegate" }
-            ? null
-            : FormatTypeDisplay(type);
+        string? display = null;
+        foreach (Expression expression in Spans.FindExpressions(span))
+        {
+            TypeSyntax? type = Semantic.GetExpressionType(expression);
+            if (type is not null && type is not NamedTypeSyntax { Name: "void" or "object" or "Delegate" })
+            {
+                display = FormatTypeDisplay(type);
+            }
+        }
+
+        return display;
     }
 
     private static string FormatTypeDisplay(TypeSyntax type)

@@ -3275,6 +3275,11 @@ internal static class TestRunner
             for item in edges {
                 total += item.1 + item.2
             }
+            class Holder<T> {
+                mut T val
+                Holder(T v) { val = v }
+                T get() => val
+            }
             += twice(1) + identity<int>(2) + second + bigPow + total + grid[0][0] + letters.Length + (hasMore ? 1 : 0)
             """;
 
@@ -3294,14 +3299,22 @@ internal static class TestRunner
             }
         }
 
-        // Outline must include expression-bodied `twice` and generic `identity`.
+        // Outline must include expression-bodied `twice`, generic `identity`, generic `Holder`, and its method `get`.
         using JsonDocument outline = await session.RequestAsync("textDocument/documentSymbol", string.Empty);
-        HashSet<string> outlineNames = outline.RootElement
-            .GetProperty("result")
-            .EnumerateArray()
-            .Select(element => element.GetProperty("name").GetString() ?? string.Empty)
-            .ToHashSet(StringComparer.Ordinal);
-        foreach (string expectedSymbol in new[] { "twice", "identity" })
+        HashSet<string> outlineNames = new(StringComparer.Ordinal);
+        foreach (JsonElement symbol in outline.RootElement.GetProperty("result").EnumerateArray())
+        {
+            outlineNames.Add(symbol.GetProperty("name").GetString() ?? string.Empty);
+            if (symbol.TryGetProperty("children", out JsonElement children) && children.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement child in children.EnumerateArray())
+                {
+                    outlineNames.Add(child.GetProperty("name").GetString() ?? string.Empty);
+                }
+            }
+        }
+
+        foreach (string expectedSymbol in new[] { "twice", "identity", "Holder", "get" })
         {
             if (!outlineNames.Contains(expectedSymbol))
             {
@@ -3633,8 +3646,13 @@ internal static class TestRunner
             string uri = new Uri(Path.Combine(workspaceRoot, ".generated-tests", "lsp-probe.pscp")).AbsoluteUri;
             string rootUri = new Uri(workspaceRoot + Path.DirectorySeparatorChar).AbsoluteUri;
             string escapedSource = JsonEncodedText.Encode(source).ToString();
-            string serverDll = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll");
-            if (!_serverBuilt || !File.Exists(serverDll))
+            string serverDll = Path.Combine(AppContext.BaseDirectory, "Pscp.LanguageServer.dll");
+            if (!File.Exists(serverDll))
+            {
+                serverDll = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll");
+            }
+
+            if (!File.Exists(serverDll) && !_serverBuilt)
             {
                 string serverProject = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "Pscp.LanguageServer.csproj");
                 ProcessResult build = await RunDotnetAsync($"build \"{serverProject}\" -nologo -v q", workspaceRoot, string.Empty);

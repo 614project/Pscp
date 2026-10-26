@@ -27,18 +27,15 @@ public sealed class SyntaxSpans
     public TextSpan GetName(object? node)
         => node is not null && _nameSpans.TryGetValue(node, out TextSpan span) ? span : Get(node);
 
-    internal Expression? FindExpression(TextSpan target)
+    internal IEnumerable<Expression> FindExpressions(TextSpan target)
     {
-        Expression? matched = null;
         foreach ((object node, TextSpan span) in _spans)
         {
             if (span == target && node is Expression expression)
             {
-                matched = expression;
+                yield return expression;
             }
         }
-
-        return matched;
     }
 
     internal void Set(object node, TextSpan span)
