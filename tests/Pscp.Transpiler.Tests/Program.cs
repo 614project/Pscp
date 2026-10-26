@@ -1071,18 +1071,82 @@ internal static class TestRunner
             {
                 LargeStack = true,
             },
+            new(
+                "TupleInterpolationWithoutStdoutKeepsSystemIoUsing",
+                """
+                let pair = (10, 20)
+                let text = $"pair={pair}"
+                Console.WriteLine(text)
+                """,
+                "",
+                "pair=10 20\n"),
+            new(
+                "ExplicitLinqUsingAndMethodsCompileWithoutImplicitUsings",
+                """
+                using System.Linq
+
+                int[] xs = [1, 2, 3, 4]
+                let evens = xs.Where(x => x % 2 == 0).ToArray()
+                += evens
+                """,
+                "",
+                "2 4\n"),
+            new(
+                "RecursionInsideLambdaMapAndFilter",
+                """
+                List<int>[] g = [[1, 2], [3], [], []]
+                rec int subtreeSize(int u) {
+                    1 + g[u].map(v => subtreeSize(v)).sum()
+                }
+                += subtreeSize(0)
+                """,
+                "",
+                "4\n"),
+            new(
+                "PowIntWithLongExponentReturnsLong",
+                """
+                long compute(long e) {
+                    pow(2, e)
+                }
+                let p = pow(2, 10L)
+                += compute(12L)
+                += p
+                """,
+                "",
+                "4096\n1024\n"),
+            new(
+                "HoistedValueBlockWithReturnStringLiteralInStruct",
+                """
+                record struct WordBag(string[] Words) {
+                    public int CountReturnKeyword() => count(Words, w => w == "return")
+                }
+
+                WordBag bag = new(["go", "return", "stop", "return"])
+                += bag.CountReturnKeyword()
+                """,
+                "",
+                "2\n"),
         ];
 
         List<string> failures = [];
         List<Func<Task<string?>>> runs = [];
         testCases.AddRange(LoadConformanceCases(workspaceRoot));
 
+        string allCasesDirectory = Path.Combine(generatedRoot, "AllTestCases");
+        if (Directory.Exists(allCasesDirectory))
+        {
+            Directory.Delete(allCasesDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(allCasesDirectory);
+        List<(TestCase Case, string SafeName, string CSharpCode)> compiledCases = [];
+
         foreach (TestCase testCase in testCases)
         {
-            string safeName = string.Concat(testCase.Name.Where(char.IsLetterOrDigit));
+            string safeName = "C_" + string.Concat(testCase.Name.Where(char.IsLetterOrDigit));
             TranspilationResult result = PscpTranspiler.Transpile(
                 NormalizeSource(testCase.Source),
-                new TranspilationOptions("Pscp.Generated", safeName + "Program", LargeStack: testCase.LargeStack));
+                new TranspilationOptions("Pscp.Generated." + safeName, safeName + "Program", LargeStack: testCase.LargeStack));
 
             IReadOnlyList<Diagnostic> errors = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error).ToArray();
             IReadOnlyList<Diagnostic> warnings = result.Diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning).ToArray();
@@ -1107,34 +1171,76 @@ internal static class TestRunner
                 continue;
             }
 
-            string caseDirectory = Path.Combine(generatedRoot, safeName);
-            Directory.CreateDirectory(caseDirectory);
-
-            await File.WriteAllTextAsync(Path.Combine(caseDirectory, "Program.cs"), result.CSharpCode, Encoding.UTF8);
-            await File.WriteAllTextAsync(Path.Combine(caseDirectory, $"{safeName}.csproj"), CreateProjectFile(), Encoding.UTF8);
-
-            runs.Add(async () =>
-            {
-                ProcessResult runResult = await RunDotnetAsync(
-                    "run --project \"" + Path.Combine(caseDirectory, $"{safeName}.csproj") + "\"",
-                    caseDirectory,
-                    testCase.Input);
-
-                if (runResult.ExitCode != 0)
-                {
-                    return $"{testCase.Name}: generated program failed\nSTDOUT:\n{runResult.StdOut}\nSTDERR:\n{runResult.StdErr}\nGenerated:\n{result.CSharpCode}";
-                }
-
-                string actual = testCase.CompareAsSample ? NormalizeSampleOutput(runResult.StdOut) : NormalizeOutput(runResult.StdOut);
-                string expected = testCase.CompareAsSample ? NormalizeSampleOutput(testCase.ExpectedOutput) : NormalizeOutput(testCase.ExpectedOutput);
-                return string.Equals(actual, expected, StringComparison.Ordinal)
-                    ? null
-                    : $"{testCase.Name}: output mismatch\nExpected: {Escape(expected)}\nActual:   {Escape(actual)}\nGenerated:\n{result.CSharpCode}";
-            });
+            await File.WriteAllTextAsync(Path.Combine(allCasesDirectory, $"{safeName}.cs"), result.CSharpCode, Encoding.UTF8);
+            compiledCases.Add((testCase, safeName, result.CSharpCode));
         }
 
-        // Each case is an independent project; building and running them concurrently cuts the suite's wall time.
-        using (SemaphoreSlim gate = new(Math.Clamp(Environment.ProcessorCount / 2, 1, 4)))
+        if (compiledCases.Count > 0)
+        {
+            StringBuilder dispatcher = new();
+            dispatcher.AppendLine("using System;");
+            dispatcher.AppendLine("namespace Pscp.Generated;");
+            dispatcher.AppendLine("internal static class TestCasesRunner");
+            dispatcher.AppendLine("{");
+            dispatcher.AppendLine("    public static int Main(string[] args)");
+            dispatcher.AppendLine("    {");
+            dispatcher.AppendLine("        if (args.Length == 0) return 2;");
+            dispatcher.AppendLine("        switch (args[0])");
+            dispatcher.AppendLine("        {");
+            foreach ((_, string safeName, _) in compiledCases)
+            {
+                dispatcher.AppendLine($"            case \"{safeName}\": Pscp.Generated.{safeName}.{safeName}Program.Main(); return 0;");
+            }
+
+            dispatcher.AppendLine("            default: return 3;");
+            dispatcher.AppendLine("        }");
+            dispatcher.AppendLine("    }");
+            dispatcher.AppendLine("}");
+
+            await File.WriteAllTextAsync(Path.Combine(allCasesDirectory, "TestCasesRunner.cs"), dispatcher.ToString(), Encoding.UTF8);
+            string projectFile = CreateProjectFile()
+                .Replace("<Nullable>enable</Nullable>", "<Nullable>enable</Nullable>\n    <StartupObject>Pscp.Generated.TestCasesRunner</StartupObject>", StringComparison.Ordinal);
+            string projectPath = Path.Combine(allCasesDirectory, "AllTestCases.csproj");
+            await File.WriteAllTextAsync(projectPath, projectFile, Encoding.UTF8);
+
+            ProcessResult buildResult = await RunDotnetAsync(
+                $"build \"{projectPath}\" -nologo -v q -clp:NoSummary",
+                allCasesDirectory,
+                string.Empty);
+
+            if (buildResult.ExitCode != 0)
+            {
+                failures.Add($"AllTestCases: generated C# failed to compile\n{buildResult.StdOut}\n{buildResult.StdErr}");
+            }
+            else
+            {
+                string assemblyPath = Path.Combine(allCasesDirectory, "bin", "Debug", "net10.0", "AllTestCases.dll");
+                foreach ((TestCase testCase, string safeName, string csharpCode) in compiledCases)
+                {
+                    runs.Add(async () =>
+                    {
+                        ProcessResult runResult = await RunDotnetAsync(
+                            $"\"{assemblyPath}\" \"{safeName}\"",
+                            allCasesDirectory,
+                            testCase.Input);
+
+                        if (runResult.ExitCode != 0)
+                        {
+                            return $"{testCase.Name}: generated program failed\nSTDOUT:\n{runResult.StdOut}\nSTDERR:\n{runResult.StdErr}\nGenerated:\n{csharpCode}";
+                        }
+
+                        string actual = testCase.CompareAsSample ? NormalizeSampleOutput(runResult.StdOut) : NormalizeOutput(runResult.StdOut);
+                        string expected = testCase.CompareAsSample ? NormalizeSampleOutput(testCase.ExpectedOutput) : NormalizeOutput(testCase.ExpectedOutput);
+                        return string.Equals(actual, expected, StringComparison.Ordinal)
+                            ? null
+                            : $"{testCase.Name}: output mismatch\nExpected: {Escape(expected)}\nActual:   {Escape(actual)}\nGenerated:\n{csharpCode}";
+                    });
+                }
+            }
+        }
+
+        // Each case runs in its own isolated child process against the prebuilt test assembly.
+        using (SemaphoreSlim gate = new(Math.Clamp(Environment.ProcessorCount, 2, 8)))
         {
             string?[] outcomes = await Task.WhenAll(runs.Select(async run =>
             {
@@ -1194,6 +1300,7 @@ internal static class TestRunner
         VerifyRemovedGenericReadSurface(failures);
         VerifyHoistedValueBlocksAvoidThunks(failures);
         VerifyCodeReviewRegressionShapes(failures);
+        VerifyBugReviewRegressions(failures);
         VerifyIntrinsicCatalogsAgree(failures);
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
@@ -1204,6 +1311,8 @@ internal static class TestRunner
         await VerifyLanguageServerOutlineAndNavigationAsync(failures);
         await VerifyLanguageServerSpaceCallSignatureHelpAsync(failures);
         await VerifyLanguageServerRenameRefusalsAsync(failures);
+        await VerifyLanguageServerDestructuringAndV07InferenceAsync(failures);
+        await VerifyCliLargeStdinEarlyExitAsync(workspaceRoot, generatedRoot, failures);
 
         if (failures.Count > 0)
         {
@@ -2955,6 +3064,286 @@ internal static class TestRunner
         }
     }
 
+    private static void VerifyBugReviewRegressions(List<string> failures)
+    {
+        // 1. PruneUsingDirectives keeps System.IO when only __PscpRender (StringWriter/TextWriter) is emitted.
+        TranspilationResult renderOnly = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                let pair = (1, 2)
+                let text = $"p={pair}"
+                Console.WriteLine(text)
+                """),
+            new TranspilationOptions("Pscp.Generated", "RenderOnlyUsingProgram"));
+        if (!renderOnly.Success || !renderOnly.CSharpCode.Contains("using System.IO;", StringComparison.Ordinal))
+        {
+            failures.Add($"BugReview_RenderOnlyUsing: expected `using System.IO;` to be retained when `__PscpRender` is emitted\nGenerated:\n{renderOnly.CSharpCode}");
+        }
+
+        // 2. PruneUsingDirectives keeps user-specified `using` directives and LINQ `.Any(`.
+        TranspilationResult linqAny = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                using System.Diagnostics
+
+                int[] xs = [1, 2, 3]
+                let ok = xs.Any(x => x == 2)
+                += ok
+                """),
+            new TranspilationOptions("Pscp.Generated", "LinqAnyUsingProgram"));
+        if (!linqAny.Success
+            || !linqAny.CSharpCode.Contains("using System.Linq;", StringComparison.Ordinal)
+            || !linqAny.CSharpCode.Contains("using System.Diagnostics;", StringComparison.Ordinal))
+        {
+            failures.Add($"BugReview_LinqAnyUsing: expected `using System.Linq;` and user `using System.Diagnostics;` to be retained\nGenerated:\n{linqAny.CSharpCode}");
+        }
+
+        // 3. Recursion inside a lambda argument (`map(v => dfs(v))`) requires `rec` (PSCP2201) and does not emit PSCP2208 when `rec` is present.
+        ExpectDiagnostic(
+            failures,
+            "BugReview_MissingRecInsideLambda",
+            """
+            List<int>[] g = [[1], []]
+            int dfs(int u) {
+                1 + g[u].map(v => dfs(v)).sum()
+            }
+            += dfs(0)
+            """,
+            "`dfs` calls itself, so it must be declared `rec`");
+
+        TranspilationResult validRecInLambda = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                List<int>[] g = [[1], []]
+                rec int dfs(int u) {
+                    1 + g[u].map(v => dfs(v)).sum()
+                }
+                += dfs(0)
+                """));
+        if (Reported(validRecInLambda.Diagnostics).Count > 0)
+        {
+            failures.Add($"BugReview_ValidRecInLambda: expected no diagnostics for `rec` function calling itself inside `map` lambda\nActual:\n{FormatDiagnostics(validRecInLambda.Diagnostics)}");
+        }
+
+        // 4. Transitive ReadBeforeInitialization (PSCP2107): `outer()` calls `inner()` which reads uninitialized top-level `late`.
+        TranspilationResult transitiveRead = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                int inner() { late + 1 }
+                int outer() { inner() }
+                += outer()
+                let late = 10
+                += outer()
+                """));
+        if (!transitiveRead.Diagnostics.Any(d => d.EffectiveCode == DiagnosticCodes.ReadBeforeInitialization && d.Message.Contains("`late`", StringComparison.Ordinal)))
+        {
+            failures.Add($"BugReview_TransitiveReadBeforeInitialization: expected PSCP2107 warning for transitive read of `late`\nActual:\n{FormatDiagnostics(transitiveRead.Diagnostics)}");
+        }
+
+        // 5. `--explain` header escapes `*/` inside string literals and strips comments after `"\\"`.
+        const string explainInput = """
+            // header comment
+            let slash = "\\" // trailing comment after escaped backslash
+            let pattern = "a*/b" /* block comment */
+            += slash + pattern
+            """;
+        string normalizedExplain = NormalizeSource(explainInput);
+        TranspilationResult explainResult = PscpTranspiler.Transpile(
+            normalizedExplain,
+            new TranspilationOptions("Pscp.Generated", "ExplainSafetyProgram", Explain: true, ExplainSource: normalizedExplain));
+        string headerEndMarker = "*/\n// (This file was generated by the PSCP transpiler.)";
+        int firstCommentClose = explainResult.CSharpCode.IndexOf("*/", StringComparison.Ordinal);
+        int expectedCommentClose = explainResult.CSharpCode.IndexOf(headerEndMarker, StringComparison.Ordinal);
+        if (!explainResult.Success
+            || firstCommentClose != expectedCommentClose
+            || explainResult.CSharpCode.Contains("trailing comment after escaped backslash", StringComparison.Ordinal)
+            || explainResult.CSharpCode.Contains("block comment", StringComparison.Ordinal))
+        {
+            failures.Add($"BugReview_ExplainSafety: expected `--explain` header to sanitize `*/` and strip comments after `\"\\\\\"`\nGenerated:\n{explainResult.CSharpCode}");
+        }
+
+        // 6. Hoisting value blocks containing `"return"` in string literals avoids `__PscpThunk.run` inside structs.
+        TranspilationResult hoistedReturnLiteral = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                record struct Checker(string[] Words) {
+                    public int CountReturns() => count(Words, w => w == "return")
+                }
+                += new Checker(["return", "ok"]).CountReturns()
+                """));
+        string hoistedUserCode = GetUserCodePortion(hoistedReturnLiteral.CSharpCode);
+        if (!hoistedReturnLiteral.Success || hoistedUserCode.Contains("__PscpThunk.run", StringComparison.Ordinal))
+        {
+            failures.Add($"BugReview_HoistedReturnLiteral: expected `count` with `\"return\"` literal to hoist without `__PscpThunk.run`\nGenerated:\n{hoistedUserCode}");
+        }
+
+        // 7. Operator hover for `..` describes end-inclusive (`<=`), not end-exclusive (`<`).
+        string? dotDotHover = Pscp.LanguageServer.PscpOperatorHovers.ForOperator(TokenKind.DotDot);
+        if (dotDotHover is null
+            || !dotDotHover.Contains("end included", StringComparison.Ordinal)
+            || !dotDotHover.Contains("i <= b", StringComparison.Ordinal))
+        {
+            failures.Add($"BugReview_DotDotHover: expected `..` hover to state end included (`i <= b`), got:\n{dotDotHover}");
+        }
+
+        // 8. Generic functions and generic methods on user types resolve without false UndefinedName / unknown member errors.
+        TranspilationResult genericMembers = PscpTranspiler.Transpile(
+            NormalizeSource(
+                """
+                class Box {
+                    T echo<T>(T v) => v
+                }
+                T topId<T>(T v) => v
+                Box b = new()
+                += b.echo<int>(42) + topId<int>(8)
+                """));
+        if (!genericMembers.Success)
+        {
+            failures.Add($"BugReview_GenericMethods: expected generic function and method calls to succeed\nActual:\n{FormatDiagnostics(genericMembers.Diagnostics)}");
+        }
+    }
+
+    private static async Task VerifyCliLargeStdinEarlyExitAsync(string workspaceRoot, string generatedRoot, List<string> failures)
+    {
+        string cliDll = Path.Combine(workspaceRoot, "src", "Pscp.Cli", "bin", "Debug", "net10.0", "pscp.dll");
+        if (!File.Exists(cliDll))
+        {
+            ProcessResult cliBuild = await RunDotnetAsync(
+                $"build \"{Path.Combine(workspaceRoot, "src", "Pscp.Cli", "Pscp.Cli.csproj")}\" -nologo -v q",
+                workspaceRoot,
+                string.Empty);
+            if (cliBuild.ExitCode != 0)
+            {
+                failures.Add($"CliLargeStdinEarlyExit: failed to build Pscp.Cli\n{cliBuild.StdOut}\n{cliBuild.StdErr}");
+                return;
+            }
+        }
+
+        string testDir = Path.Combine(generatedRoot, "CliEarlyExitTest");
+        if (Directory.Exists(testDir))
+        {
+            Directory.Delete(testDir, recursive: true);
+        }
+
+        Directory.CreateDirectory(testDir);
+        string sourcePath = Path.Combine(testDir, "main.pscp");
+        string inputPath = Path.Combine(testDir, "large.in");
+        await File.WriteAllTextAsync(sourcePath, "int n =\n+= n\n", Encoding.UTF8);
+
+        // 512 KB of trailing input that the program never reads before exiting.
+        StringBuilder largeInput = new("42\n", 512 * 1024 + 16);
+        for (int i = 0; i < 64 * 1024; i++)
+        {
+            largeInput.Append("1234567\n");
+        }
+
+        await File.WriteAllTextAsync(inputPath, largeInput.ToString(), Encoding.UTF8);
+
+        ProcessResult run = await RunDotnetAsync(
+            $"\"{cliDll}\" run \"{sourcePath}\" --stdin-file \"{inputPath}\"",
+            testDir,
+            string.Empty);
+
+        if (run.ExitCode != 0 || NormalizeOutput(run.StdOut).Trim() != "42")
+        {
+            failures.Add($"CliLargeStdinEarlyExit: expected exit code 0 and output '42', got exit {run.ExitCode}\nSTDOUT:\n{run.StdOut}\nSTDERR:\n{run.StdErr}");
+        }
+    }
+
+    private static async Task VerifyLanguageServerDestructuringAndV07InferenceAsync(List<string> failures)
+    {
+        const string source = """
+            int twice(int x) => x * 2
+            T identity<T>(T v) { v }
+
+            int n, m =
+            let grid = stdin.readGrid<int>(n, m)
+            let pair = stdin.readTuple<int, long>()
+            let hasMore = stdin.hasNext()
+            let second = pair.2
+            let bigPow = pow(3L, 39)
+            let letters = ['a'..'z']
+
+            (int, long)[] edges = [(1, 2L)]
+            mut long total = 0
+            edges -> (u, w) {
+                total += u + w
+            }
+            for (a, b) in edges {
+                total += a + b
+            }
+            for item in edges {
+                total += item.1 + item.2
+            }
+            class Holder<T> {
+                mut T val
+                Holder(T v) { val = v }
+                T get() => val
+            }
+            += twice(1) + identity<int>(2) + second + bigPow + total + grid[0][0] + letters.Length + (hasMore ? 1 : 0)
+            """;
+
+        await using LspProbeSession session = await LspProbeSession.StartAsync(FindWorkspaceRoot(), NormalizeSource(source));
+        IReadOnlyList<string> diagnostics = await session.ReadDiagnosticsAsync();
+        if (diagnostics.Count != 0)
+        {
+            failures.Add($"LanguageServerDestructuringAndV07Inference: expected no diagnostics, got: {string.Join(" | ", diagnostics)}");
+        }
+
+        IReadOnlyList<string> hints = await session.RequestInlayHintLabelsAsync();
+        foreach (string expectedHint in new[] { ": int[][]", ": (int, long)", ": bool", ": long", ": char[]" })
+        {
+            if (!hints.Contains(expectedHint, StringComparer.Ordinal))
+            {
+                failures.Add($"LanguageServerDestructuringAndV07Inference: missing expected inlay hint `{expectedHint}` (actual: {string.Join(", ", hints)})");
+            }
+        }
+
+        // Outline must include expression-bodied `twice`, generic `identity`, generic `Holder`, and its method `get`.
+        using JsonDocument outline = await session.RequestAsync("textDocument/documentSymbol", string.Empty);
+        HashSet<string> outlineNames = new(StringComparer.Ordinal);
+        foreach (JsonElement symbol in outline.RootElement.GetProperty("result").EnumerateArray())
+        {
+            outlineNames.Add(symbol.GetProperty("name").GetString() ?? string.Empty);
+            if (symbol.TryGetProperty("children", out JsonElement children) && children.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement child in children.EnumerateArray())
+                {
+                    outlineNames.Add(child.GetProperty("name").GetString() ?? string.Empty);
+                }
+            }
+        }
+
+        foreach (string expectedSymbol in new[] { "twice", "identity", "Holder", "get" })
+        {
+            if (!outlineNames.Contains(expectedSymbol))
+            {
+                failures.Add($"LanguageServerDestructuringAndV07Inference: expected function `{expectedSymbol}` in document symbols (found: {string.Join(", ", outlineNames)})");
+            }
+        }
+
+        // Rename on destructured `-> (u, w)` variable `u` (line 13, character 10) must update both declaration and usage (2 edits).
+        int arrowDestructureEdits = await session.RequestRenameEditCountAsync(line: 13, character: 10, newName: "nodeU");
+        if (arrowDestructureEdits != 2)
+        {
+            failures.Add($"LanguageServerDestructuringAndV07Inference: expected 2 rename edits for `u` in `edges -> (u, w)`, got {arrowDestructureEdits}");
+        }
+
+        // Rename on destructured `for (a, b) in edges` variable `a` (line 16, character 5) must update both declaration and usage (2 edits).
+        int forDestructureEdits = await session.RequestRenameEditCountAsync(line: 16, character: 5, newName: "nodeA");
+        if (forDestructureEdits != 2)
+        {
+            failures.Add($"LanguageServerDestructuringAndV07Inference: expected 2 rename edits for `a` in `for (a, b) in edges`, got {forDestructureEdits}");
+        }
+
+        // Rename on `for item in edges { ... }` variable `item` (line 19, character 4) must update declaration and 2 usages in block body (3 edits).
+        int forBlockEdits = await session.RequestRenameEditCountAsync(line: 19, character: 4, newName: "edgeItem");
+        if (forBlockEdits != 3)
+        {
+            failures.Add($"LanguageServerDestructuringAndV07Inference: expected 3 rename edits for `item` in `for item in edges {{ ... }}`, got {forBlockEdits}");
+        }
+    }
+
     // The language server keeps its own documentation for intrinsics; every intrinsic the transpiler knows must
     // have an entry there so completion and hover never miss one.
     // Guide §8.2: a collection helper has no free-function form, so the language server offers it only as a
@@ -3179,7 +3568,7 @@ internal static class TestRunner
              <PropertyGroup>
                <OutputType>Exe</OutputType>
                <TargetFramework>net10.0</TargetFramework>
-               <ImplicitUsings>enable</ImplicitUsings>
+               <ImplicitUsings>disable</ImplicitUsings>
                <Nullable>enable</Nullable>
              </PropertyGroup>
            </Project>
@@ -3237,17 +3626,18 @@ internal static class TestRunner
 
     private sealed class LspProbeSession : IAsyncDisposable
     {
+        private static bool _serverBuilt;
         private readonly Process _process;
-        private readonly StreamWriter _writer;
-        private readonly StreamReader _reader;
+        private readonly Stream _inputStream;
+        private readonly Stream _outputStream;
         private readonly string _uri;
         private int _nextRequestId = 2;
 
-        private LspProbeSession(Process process, StreamWriter writer, StreamReader reader, string uri)
+        private LspProbeSession(Process process, Stream inputStream, Stream outputStream, string uri)
         {
             _process = process;
-            _writer = writer;
-            _reader = reader;
+            _inputStream = inputStream;
+            _outputStream = outputStream;
             _uri = uri;
         }
 
@@ -3256,14 +3646,24 @@ internal static class TestRunner
             string uri = new Uri(Path.Combine(workspaceRoot, ".generated-tests", "lsp-probe.pscp")).AbsoluteUri;
             string rootUri = new Uri(workspaceRoot + Path.DirectorySeparatorChar).AbsoluteUri;
             string escapedSource = JsonEncodedText.Encode(source).ToString();
-            string serverProject = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "Pscp.LanguageServer.csproj");
-            ProcessResult build = await RunDotnetAsync($"build \"{serverProject}\" -nologo -v q", workspaceRoot, string.Empty);
-            if (build.ExitCode != 0)
+            string serverDll = Path.Combine(AppContext.BaseDirectory, "Pscp.LanguageServer.dll");
+            if (!File.Exists(serverDll))
             {
-                throw new InvalidOperationException($"Failed to build PSCP language server.\n{build.StdOut}\n{build.StdErr}");
+                serverDll = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll");
             }
 
-            string serverDll = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "bin", "Debug", "net10.0", "Pscp.LanguageServer.dll");
+            if (!File.Exists(serverDll) && !_serverBuilt)
+            {
+                string serverProject = Path.Combine(workspaceRoot, "src", "Pscp.LanguageServer", "Pscp.LanguageServer.csproj");
+                ProcessResult build = await RunDotnetAsync($"build \"{serverProject}\" -nologo -v q", workspaceRoot, string.Empty);
+                if (build.ExitCode != 0)
+                {
+                    throw new InvalidOperationException($"Failed to build PSCP language server.\n{build.StdOut}\n{build.StdErr}");
+                }
+
+                _serverBuilt = true;
+            }
+
             ProcessStartInfo startInfo = new("dotnet", $"\"{serverDll}\"")
             {
                 WorkingDirectory = workspaceRoot,
@@ -3291,8 +3691,8 @@ internal static class TestRunner
                 }
             });
 
-            LspProbeSession session = new(process, process.StandardInput, process.StandardOutput, uri);
-            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.6.4\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
+            LspProbeSession session = new(process, process.StandardInput.BaseStream, process.StandardOutput.BaseStream, uri);
+            await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"processId\":1234,\"clientInfo\":{{\"name\":\"pscp-tests\",\"version\":\"0.7.0\"}},\"rootUri\":\"{rootUri}\",\"capabilities\":{{}}}}}}");
             _ = await session.ReadResponseAsync(1);
             await session.SendAsync("""{"jsonrpc":"2.0","method":"initialized","params":{}}""");
             await session.SendAsync($"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{uri}\",\"languageId\":\"pscp\",\"version\":1,\"text\":\"{escapedSource}\"}}}}}}");
@@ -3428,8 +3828,10 @@ internal static class TestRunner
         private async Task SendAsync(string json)
         {
             byte[] body = Encoding.UTF8.GetBytes(json);
-            await _writer.WriteAsync($"Content-Length: {body.Length}\r\n\r\n{json}");
-            await _writer.FlushAsync();
+            byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n");
+            await _inputStream.WriteAsync(header);
+            await _inputStream.WriteAsync(body);
+            await _inputStream.FlushAsync();
         }
 
         // A notification (`pscp/status`, `publishDiagnostics`) can arrive before the response, so skip to it.
@@ -3451,13 +3853,36 @@ internal static class TestRunner
 
         private async Task<JsonDocument> ReadMessageAsync()
         {
-            string? line;
+            List<byte> headerBytes = [];
+            byte[] one = new byte[1];
+            while (true)
+            {
+                int read = await _outputStream.ReadAsync(one.AsMemory(0, 1));
+                if (read == 0)
+                {
+                    throw new EndOfStreamException("Unexpected end of LSP header stream.");
+                }
+
+                headerBytes.Add(one[0]);
+                int count = headerBytes.Count;
+                if (count >= 4
+                    && headerBytes[count - 4] == '\r'
+                    && headerBytes[count - 3] == '\n'
+                    && headerBytes[count - 2] == '\r'
+                    && headerBytes[count - 1] == '\n')
+                {
+                    break;
+                }
+            }
+
+            string headerText = Encoding.ASCII.GetString(headerBytes.ToArray());
             int contentLength = 0;
-            while (!string.IsNullOrEmpty(line = await _reader.ReadLineAsync()))
+            foreach (string line in headerText.Split("\r\n", StringSplitOptions.RemoveEmptyEntries))
             {
                 if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                 {
                     contentLength = int.Parse(line["Content-Length:".Length..].Trim());
+                    break;
                 }
             }
 
@@ -3466,20 +3891,20 @@ internal static class TestRunner
                 throw new InvalidOperationException("Missing LSP content length.");
             }
 
-            char[] buffer = new char[contentLength];
+            byte[] buffer = new byte[contentLength];
             int offset = 0;
             while (offset < buffer.Length)
             {
-                int read = await _reader.ReadAsync(buffer, offset, buffer.Length - offset);
+                int read = await _outputStream.ReadAsync(buffer.AsMemory(offset, buffer.Length - offset));
                 if (read == 0)
                 {
-                    throw new EndOfStreamException("Unexpected end of LSP stream.");
+                    throw new EndOfStreamException("Unexpected end of LSP body stream.");
                 }
 
                 offset += read;
             }
 
-            return JsonDocument.Parse(new string(buffer));
+            return JsonDocument.Parse(buffer);
         }
     }
 }

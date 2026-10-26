@@ -352,6 +352,13 @@ internal sealed partial class PscpAnalyzer
 
         while (index < state.Tokens.Count)
         {
+            if (state.Tokens[index].Kind is TokenKind.Ref or TokenKind.Out or TokenKind.In
+                || (state.Tokens[index].Kind == TokenKind.Identifier && state.Tokens[index].Text == "params"))
+            {
+                state.MarkToken(index, "keyword");
+                index++;
+            }
+
             if (!TryReadType(state, ref index, allowSizedArrays: false, out string typeDisplay, out List<int> typeTokenIndices))
             {
                 return false;
@@ -365,6 +372,30 @@ internal sealed partial class PscpAnalyzer
             Token nameToken = state.Tokens[index];
             parameters.Add(new ParameterInfo(nameToken.Text, nameToken.Text == "_", typeDisplay, index, typeTokenIndices));
             index++;
+
+            if (state.Match(ref index, TokenKind.Equal, out _))
+            {
+                int depth = 0;
+                while (index < state.Tokens.Count)
+                {
+                    TokenKind kind = state.Tokens[index].Kind;
+                    if (depth == 0 && kind is TokenKind.Comma or TokenKind.CloseParen or TokenKind.EndOfFile)
+                    {
+                        break;
+                    }
+
+                    if (kind is TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace)
+                    {
+                        depth++;
+                    }
+                    else if (kind is TokenKind.CloseParen or TokenKind.CloseBracket or TokenKind.CloseBrace)
+                    {
+                        depth = Math.Max(0, depth - 1);
+                    }
+
+                    index++;
+                }
+            }
 
             if (state.Match(ref index, TokenKind.Comma, out _))
             {
@@ -380,6 +411,18 @@ internal sealed partial class PscpAnalyzer
     private bool TryReadBindingTargets(AnalyzerState state, ref int index, out List<BindingTargetInfo> bindings)
     {
         bindings = [];
+        int saved = index;
+        if (state.Tokens[index].Kind == TokenKind.OpenParen)
+        {
+            if (!TryReadTupleBindingTargets(state, ref index, bindings))
+            {
+                index = saved;
+                return false;
+            }
+
+            return bindings.Count > 0;
+        }
+
         if (!IsIdentifier(state.Tokens, index))
         {
             return false;
@@ -393,6 +436,7 @@ internal sealed partial class PscpAnalyzer
             {
                 if (!IsIdentifier(state.Tokens, index))
                 {
+                    index = saved;
                     return false;
                 }
 
@@ -403,6 +447,53 @@ internal sealed partial class PscpAnalyzer
         }
 
         return bindings.Count > 0;
+    }
+
+    private bool TryReadTupleBindingTargets(AnalyzerState state, ref int index, List<BindingTargetInfo> bindings)
+    {
+        if (!state.Match(ref index, TokenKind.OpenParen, out _))
+        {
+            return false;
+        }
+
+        while (index < state.Tokens.Count)
+        {
+            while (index < state.Tokens.Count && state.Tokens[index].Kind == TokenKind.NewLine)
+            {
+                index++;
+            }
+
+            if (index < state.Tokens.Count && state.Tokens[index].Kind == TokenKind.OpenParen)
+            {
+                if (!TryReadTupleBindingTargets(state, ref index, bindings))
+                {
+                    return false;
+                }
+            }
+            else if (IsIdentifier(state.Tokens, index))
+            {
+                bindings.Add(new BindingTargetInfo(state.Tokens[index].Text, state.Tokens[index].Text == "_", index));
+                index++;
+            }
+            else
+            {
+                return false;
+            }
+
+            while (index < state.Tokens.Count && state.Tokens[index].Kind == TokenKind.NewLine)
+            {
+                index++;
+            }
+
+            if (state.Match(ref index, TokenKind.Comma, out _))
+            {
+                continue;
+            }
+
+            return state.Match(ref index, TokenKind.CloseParen, out _);
+        }
+
+        return false;
     }
 
     private bool TryReadType(AnalyzerState state, ref int index, bool allowSizedArrays, out string typeDisplay, out List<int> typeTokenIndices)
@@ -499,8 +590,19 @@ internal sealed partial class PscpAnalyzer
             }
         }
 
-        while (index < state.Tokens.Count && state.Tokens[index].Kind == TokenKind.OpenBracket)
+        while (index < state.Tokens.Count)
         {
+            if (state.Match(ref index, TokenKind.Question, out int question))
+            {
+                typeTokenIndices.Add(question);
+                continue;
+            }
+
+            if (state.Tokens[index].Kind != TokenKind.OpenBracket)
+            {
+                break;
+            }
+
             int openBracket = index++;
             typeTokenIndices.Add(openBracket);
 
@@ -628,16 +730,19 @@ internal sealed class AnalyzerState
     private readonly List<PscpInlayHintEntry> _inlayHints = [];
     private int _symbolId;
 
-    public AnalyzerState(DocumentSnapshot snapshot, IReadOnlyList<Token> tokens)
+    public AnalyzerState(DocumentSnapshot snapshot, IReadOnlyList<Token> tokens, PscpFrontEndResult? frontEnd = null)
     {
         Snapshot = snapshot;
         Tokens = tokens;
+        FrontEnd = frontEnd;
         Signatures = new Dictionary<string, PscpSignatureEntry>(PscpIntrinsics.Signatures, StringComparer.Ordinal);
     }
 
     public DocumentSnapshot Snapshot { get; }
 
     public IReadOnlyList<Token> Tokens { get; }
+
+    public PscpFrontEndResult? FrontEnd { get; }
 
     public Dictionary<string, PscpSignatureEntry> Signatures { get; }
 

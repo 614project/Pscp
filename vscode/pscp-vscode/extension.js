@@ -1066,7 +1066,8 @@ function createConfiguredServerLaunch(candidate, args = []) {
 
 function createBundledServerLaunch(context) {
   const serverDirectory = path.join(context.extensionPath, 'server');
-  return createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer.exe'))
+  return createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer'))
+    || createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer.exe'))
     || createDirectServerLaunch(path.join(serverDirectory, 'Pscp.LanguageServer.dll'));
 }
 
@@ -1133,12 +1134,16 @@ function getPscpExecutableName() {
 
 function getInstalledSdkCandidates() {
   const candidates = [];
-  if (process.env.LOCALAPPDATA) {
-    candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Pscp', 'pscp.exe'));
-  }
+  if (process.platform === 'win32') {
+    if (process.env.LOCALAPPDATA) {
+      candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'Pscp', 'pscp.exe'));
+    }
 
-  if (process.env.ProgramFiles) {
-    candidates.push(path.join(process.env.ProgramFiles, 'Pscp', 'pscp.exe'));
+    if (process.env.ProgramFiles) {
+      candidates.push(path.join(process.env.ProgramFiles, 'Pscp', 'pscp.exe'));
+    }
+  } else {
+    candidates.push('/usr/bin/pscp', '/usr/local/bin/pscp', '/usr/lib/pscp/pscp');
   }
 
   return candidates;

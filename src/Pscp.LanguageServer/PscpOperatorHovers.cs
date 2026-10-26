@@ -49,8 +49,8 @@ internal static class PscpOperatorHovers
                 "251-기본-순서"),
             TokenKind.DotDot => Hover(
                 "a..b",
-                "Range with the end excluded outside an indexer. Inside an indexer `..` is ambiguous and is reported as PSCP2303: write `..<` or `..=`.",
-                "for (int i = a; i < b; i++)",
+                "Range with the end included outside an indexer. Inside an indexer `..` is ambiguous and is reported as PSCP2303: write `..<` or `..=`.",
+                "for (int i = a; i <= b; i++)",
                 "14 range",
                 "14-range"),
             TokenKind.DotDotLess => Hover(

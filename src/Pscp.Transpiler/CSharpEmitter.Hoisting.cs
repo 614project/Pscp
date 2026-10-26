@@ -25,19 +25,148 @@ internal sealed partial class CSharpEmitter
     {
         string thunk = EmitEval(body);
         string trimmed = body.TrimEnd();
-        MatchCollection returns = ReturnKeywordPattern.Matches(trimmed);
-        if (returns.Count == 1 && trimmed.EndsWith(';'))
+        if (TrySplitTopLevelValueBlock(trimmed, out string? prelude, out string? result))
         {
-            Match finalReturn = returns[0];
-            string prelude = trimmed[..finalReturn.Index].Trim();
-            string result = trimmed[(finalReturn.Index + finalReturn.Length)..^1].Trim();
-            if (prelude.Length > 0 && result.Length > 0)
-            {
-                _valueBlocks[thunk] = new ValueBlock(prelude, result);
-            }
+            _valueBlocks[thunk] = new ValueBlock(prelude!, result!);
         }
 
         return thunk;
+    }
+
+    // Finds the single `return <result>;` at the end of a value block while ignoring `return` inside string/char
+    // literals or nested lambda expressions (`parenDepth > 0`).
+    private static bool TrySplitTopLevelValueBlock(string trimmed, out string? prelude, out string? result)
+    {
+        prelude = null;
+        result = null;
+        if (!trimmed.EndsWith(';'))
+        {
+            return false;
+        }
+
+        int parenDepth = 0;
+        int braceDepth = 0;
+        int bracketDepth = 0;
+        bool inString = false;
+        bool inVerbatimString = false;
+        bool inChar = false;
+        bool escaped = false;
+        int returnCount = 0;
+        int finalReturnIndex = -1;
+        int finalReturnBraceDepth = -1;
+
+        for (int i = 0; i < trimmed.Length; i++)
+        {
+            char ch = trimmed[i];
+            if (inString)
+            {
+                if (inVerbatimString)
+                {
+                    if (ch == '"' && i + 1 < trimmed.Length && trimmed[i + 1] == '"')
+                    {
+                        i++;
+                    }
+                    else if (ch == '"')
+                    {
+                        inString = false;
+                        inVerbatimString = false;
+                    }
+                }
+                else if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (ch == '\\')
+                {
+                    escaped = true;
+                }
+                else if (ch == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (inChar)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (ch == '\\')
+                {
+                    escaped = true;
+                }
+                else if (ch == '\'')
+                {
+                    inChar = false;
+                }
+
+                continue;
+            }
+
+            switch (ch)
+            {
+                case '"':
+                    inString = true;
+                    inVerbatimString = i > 0 && (trimmed[i - 1] == '@' || (i > 1 && trimmed[i - 1] == '$' && trimmed[i - 2] == '@'));
+                    escaped = false;
+                    continue;
+                case '\'':
+                    inChar = true;
+                    escaped = false;
+                    continue;
+                case '(':
+                    parenDepth++;
+                    continue;
+                case ')':
+                    parenDepth = Math.Max(0, parenDepth - 1);
+                    continue;
+                case '{':
+                    braceDepth++;
+                    continue;
+                case '}':
+                    braceDepth = Math.Max(0, braceDepth - 1);
+                    continue;
+                case '[':
+                    bracketDepth++;
+                    continue;
+                case ']':
+                    bracketDepth = Math.Max(0, bracketDepth - 1);
+                    continue;
+            }
+
+            if (parenDepth == 0
+                && bracketDepth == 0
+                && ch == 'r'
+                && i + 6 <= trimmed.Length
+                && trimmed.AsSpan(i, 6).SequenceEqual("return")
+                && (i == 0 || !IsIdentifierCharacter(trimmed[i - 1]))
+                && (i + 6 == trimmed.Length || !IsIdentifierCharacter(trimmed[i + 6])))
+            {
+                returnCount++;
+                finalReturnIndex = i;
+                finalReturnBraceDepth = braceDepth;
+                i += 5;
+            }
+        }
+
+        if (returnCount != 1 || finalReturnIndex < 0 || finalReturnBraceDepth != 0)
+        {
+            return false;
+        }
+
+        string candidatePrelude = trimmed[..finalReturnIndex].Trim();
+        string candidateResult = trimmed[(finalReturnIndex + "return".Length)..^1].Trim();
+        if (candidatePrelude.Length == 0 || candidateResult.Length == 0)
+        {
+            return false;
+        }
+
+        prelude = candidatePrelude;
+        result = candidateResult;
+        return true;
     }
 
     private void EmitStatementWithHoisting(Expression? root, TypeSyntax? rootHint, Action emit)

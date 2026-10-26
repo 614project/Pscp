@@ -712,7 +712,7 @@ public static class PscpLanguageServerHost
                 // Guide §8.4: a snippet goes out only when the client asked for one.
                 bool snippet = entry.InsertTextFormat == 2;
                 string? insertText = snippet && !_supportsSnippets ? null : entry.InsertText;
-                items.Add(new JsonObject
+                items.Add((JsonNode)new JsonObject
                 {
                     ["label"] = entry.Label,
                     ["labelDetails"] = labelDetails,
@@ -772,7 +772,7 @@ public static class PscpLanguageServerHost
                     continue;
                 }
 
-                results.Add(ToLocation(analysis.Snapshot.Uri, analysis.Snapshot.LineIndex, reference.Span));
+                results.Add((JsonNode)ToLocation(analysis.Snapshot.Uri, analysis.Snapshot.LineIndex, reference.Span));
             }
 
             return results;
@@ -801,7 +801,7 @@ public static class PscpLanguageServerHost
                     item["kind"] = range.Kind;
                 }
 
-                results.Add(item);
+                results.Add((JsonNode)item);
             }
 
             return results;
@@ -836,7 +836,7 @@ public static class PscpLanguageServerHost
                     head = node;
                 }
 
-                results.Add(head ?? new JsonObject { ["range"] = ToRange(analysis!.Snapshot.LineIndex, new TextSpan(offset, 0)) });
+                results.Add((JsonNode)(head ?? new JsonObject { ["range"] = ToRange(analysis!.Snapshot.LineIndex, new TextSpan(offset, 0)) }));
             }
 
             return results;
@@ -853,7 +853,7 @@ public static class PscpLanguageServerHost
             JsonArray results = new();
             foreach (PscpServerReference reference in analysis!.References.Where(reference => reference.SymbolId == symbol!.Id))
             {
-                results.Add(new JsonObject
+                results.Add((JsonNode)new JsonObject
                 {
                     ["range"] = ToRange(analysis.Snapshot.LineIndex, reference.Span),
                     ["kind"] = reference.IsWrite || reference.IsDeclaration ? 3 : 2,
@@ -875,7 +875,7 @@ public static class PscpLanguageServerHost
             {
                 foreach (PscpDocumentSymbol symbol in analysis!.DocumentSymbols)
                 {
-                    results.Add(ToDocumentSymbol(analysis, symbol));
+                    results.Add((JsonNode)ToDocumentSymbol(analysis, symbol));
                 }
 
                 return results;
@@ -885,7 +885,7 @@ public static class PscpLanguageServerHost
             // nesting survives as `containerName`.
             void Flatten(PscpDocumentSymbol symbol, string? container)
             {
-                results.Add(new JsonObject
+                results.Add((JsonNode)new JsonObject
                 {
                     ["name"] = symbol.Name,
                     ["kind"] = symbol.Kind,
@@ -915,7 +915,7 @@ public static class PscpLanguageServerHost
             JsonArray children = new();
             foreach (PscpDocumentSymbol child in symbol.Children)
             {
-                children.Add(ToDocumentSymbol(analysis, child));
+                children.Add((JsonNode)ToDocumentSymbol(analysis, child));
             }
 
             return new JsonObject
@@ -990,11 +990,11 @@ public static class PscpLanguageServerHost
                     }
                 }
 
-                data.Add(deltaLine);
-                data.Add(deltaStart);
-                data.Add(length);
-                data.Add(encodedType);
-                data.Add(encodedModifiers);
+                data.Add((JsonNode?)JsonValue.Create(deltaLine));
+                data.Add((JsonNode?)JsonValue.Create(deltaStart));
+                data.Add((JsonNode?)JsonValue.Create(length));
+                data.Add((JsonNode?)JsonValue.Create(encodedType));
+                data.Add((JsonNode?)JsonValue.Create(encodedModifiers));
 
                 previousLine = line;
                 previousChar = character;
@@ -1030,13 +1030,13 @@ public static class PscpLanguageServerHost
                 {
                     // Guide §9.4: the label is an offset pair into the signature, so the editor highlights the
                     // right span even when a parameter name appears twice.
-                    parameters.Add(new JsonObject
+                    parameters.Add((JsonNode)new JsonObject
                     {
-                        ["label"] = new JsonArray(parameter.Start, parameter.End),
+                        ["label"] = new JsonArray(JsonValue.Create(parameter.Start), JsonValue.Create(parameter.End)),
                     });
                 }
 
-                signatures.Add(new JsonObject
+                signatures.Add((JsonNode)new JsonObject
                 {
                     ["label"] = form.Label,
                     ["documentation"] = signature.Documentation,
@@ -1094,7 +1094,7 @@ public static class PscpLanguageServerHost
                     };
                 }
 
-                hints.Add(item);
+                hints.Add((JsonNode)item);
             }
 
             return hints;
@@ -1117,7 +1117,7 @@ public static class PscpLanguageServerHost
             JsonArray edits = new();
             foreach (PscpServerReference reference in analysis!.References.Where(reference => reference.SymbolId == symbol!.Id))
             {
-                edits.Add(new JsonObject
+                edits.Add((JsonNode)new JsonObject
                 {
                     ["range"] = ToRange(analysis.Snapshot.LineIndex, reference.Span),
                     ["newText"] = newName,
@@ -1273,7 +1273,7 @@ public static class PscpLanguageServerHost
                 JsonArray edits = new();
                 foreach (PscpTextEdit edit in fix.Edits)
                 {
-                    edits.Add(new JsonObject
+                    edits.Add((JsonNode)new JsonObject
                     {
                         ["range"] = ToRange(lineIndex, edit.Span),
                         ["newText"] = edit.NewText,
@@ -1284,10 +1284,10 @@ public static class PscpLanguageServerHost
                 {
                     ["title"] = fix.Title,
                     ["kind"] = "quickfix",
-                    ["diagnostics"] = new JsonArray(ToLspDiagnostic(analysis, fix.Diagnostic)),
+                    ["diagnostics"] = new JsonArray((JsonNode)ToLspDiagnostic(analysis, fix.Diagnostic)),
                     ["edit"] = new JsonObject
                     {
-                        ["documentChanges"] = new JsonArray(new JsonObject
+                        ["documentChanges"] = new JsonArray((JsonNode)new JsonObject
                         {
                             ["textDocument"] = new JsonObject
                             {
@@ -1303,7 +1303,7 @@ public static class PscpLanguageServerHost
                     action["isPreferred"] = true;
                 }
 
-                actions.Add(action);
+                actions.Add((JsonNode)action);
             }
 
             return actions;
@@ -1340,7 +1340,7 @@ public static class PscpLanguageServerHost
             JsonArray diagnostics = new();
             foreach (PscpServerDiagnostic diagnostic in analysis.Diagnostics.Where(diagnostic => diagnostic.Severity == ServerDiagnosticSeverity.Error))
             {
-                diagnostics.Add(ToLspDiagnostic(analysis, diagnostic));
+                diagnostics.Add((JsonNode)ToLspDiagnostic(analysis, diagnostic));
             }
 
             return new JsonObject
@@ -1375,12 +1375,12 @@ public static class PscpLanguageServerHost
 
             if (DiagnosticCodes.IsUnnecessary(diagnostic.Code) || DiagnosticCodes.IsDeprecation(diagnostic.Code))
             {
-                result["tags"] = new JsonArray(DiagnosticCodes.IsUnnecessary(diagnostic.Code) ? 1 : 2);
+                result["tags"] = new JsonArray(JsonValue.Create(DiagnosticCodes.IsUnnecessary(diagnostic.Code) ? 1 : 2));
             }
 
             if (diagnostic.RelatedSpan is TextSpan related)
             {
-                result["relatedInformation"] = new JsonArray(new JsonObject
+                result["relatedInformation"] = new JsonArray((JsonNode)new JsonObject
                 {
                     ["location"] = new JsonObject
                     {
@@ -1405,7 +1405,7 @@ public static class PscpLanguageServerHost
                     continue;
                 }
 
-                diagnostics.Add(ToLspDiagnostic(analysis, diagnostic));
+                diagnostics.Add((JsonNode)ToLspDiagnostic(analysis, diagnostic));
             }
 
             await SendNotificationAsync(
@@ -1513,7 +1513,7 @@ public static class PscpLanguageServerHost
             JsonArray array = new();
             foreach (string value in values)
             {
-                array.Add(value);
+                array.Add((JsonNode?)JsonValue.Create(value));
             }
 
             return array;
@@ -2100,7 +2100,31 @@ public static class PscpLanguageServerHost
         }
 
         private static string BuildCallNameFromTokens(IReadOnlyList<Token> tokens, int start, int endExclusive)
-            => string.Concat(tokens.Skip(start).Take(Math.Max(0, endExclusive - start)).Where(token => token.Kind is TokenKind.Identifier or TokenKind.Dot).Select(token => token.Text));
+        {
+            StringBuilder builder = new();
+            int angleDepth = 0;
+            for (int i = start; i < endExclusive && i < tokens.Count; i++)
+            {
+                if (tokens[i].Kind == TokenKind.LessThan)
+                {
+                    angleDepth++;
+                    continue;
+                }
+
+                if (tokens[i].Kind == TokenKind.GreaterThan)
+                {
+                    angleDepth = Math.Max(0, angleDepth - 1);
+                    continue;
+                }
+
+                if (angleDepth == 0 && tokens[i].Kind is TokenKind.Identifier or TokenKind.Dot)
+                {
+                    builder.Append(tokens[i].Text);
+                }
+            }
+
+            return builder.ToString();
+        }
 
         private static int CountTopLevelCommas(IReadOnlyList<Token> tokens, int start, int offset)
         {
@@ -2258,7 +2282,13 @@ public static class PscpLanguageServerHost
 
         private static async Task WriteMessageAsync(Stream output, JsonNode payload, CancellationToken cancellationToken)
         {
-            byte[] body = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
+            using MemoryStream stream = new();
+            using (Utf8JsonWriter writer = new(stream))
+            {
+                payload.WriteTo(writer);
+            }
+
+            byte[] body = stream.ToArray();
             byte[] header = Encoding.ASCII.GetBytes($"Content-Length: {body.Length}\r\n\r\n");
             await output.WriteAsync(header.AsMemory(0, header.Length), cancellationToken);
             await output.WriteAsync(body.AsMemory(0, body.Length), cancellationToken);

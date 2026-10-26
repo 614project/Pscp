@@ -73,8 +73,15 @@ static partial class PscpCli
         using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dotnet.");
         if (input is not null)
         {
-            await input.CopyToAsync(process.StandardInput.BaseStream);
-            process.StandardInput.Close();
+            try
+            {
+                await input.CopyToAsync(process.StandardInput.BaseStream);
+                process.StandardInput.Close();
+            }
+            catch (IOException)
+            {
+                // The program exited without reading all of its input.
+            }
         }
 
         await process.WaitForExitAsync();

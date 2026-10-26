@@ -245,7 +245,7 @@ internal static class PscpSemanticAnalyzer
                         info.Members[property.Name] = new Symbol(SymbolKind.Field, Normalize(property.Type), false);
                         break;
                     case MethodMember method when !method.IsConstructor:
-                        info.Members[method.Name] = new Symbol(SymbolKind.Method, Normalize(method.ReturnType), false);
+                        info.Members[PscpIntrinsicCatalog.StripGenericSuffix(method.Name)] = new Symbol(SymbolKind.Method, Normalize(method.ReturnType), false);
                         break;
                     case OrderingShorthandMember:
                         info.Members["CompareTo"] = new Symbol(SymbolKind.Method, TypeName("int"), false);
@@ -426,7 +426,7 @@ internal static class PscpSemanticAnalyzer
             TextSpan methodSpan = _spans.GetName(method);
             if (!method.IsConstructor)
             {
-                WarnOnDeclarationName(method.Name, methodSpan, "method");
+                WarnOnDeclarationName(PscpIntrinsicCatalog.StripGenericSuffix(method.Name), methodSpan, "method");
             }
 
             Scope scope = new(parent);
@@ -1004,7 +1004,8 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeIdentifier(IdentifierExpression identifier, Scope scope)
         {
-            if (scope.TryResolveValue(identifier.Name, out Symbol? symbol) && symbol is not null)
+            string lookupName = PscpIntrinsicCatalog.StripGenericSuffix(identifier.Name);
+            if (scope.TryResolveValue(lookupName, out Symbol? symbol) && symbol is not null)
             {
                 if (symbol.Kind == SymbolKind.Field && symbol.OwnerType is not null)
                 {
@@ -1014,9 +1015,9 @@ internal static class PscpSemanticAnalyzer
                 return symbol.Type;
             }
 
-            if (scope.TryResolveType(identifier.Name, out TypeInfo? typeInfo) && typeInfo is not null) return TypeName(typeInfo.Name);
-            if (PscpIntrinsicCatalog.BuiltinTypes.Contains(identifier.Name) || PscpIntrinsicCatalog.IntrinsicCallNames.Contains(identifier.Name)) return TypeName(identifier.Name);
-            if (identifier.Name is "default" or "typeof" or "nameof" or "sizeof" or "checked" or "unchecked" || PscpIntrinsicCatalog.IsLikelyExternalTypeLikeRoot(identifier.Name)) return null;
+            if (scope.TryResolveType(lookupName, out TypeInfo? typeInfo) && typeInfo is not null) return TypeName(typeInfo.Name);
+            if (PscpIntrinsicCatalog.BuiltinTypes.Contains(lookupName) || PscpIntrinsicCatalog.IntrinsicCallNames.Contains(lookupName)) return TypeName(lookupName);
+            if (lookupName is "default" or "typeof" or "nameof" or "sizeof" or "checked" or "unchecked" || PscpIntrinsicCatalog.IsLikelyExternalTypeLikeRoot(lookupName)) return null;
             Error(DiagnosticCodes.UndefinedName, $"Undefined name `{identifier.Name}`.", _spans.Get(identifier));
             return null;
         }
@@ -2899,7 +2900,7 @@ internal static class PscpSemanticAnalyzer
                 "sqrt" => TypeName("double"),
                 "pow" when args.Count == 3 => TypeName("long"),
                 "pow" => IsIntegral(ArgType(args, 0)) && IsIntegral(ArgType(args, 1))
-                    ? (IsNamed(ArgType(args, 0), "long") ? TypeName("long") : TypeName("int"))
+                    ? (IsNamed(ArgType(args, 0), "long") || IsNamed(ArgType(args, 1), "long") ? TypeName("long") : TypeName("int"))
                     : TypeName("double"),
                 "clamp" => Merge(Merge(ArgType(args, 0), ArgType(args, 1)), ArgType(args, 2)),
                 "gcd" or "lcm" => Merge(ArgType(args, 0), ArgType(args, 1)),

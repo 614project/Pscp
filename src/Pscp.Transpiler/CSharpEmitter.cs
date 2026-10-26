@@ -133,7 +133,13 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine("}");
         _writer.WriteLine();
         EmitRuntimeHelpers();
-        return PruneUsingDirectives(_writer.ToString());
+        return PruneUsingDirectives(_writer.ToString(), program.Usings);
+    }
+
+    private static string NormalizeUsingLine(string text)
+    {
+        string trimmed = text.Trim();
+        return trimmed.EndsWith(';') ? trimmed : trimmed + ";";
     }
 
     private static IEnumerable<string> CollectUsings(PscpProgram program)
@@ -159,12 +165,7 @@ internal sealed partial class CSharpEmitter
 
         foreach (UsingDirective directive in program.Usings)
         {
-            string text = directive.Text.TrimEnd();
-            if (!text.EndsWith(';'))
-            {
-                text += ";";
-            }
-
+            string text = NormalizeUsingLine(directive.Text);
             if (seen.Add(text))
             {
                 yield return text;
@@ -172,8 +173,11 @@ internal sealed partial class CSharpEmitter
         }
     }
 
-    private static string PruneUsingDirectives(string code)
+    private static string PruneUsingDirectives(string code, IReadOnlyList<UsingDirective> explicitUsings)
     {
+        HashSet<string> userUsings = explicitUsings
+            .Select(directive => NormalizeUsingLine(directive.Text))
+            .ToHashSet(StringComparer.Ordinal);
         string normalized = code.Replace("\r", string.Empty);
         string[] lines = normalized.Split('\n');
         int bodyStart = 0;
@@ -192,22 +196,72 @@ internal sealed partial class CSharpEmitter
             || body.Contains("LinkedList<", StringComparison.Ordinal)
             || body.Contains("PriorityQueue<", StringComparison.Ordinal)
             || body.Contains("SortedSet<", StringComparison.Ordinal)
+            || body.Contains("SortedDictionary<", StringComparison.Ordinal)
+            || body.Contains("SortedList<", StringComparison.Ordinal)
+            || body.Contains("KeyValuePair<", StringComparison.Ordinal)
             || body.Contains("Comparer<", StringComparison.Ordinal)
+            || body.Contains("EqualityComparer<", StringComparison.Ordinal)
             || body.Contains("IEnumerable<", StringComparison.Ordinal)
             || body.Contains("IEnumerator<", StringComparison.Ordinal)
+            || body.Contains("ICollection<", StringComparison.Ordinal)
+            || body.Contains("IList<", StringComparison.Ordinal)
+            || body.Contains("ISet<", StringComparison.Ordinal)
+            || body.Contains("IDictionary<", StringComparison.Ordinal)
+            || body.Contains("IReadOnlyList<", StringComparison.Ordinal)
+            || body.Contains("IReadOnlyCollection<", StringComparison.Ordinal)
+            || body.Contains("IReadOnlyDictionary<", StringComparison.Ordinal)
+            || body.Contains("IReadOnlySet<", StringComparison.Ordinal)
             || body.Contains("IComparer<", StringComparison.Ordinal)
+            || body.Contains("IEqualityComparer<", StringComparison.Ordinal)
             || body.Contains("Comparison<", StringComparison.Ordinal);
-        bool needsGlobalization = body.Contains("CultureInfo", StringComparison.Ordinal);
+        bool needsGlobalization =
+            body.Contains("CultureInfo", StringComparison.Ordinal)
+            || body.Contains("NumberStyles", StringComparison.Ordinal);
         bool needsIO =
             body.Contains("StreamReader", StringComparison.Ordinal)
             || body.Contains("StreamWriter", StringComparison.Ordinal)
-            || body.Contains("EndOfStreamException", StringComparison.Ordinal);
+            || body.Contains("StringWriter", StringComparison.Ordinal)
+            || body.Contains("StringReader", StringComparison.Ordinal)
+            || body.Contains("TextWriter", StringComparison.Ordinal)
+            || body.Contains("TextReader", StringComparison.Ordinal)
+            || body.Contains("Stream", StringComparison.Ordinal)
+            || body.Contains("EndOfStreamException", StringComparison.Ordinal)
+            || body.Contains("IOException", StringComparison.Ordinal)
+            || body.Contains("File.", StringComparison.Ordinal)
+            || body.Contains("Directory.", StringComparison.Ordinal)
+            || body.Contains("Path.", StringComparison.Ordinal);
         bool needsLinq =
-            body.Contains("SelectMany", StringComparison.Ordinal)
-            || body.Contains(".ToArray()", StringComparison.Ordinal)
-            || body.Contains(".ToList()", StringComparison.Ordinal)
-            || body.Contains(".Distinct()", StringComparison.Ordinal)
-            || body.Contains(".Reverse()", StringComparison.Ordinal);
+            body.Contains("Enumerable", StringComparison.Ordinal)
+            || body.Contains("SelectMany", StringComparison.Ordinal)
+            || body.Contains(".ToArray(", StringComparison.Ordinal)
+            || body.Contains(".ToList(", StringComparison.Ordinal)
+            || body.Contains(".ToHashSet(", StringComparison.Ordinal)
+            || body.Contains(".ToDictionary(", StringComparison.Ordinal)
+            || body.Contains(".Distinct(", StringComparison.Ordinal)
+            || body.Contains(".Reverse(", StringComparison.Ordinal)
+            || body.Contains(".Any(", StringComparison.Ordinal)
+            || body.Contains(".All(", StringComparison.Ordinal)
+            || body.Contains(".Where(", StringComparison.Ordinal)
+            || body.Contains(".Select(", StringComparison.Ordinal)
+            || body.Contains(".OrderBy(", StringComparison.Ordinal)
+            || body.Contains(".OrderByDescending(", StringComparison.Ordinal)
+            || body.Contains(".ThenBy(", StringComparison.Ordinal)
+            || body.Contains(".ThenByDescending(", StringComparison.Ordinal)
+            || body.Contains(".Sum(", StringComparison.Ordinal)
+            || body.Contains(".Min(", StringComparison.Ordinal)
+            || body.Contains(".Max(", StringComparison.Ordinal)
+            || body.Contains(".Count(", StringComparison.Ordinal)
+            || body.Contains(".First(", StringComparison.Ordinal)
+            || body.Contains(".FirstOrDefault(", StringComparison.Ordinal)
+            || body.Contains(".Last(", StringComparison.Ordinal)
+            || body.Contains(".LastOrDefault(", StringComparison.Ordinal)
+            || body.Contains(".Single(", StringComparison.Ordinal)
+            || body.Contains(".SingleOrDefault(", StringComparison.Ordinal)
+            || body.Contains(".Take(", StringComparison.Ordinal)
+            || body.Contains(".Skip(", StringComparison.Ordinal)
+            || body.Contains(".Zip(", StringComparison.Ordinal)
+            || body.Contains(".Aggregate(", StringComparison.Ordinal)
+            || body.Contains(".GroupBy(", StringComparison.Ordinal);
         bool needsText =
             body.Contains("StringBuilder", StringComparison.Ordinal)
             || body.Contains("Encoding", StringComparison.Ordinal)
@@ -217,6 +271,12 @@ internal sealed partial class CSharpEmitter
         foreach (string line in lines)
         {
             if (!line.StartsWith("using ", StringComparison.Ordinal))
+            {
+                result.Add(line);
+                continue;
+            }
+
+            if (userUsings.Contains(line.Trim()))
             {
                 result.Add(line);
                 continue;
@@ -2192,7 +2252,7 @@ PSCP source:"
         );
         foreach (string line in StripPscpComments(source).Split('\n'))
         {
-            string normalized = line.TrimEnd('\r');
+            string normalized = line.TrimEnd('\r').Replace("*/", "* /", StringComparison.Ordinal);
             if (string.IsNullOrWhiteSpace(normalized)) continue;
             _writer.WriteLine(normalized.Length == 0 ? string.Empty : normalized);
         }
@@ -2207,8 +2267,9 @@ PSCP source:"
         StringBuilder builder = new(source.Length);
         bool inBlockComment = false;
         bool inString = false;
-        bool inInterpolatedString = false;
+        bool inVerbatimString = false;
         bool inChar = false;
+        bool escaped = false;
 
         for (int i = 0; i < source.Length; i++)
         {
@@ -2230,14 +2291,65 @@ PSCP source:"
                 continue;
             }
 
-            if (!inString && !inInterpolatedString && !inChar && current == '/' && next == '*')
+            if (inString)
+            {
+                builder.Append(current);
+                if (inVerbatimString)
+                {
+                    if (current == '"' && next == '"')
+                    {
+                        builder.Append(next);
+                        i++;
+                    }
+                    else if (current == '"')
+                    {
+                        inString = false;
+                        inVerbatimString = false;
+                    }
+                }
+                else if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (current == '\\')
+                {
+                    escaped = true;
+                }
+                else if (current == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (inChar)
+            {
+                builder.Append(current);
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (current == '\\')
+                {
+                    escaped = true;
+                }
+                else if (current == '\'')
+                {
+                    inChar = false;
+                }
+
+                continue;
+            }
+
+            if (current == '/' && next == '*')
             {
                 inBlockComment = true;
                 i++;
                 continue;
             }
 
-            if (!inString && !inInterpolatedString && !inChar && current == '/' && next == '/')
+            if (current == '/' && next == '/')
             {
                 while (i < source.Length && source[i] is not '\r' and not '\n')
                 {
@@ -2252,28 +2364,16 @@ PSCP source:"
                 continue;
             }
 
-            if (current == '"' && !inChar)
+            if (current == '"')
             {
-                bool escaped = i > 0 && source[i - 1] == '\\';
-                if (!escaped)
-                {
-                    if (i > 0 && source[i - 1] == '$')
-                    {
-                        inInterpolatedString = !inInterpolatedString;
-                    }
-                    else
-                    {
-                        inString = !inString;
-                    }
-                }
+                inString = true;
+                inVerbatimString = i > 0 && (source[i - 1] == '@' || (i > 1 && source[i - 1] == '$' && source[i - 2] == '@'));
+                escaped = false;
             }
-            else if (current == '\'' && !inString && !inInterpolatedString)
+            else if (current == '\'')
             {
-                bool escaped = i > 0 && source[i - 1] == '\\';
-                if (!escaped)
-                {
-                    inChar = !inChar;
-                }
+                inChar = true;
+                escaped = false;
             }
 
             builder.Append(current);

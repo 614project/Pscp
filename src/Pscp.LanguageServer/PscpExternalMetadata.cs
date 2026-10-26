@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -9,36 +10,50 @@ namespace Pscp.LanguageServer;
 
 internal static class PscpExternalMetadata
 {
+    private const DynamicallyAccessedMemberTypes ReflectedMembers =
+        DynamicallyAccessedMemberTypes.PublicProperties
+        | DynamicallyAccessedMemberTypes.NonPublicProperties
+        | DynamicallyAccessedMemberTypes.PublicFields
+        | DynamicallyAccessedMemberTypes.NonPublicFields
+        | DynamicallyAccessedMemberTypes.PublicMethods
+        | DynamicallyAccessedMemberTypes.NonPublicMethods;
+
+    private sealed class KnownType([DynamicallyAccessedMembers(ReflectedMembers)] Type type)
+    {
+        [DynamicallyAccessedMembers(ReflectedMembers)]
+        public Type Type { get; } = type;
+    }
+
     private static readonly StringComparer Comparer = StringComparer.Ordinal;
 
-    private static readonly IReadOnlyDictionary<string, Type> KnownTypes =
-        new Dictionary<string, Type>(Comparer)
+    private static readonly IReadOnlyDictionary<string, KnownType> KnownTypes =
+        new Dictionary<string, KnownType>(Comparer)
         {
-            ["Math"] = typeof(Math),
-            ["MathF"] = typeof(MathF),
-            ["Console"] = typeof(Console),
-            ["Environment"] = typeof(Environment),
-            ["Convert"] = typeof(Convert),
-            ["GC"] = typeof(GC),
-            ["String"] = typeof(string),
-            ["StringComparer"] = typeof(StringComparer),
-            ["Comparer"] = typeof(Comparer<>),
-            ["File"] = typeof(File),
-            ["Directory"] = typeof(Directory),
-            ["Path"] = typeof(Path),
-            ["Enumerable"] = typeof(Enumerable),
-            ["BitOperations"] = typeof(BitOperations),
-            ["BigInteger"] = typeof(BigInteger),
-            ["Random"] = typeof(Random),
-            ["Array"] = typeof(Array),
-            ["List"] = typeof(List<>),
-            ["LinkedList"] = typeof(LinkedList<>),
-            ["Queue"] = typeof(Queue<>),
-            ["Stack"] = typeof(Stack<>),
-            ["HashSet"] = typeof(HashSet<>),
-            ["Dictionary"] = typeof(Dictionary<,>),
-            ["PriorityQueue"] = typeof(PriorityQueue<,>),
-            ["SortedSet"] = typeof(SortedSet<>),
+            ["Math"] = new(typeof(Math)),
+            ["MathF"] = new(typeof(MathF)),
+            ["Console"] = new(typeof(Console)),
+            ["Environment"] = new(typeof(Environment)),
+            ["Convert"] = new(typeof(Convert)),
+            ["GC"] = new(typeof(GC)),
+            ["String"] = new(typeof(string)),
+            ["StringComparer"] = new(typeof(StringComparer)),
+            ["Comparer"] = new(typeof(Comparer<>)),
+            ["File"] = new(typeof(File)),
+            ["Directory"] = new(typeof(Directory)),
+            ["Path"] = new(typeof(Path)),
+            ["Enumerable"] = new(typeof(Enumerable)),
+            ["BitOperations"] = new(typeof(BitOperations)),
+            ["BigInteger"] = new(typeof(BigInteger)),
+            ["Random"] = new(typeof(Random)),
+            ["Array"] = new(typeof(Array)),
+            ["List"] = new(typeof(List<>)),
+            ["LinkedList"] = new(typeof(LinkedList<>)),
+            ["Queue"] = new(typeof(Queue<>)),
+            ["Stack"] = new(typeof(Stack<>)),
+            ["HashSet"] = new(typeof(HashSet<>)),
+            ["Dictionary"] = new(typeof(Dictionary<,>)),
+            ["PriorityQueue"] = new(typeof(PriorityQueue<,>)),
+            ["SortedSet"] = new(typeof(SortedSet<>)),
         };
 
     private static readonly IReadOnlyDictionary<string, string[]> NamespaceMembers =
@@ -176,9 +191,9 @@ internal static class PscpExternalMetadata
                 continue;
             }
 
-            if (KnownTypes.TryGetValue(child, out Type? type))
+            if (KnownTypes.TryGetValue(child, out KnownType? knownType))
             {
-                results[child] = CreateTypeEntry(child, type);
+                results[child] = CreateTypeEntry(child, knownType.Type);
             }
         }
 
@@ -193,9 +208,9 @@ internal static class PscpExternalMetadata
             ["System"] = CreateNamespaceEntry("System", "System"),
         };
 
-        foreach ((string key, Type type) in KnownTypes.OrderBy(pair => pair.Key, Comparer))
+        foreach ((string key, KnownType knownType) in KnownTypes.OrderBy(pair => pair.Key, Comparer))
         {
-            entries[key] = CreateTypeEntry(key, type);
+            entries[key] = CreateTypeEntry(key, knownType.Type);
         }
 
         return entries;
@@ -204,9 +219,9 @@ internal static class PscpExternalMetadata
     private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, PscpCompletionEntry>> CreateStaticMemberEntries()
     {
         Dictionary<string, IReadOnlyDictionary<string, PscpCompletionEntry>> tables = new(Comparer);
-        foreach ((string key, Type type) in KnownTypes)
+        foreach ((string key, KnownType knownType) in KnownTypes)
         {
-            tables[key] = CreateMemberEntries(type, BindingFlags.Public | BindingFlags.Static, instanceContext: false);
+            tables[key] = CreateMemberEntries(knownType.Type, BindingFlags.Public | BindingFlags.Static, instanceContext: false);
         }
 
         tables["Array"] = MergeFallbackEntries(tables["Array"], CreateArrayFallbackMembers(instanceContext: false));
@@ -248,7 +263,10 @@ internal static class PscpExternalMetadata
         return tables;
     }
 
-    private static IReadOnlyDictionary<string, PscpCompletionEntry> CreateMemberEntries(Type type, BindingFlags flags, bool instanceContext)
+    private static IReadOnlyDictionary<string, PscpCompletionEntry> CreateMemberEntries(
+        [DynamicallyAccessedMembers(ReflectedMembers)] Type type,
+        BindingFlags flags,
+        bool instanceContext)
     {
         Dictionary<string, PscpCompletionEntry> entries = new(Comparer);
 
