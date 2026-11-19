@@ -78,13 +78,18 @@ static partial class PscpCli
 
         if (!force && (File.Exists(sourcePath) || File.Exists(layout.ProjectPath)))
         {
-            throw new InvalidOperationException("A PSCP project already exists here. Use `pscp init --force` to overwrite the starter files.");
+            throw new InvalidOperationException("A PSCP project already exists here. Use `pscp init --force` to regenerate the `.pscp` project (an existing main.pscp is kept).");
         }
 
+        // `--force` regenerates the SDK project; the user's main.pscp is never overwritten.
         await EnsureSdkLayoutAsync(layout, overwriteExisting: force, older: false);
-        if (force || !File.Exists(sourcePath))
+        if (!File.Exists(sourcePath))
         {
             await File.WriteAllTextAsync(sourcePath, CreateStarterProgram(), Encoding.UTF8);
+        }
+        else if (force)
+        {
+            Console.WriteLine($"Kept the existing {Path.GetFileName(sourcePath)}.");
         }
 
         Console.WriteLine($"Initialized PSCP project in {rootDirectory}");

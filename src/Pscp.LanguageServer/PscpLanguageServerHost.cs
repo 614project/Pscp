@@ -191,8 +191,7 @@ public static class PscpLanguageServerHost
                     {
                         // The whole body was consumed, so the stream is still in sync: report and keep serving.
                         await _log.WriteLineAsync($"Malformed JSON-RPC message: {ex.Message}");
-                        await WriteMessageAsync(
-                            _output,
+                        await WriteLockedAsync(
                             new JsonObject
                             {
                                 ["jsonrpc"] = "2.0",
@@ -2181,8 +2180,7 @@ public static class PscpLanguageServerHost
 
         private async Task SendResultAsync(JsonElement id, JsonNode? result, CancellationToken cancellationToken)
         {
-            await WriteMessageAsync(
-                _output,
+            await WriteLockedAsync(
                 new JsonObject
                 {
                     ["jsonrpc"] = "2.0",
@@ -2194,8 +2192,7 @@ public static class PscpLanguageServerHost
 
         private async Task SendErrorAsync(JsonElement id, int code, string message, CancellationToken cancellationToken)
         {
-            await WriteMessageAsync(
-                _output,
+            await WriteLockedAsync(
                 new JsonObject
                 {
                     ["jsonrpc"] = "2.0",
@@ -2211,8 +2208,7 @@ public static class PscpLanguageServerHost
 
         private async Task SendNotificationAsync(string method, JsonNode? @params, CancellationToken cancellationToken)
         {
-            await WriteMessageAsync(
-                _output,
+            await WriteLockedAsync(
                 new JsonObject
                 {
                     ["jsonrpc"] = "2.0",
@@ -2278,6 +2274,23 @@ public static class PscpLanguageServerHost
             }
 
             return JsonDocument.Parse(body);
+        }
+
+        // The reader loop answers malformed messages while the main loop answers requests and publishes
+        // diagnostics; one lock keeps their frames from interleaving on the output stream.
+        private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+        private async Task WriteLockedAsync(JsonNode payload, CancellationToken cancellationToken)
+        {
+            await _writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                await WriteMessageAsync(_output, payload, cancellationToken);
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
         }
 
         private static async Task WriteMessageAsync(Stream output, JsonNode payload, CancellationToken cancellationToken)

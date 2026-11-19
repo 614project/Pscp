@@ -525,16 +525,23 @@ class PscpClient {
     this.serverPath = launch.label;
     this.output.appendLine(`Starting PSCP language server via ${launch.label}`);
 
-    this.process = cp.spawn(launch.command, launch.args, {
+    const child = cp.spawn(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
       stdio: ['pipe', 'pipe', 'pipe']
     });
+    this.process = child;
 
-    this.process.stdout.on('data', (chunk) => this._handleData(chunk));
-    this.process.stderr.on('data', (chunk) => this.output.append(chunk.toString()));
-    this.process.on('exit', (code, signal) => this._handleExit(code, signal));
-    this.process.on('error', (error) => this._handleExit(-1, error.message));
+    // Events are tied to the process that raised them: after a restart, the exit of the old server must not
+    // reject the new server's requests or clear `this.process`.
+    child.stdout.on('data', (chunk) => {
+      if (this.process === child) {
+        this._handleData(chunk);
+      }
+    });
+    child.stderr.on('data', (chunk) => this.output.append(chunk.toString()));
+    child.on('exit', (code, signal) => this._handleExit(child, code, signal));
+    child.on('error', (error) => this._handleExit(child, -1, error.message));
 
     const initializeResult = await this._request('initialize', {
       processId: process.pid,
@@ -597,8 +604,9 @@ class PscpClient {
     }
 
     if (this.process) {
-      this.process.kill();
+      const child = this.process;
       this.process = null;
+      child.kill();
     }
 
     this.buffer = Buffer.alloc(0);
@@ -908,7 +916,12 @@ class PscpClient {
     this.diagnostics.set(uri, diagnostics);
   }
 
-  _handleExit(code, signal) {
+  _handleExit(child, code, signal) {
+    if (child !== this.process) {
+      this.output.appendLine(`A previous PSCP language server exited (${code}, ${signal}).`);
+      return;
+    }
+
     if (this.process) {
       this.output.appendLine(`PSCP language server exited (${code}, ${signal}).`);
     }
@@ -1321,9 +1334,10 @@ async function runPscpToolCommand(context, output, subcommand, extra = []) {
   terminal.show();
 }
 
-// Guide §14.4: `pscp transpile` writes `<file>.g.cs`; the command opens it once the task finishes.
+// Guide §14.4: `pscp transpile a.pscp` writes `a.g.cs` next to it; the command opens it once the task finishes.
 async function openGeneratedFileWhenDone(execution, sourceUri) {
-  const generated = vscode.Uri.file(`${sourceUri.fsPath}.g.cs`);
+  const sourcePath = sourceUri.fsPath;
+  const generated = vscode.Uri.file(path.join(path.dirname(sourcePath), `${path.basename(sourcePath, path.extname(sourcePath))}.g.cs`));
   await new Promise((resolve) => {
     const subscription = vscode.tasks.onDidEndTaskProcess((event) => {
       if (event.execution === execution) {

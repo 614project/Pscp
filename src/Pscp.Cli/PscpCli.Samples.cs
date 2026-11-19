@@ -229,21 +229,11 @@ static partial class PscpCli
         using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start dotnet.");
         Task<string> output = process.StandardOutput.ReadToEndAsync();
         Task<string> error = process.StandardError.ReadToEndAsync();
-        try
-        {
-            await using (FileStream input = File.OpenRead(sample.InputPath))
-            {
-                await input.CopyToAsync(process.StandardInput.BaseStream);
-            }
 
-            process.StandardInput.Close();
-        }
-        catch (IOException)
-        {
-            // The program exited without reading all of its input.
-        }
-
+        // The time limit covers writing the input too: a program that stops reading would otherwise block the
+        // copy once the pipe buffer is full, before the limit starts.
         using CancellationTokenSource timeout = new(timeoutMs);
+        Task feed = FeedInputAsync(sample.InputPath, process.StandardInput, timeout.Token);
         try
         {
             await process.WaitForExitAsync(timeout.Token);
@@ -252,9 +242,12 @@ static partial class PscpCli
         {
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
+            await feed;
             watch.Stop();
             return new SampleResult(sample, "timeout", await output, await error, null, watch.ElapsedMilliseconds);
         }
+
+        await feed;
 
         watch.Stop();
         string actual = await output;
@@ -265,6 +258,23 @@ static partial class PscpCli
                 ? "noExpected"
                 : OutputsMatch(await File.ReadAllTextAsync(sample.ExpectedPath, Encoding.UTF8), actual, floatTolerance) ? "passed" : "failed";
         return new SampleResult(sample, status, actual, standardError, process.ExitCode, watch.ElapsedMilliseconds);
+    }
+
+    private static async Task FeedInputAsync(string inputPath, StreamWriter standardInput, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using (FileStream input = File.OpenRead(inputPath))
+            {
+                await input.CopyToAsync(standardInput.BaseStream, cancellationToken);
+            }
+
+            standardInput.Close();
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
+        {
+            // The program exited (or was stopped) without reading all of its input.
+        }
     }
 
     // Comparison rules (guide §14.5): `\r\n` is `\n`, trailing spaces of a line and trailing blank lines are ignored,
@@ -321,10 +331,28 @@ static partial class PscpCli
                 continue;
             }
 
+            // Only real numbers get the tolerance: integers and other tokens compare exactly.
+            if (!IsRealNumberToken(expectedTokens[i]) && !IsRealNumberToken(actualTokens[i]))
+            {
+                return false;
+            }
+
             if (!double.TryParse(expectedTokens[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double expectedValue)
                 || !double.TryParse(actualTokens[i], NumberStyles.Float, CultureInfo.InvariantCulture, out double actualValue))
             {
                 return false;
+            }
+
+            // NaN matches only NaN, and an infinity only the same infinity: the difference would be NaN, which
+            // no comparison rejects.
+            if (double.IsNaN(expectedValue) || double.IsNaN(actualValue) || double.IsInfinity(expectedValue) || double.IsInfinity(actualValue))
+            {
+                if (!expectedValue.Equals(actualValue))
+                {
+                    return false;
+                }
+
+                continue;
             }
 
             double difference = Math.Abs(expectedValue - actualValue);
@@ -336,6 +364,9 @@ static partial class PscpCli
 
         return true;
     }
+
+    private static bool IsRealNumberToken(string token)
+        => token.IndexOfAny(['.', 'e', 'E']) >= 0 || token is "NaN" or "Infinity" or "-Infinity";
 
     private static void PrintSampleResult(SampleResult result)
     {
