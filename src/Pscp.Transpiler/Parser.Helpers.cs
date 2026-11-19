@@ -19,6 +19,7 @@ public sealed partial class Parser
         "extern",
         "async",
         "required",
+        "const",
     ];
 
     private static readonly HashSet<string> SectionAccessNames =

@@ -260,12 +260,32 @@ internal sealed class PscpBinder : SyntaxRewriter
 
                     return base.VisitTypeMember(member);
                 });
-            case PropertyMember:
-                return WithScope(ScopeKind.Function, () => base.VisitTypeMember(member));
+            case PropertyMember property:
+                return WithScope(ScopeKind.Function, () =>
+                {
+                    if (property.IndexerParameters is not null)
+                    {
+                        DeclareParameters(property.IndexerParameters);
+                    }
+
+                    return base.VisitTypeMember(member);
+                });
             default:
                 return base.VisitTypeMember(member);
         }
     }
+
+    // `set` and `init` accessors see the implicit `value` parameter.
+    public override PropertyAccessor VisitPropertyAccessor(PropertyAccessor accessor)
+        => WithScope(ScopeKind.Function, () =>
+        {
+            if (accessor.Kind is "set" or "init")
+            {
+                _scope.Symbols["value"] = new Symbol(SymbolKind.Variable, accessor);
+            }
+
+            return base.VisitPropertyAccessor(accessor);
+        });
 
     public override FunctionDeclaration VisitFunction(FunctionDeclaration function)
     {

@@ -803,9 +803,12 @@ public sealed partial class Parser
         return new WithExpression(receiver, assignments);
     }
 
-    // `{ Member = value, ... }` after `with` or `new T(...)`.
+    // `{ Member = value, ... }` after `with` or `new T(...)`. After `new` the C# collection forms are accepted
+    // too: an element (`new List<int> { 1, 2 }`), an `Add` argument group (`{ { k, v } }`) and an indexed entry
+    // (`{ [k] = v }`).
     private IReadOnlyList<WithAssignment> ParseMemberInitializerList(string owner)
     {
+        bool allowCollectionForms = owner == "new";
         Expect(TokenKind.OpenBrace, $"Expected '{{' after '{owner}'.");
         List<WithAssignment> assignments = WithNestedContext(() =>
         {
@@ -813,10 +816,55 @@ public sealed partial class Parser
             SkipSeparators();
             while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
             {
-                string memberName = Expect(TokenKind.Identifier, $"Expected a member name in the '{owner}' initializer.").Text;
-                Expect(TokenKind.Equal, "Expected '=' after the member name.");
-                SkipSeparators();
-                parsed.Add(new WithAssignment(memberName, ParseExpression()));
+                if (allowCollectionForms && Current.Kind == TokenKind.OpenBracket && IsIndexedInitializerEntry())
+                {
+                    Next();
+                    List<Expression> indexArguments = [];
+                    do
+                    {
+                        SkipSeparators();
+                        indexArguments.Add(ParseExpression());
+                        SkipSeparators();
+                    }
+                    while (Match(TokenKind.Comma));
+
+                    Expect(TokenKind.CloseBracket, "Expected ']' after the initializer index.");
+                    Expect(TokenKind.Equal, "Expected '=' after the initializer index.");
+                    SkipSeparators();
+                    parsed.Add(new WithAssignment(string.Empty, ParseExpression()) { IndexArguments = indexArguments });
+                }
+                else if (allowCollectionForms && Current.Kind == TokenKind.OpenBrace)
+                {
+                    Next();
+                    List<Expression> elementArguments = [];
+                    SkipSeparators();
+                    while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
+                    {
+                        elementArguments.Add(ParseExpression());
+                        SkipSeparators();
+                        if (!Match(TokenKind.Comma))
+                        {
+                            break;
+                        }
+
+                        SkipSeparators();
+                    }
+
+                    Expect(TokenKind.CloseBrace, "Expected '}' after the initializer element.");
+                    parsed.Add(new WithAssignment(string.Empty, new ErrorExpression()) { ElementArguments = elementArguments });
+                }
+                else if (allowCollectionForms && !(Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Equal))
+                {
+                    parsed.Add(new WithAssignment(string.Empty, ParseExpression()) { ElementArguments = [] });
+                }
+                else
+                {
+                    string memberName = Expect(TokenKind.Identifier, $"Expected a member name in the '{owner}' initializer.").Text;
+                    Expect(TokenKind.Equal, "Expected '=' after the member name.");
+                    SkipSeparators();
+                    parsed.Add(new WithAssignment(memberName, ParseExpression()));
+                }
+
                 SkipSeparators();
                 if (!Match(TokenKind.Comma))
                 {
@@ -830,6 +878,13 @@ public sealed partial class Parser
         });
         Expect(TokenKind.CloseBrace, $"Expected '}}' to close the '{owner}' initializer.");
         return assignments;
+    }
+
+    // `[k] = v` (an indexed entry) rather than a collection expression element such as `[1, 2]`.
+    private bool IsIndexedInitializerEntry()
+    {
+        int close = FindMatchingClose(_position);
+        return close >= 0 && close + 1 < _tokens.Count && _tokens[close + 1].Kind == TokenKind.Equal;
     }
 
     // `receiver switch { pattern [when guard] => result, ... }`. Arms are separated by `,` or a line break.

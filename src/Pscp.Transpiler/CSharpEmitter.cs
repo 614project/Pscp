@@ -76,7 +76,7 @@ internal sealed partial class CSharpEmitter
         }
 
         // Types see the top-level constants they use (spec §7.4) through the program class.
-        if (_typeVisibleConstants.Count > 0)
+        if (_typeVisibleConstants.Count > 0 || TypesUseRuntime(program))
         {
             _writer.WriteLine($"using static {program.NamespaceName ?? _options.Namespace}.{_className};");
         }
@@ -327,7 +327,7 @@ internal sealed partial class CSharpEmitter
     {
         foreach (DeclarationStatement declaration in _typeVisibleConstants)
         {
-            string name = ((NameTarget)declaration.Targets[0]).Name;
+            string name = EscapeName(((NameTarget)declaration.Targets[0]).Name);
             TypeSyntax? type = GetDeclarationEmissionType(declaration);
             string typeText = type is null ? "object" : EmitType(type);
             if (TryGetConstInitializer(declaration.Initializer!, out string? constText, out string? constType)
@@ -570,14 +570,14 @@ internal sealed partial class CSharpEmitter
         string currentType = GetCurrentDeclaringTypeName();
         if (ordering.ParameterNames.Count >= 2)
         {
-            string leftName = ordering.ParameterNames[0];
-            string rightName = ordering.ParameterNames[1];
+            string leftName = EscapeName(ordering.ParameterNames[0]);
+            string rightName = EscapeName(ordering.ParameterNames[1]);
             WithReturnType(new NamedTypeSyntax("int", Immutable.List<TypeSyntax>()), () => EmitMethodLike($"public static int CompareTo({currentType} {leftName}, {currentType} {rightName})", ordering.Body, isVoidLike: false));
             _writer.WriteLine($"public int CompareTo({currentType} other) => CompareTo(this, other);");
         }
         else
         {
-            string otherName = ordering.ParameterNames.Count == 0 ? "other" : ordering.ParameterNames[0];
+            string otherName = ordering.ParameterNames.Count == 0 ? "other" : EscapeName(ordering.ParameterNames[0]);
             WithReturnType(new NamedTypeSyntax("int", Immutable.List<TypeSyntax>()), () => EmitMethodLike($"public int CompareTo({currentType} {otherName})", ordering.Body, isVoidLike: false));
             _writer.WriteLine($"public static int CompareTo({currentType} left, {currentType} right) => left.CompareTo(right);");
         }
@@ -602,7 +602,7 @@ internal sealed partial class CSharpEmitter
         string parameters = string.Join(", ", method.Parameters.Select(EmitParameter));
         string signature = method.IsConstructor
             ? $"{modifiers}{method.Name}({parameters})"
-            : $"{modifiers}{EmitType(method.ReturnType!)} {method.Name}({parameters})";
+            : $"{modifiers}{EmitType(method.ReturnType!)} {EscapeMemberName(method.Name)}({parameters})";
         if (!string.IsNullOrWhiteSpace(method.InitializerText))
         {
             signature += " " + method.InitializerText;
@@ -618,9 +618,73 @@ internal sealed partial class CSharpEmitter
 
     private void EmitPropertyMember(PropertyMember property)
     {
-        string modifiers = FormatMemberModifiers(property.Modifiers);
-        string signature = $"{modifiers}{EmitType(property.Type)} {property.Name}";
-        WithReturnType(property.Type, () => EmitPropertyBody(signature, property.Body));
+        // An explicit interface implementation (`int IFoo.Size => n`) takes no access modifier.
+        string modifiers = property.Name.Contains('.')
+            ? (property.Modifiers.Count == 0 ? string.Empty : string.Join(" ", property.Modifiers) + " ")
+            : FormatMemberModifiers(property.Modifiers);
+        string name = property.IndexerParameters is null
+            ? EscapeMemberName(property.Name)
+            : $"this[{string.Join(", ", property.IndexerParameters.Select(EmitParameter))}]";
+        string signature = $"{modifiers}{EmitType(property.Type)} {name}";
+        if (property.Accessors is null)
+        {
+            WithReturnType(property.Type, () => EmitPropertyBody(signature, property.Body));
+            return;
+        }
+
+        EmitPropertyAccessors(signature, property);
+    }
+
+    // The C# accessor forms: `{ get; set; }` stays on one line, accessors with bodies get a block each.
+    private void EmitPropertyAccessors(string signature, PropertyMember property)
+    {
+        IReadOnlyList<PropertyAccessor> accessors = property.Accessors!;
+        string initializer = property.Initializer is null ? string.Empty : $" = {EmitExpression(property.Initializer, property.Type)};";
+        static string AccessorHead(PropertyAccessor accessor)
+            => (accessor.Modifiers.Count == 0 ? string.Empty : string.Join(" ", accessor.Modifiers) + " ") + accessor.Kind;
+
+        if (accessors.All(accessor => accessor.Body is null))
+        {
+            _writer.WriteLine($"{signature} {{ {string.Join(" ", accessors.Select(accessor => AccessorHead(accessor) + ";"))} }}{initializer}");
+            return;
+        }
+
+        _writer.WriteLine(signature);
+        _writer.WriteLine("{");
+        _writer.Indent();
+        foreach (PropertyAccessor accessor in accessors)
+        {
+            if (accessor.Body is null)
+            {
+                _writer.WriteLine(AccessorHead(accessor) + ";");
+                continue;
+            }
+
+            bool isGetter = accessor.Kind == "get";
+            _writer.WriteLine(AccessorHead(accessor));
+            _writer.WriteLine("{");
+            _writer.Indent();
+            WithReturnType(isGetter ? property.Type : null, () =>
+            {
+                switch (accessor.Body)
+                {
+                    case BlockMethodBody block:
+                        EmitBlockContents(block.Block, isVoidLike: !isGetter);
+                        break;
+                    case ExpressionMethodBody expression when isGetter:
+                        EmitStatement(new ReturnStatement(expression.Expression));
+                        break;
+                    case ExpressionMethodBody expression:
+                        EmitStatement(new ExpressionStatement(expression.Expression, false));
+                        break;
+                }
+            });
+            _writer.Unindent();
+            _writer.WriteLine("}");
+        }
+
+        _writer.Unindent();
+        _writer.WriteLine("}" + initializer);
     }
 
     private void EmitPropertyBody(string signature, MethodBody body)
@@ -651,11 +715,9 @@ internal sealed partial class CSharpEmitter
 
     private void EmitOperatorMember(OperatorMember @operator)
     {
-        List<string> modifiers = @operator.Modifiers.Count == 0 ? ["public"] : [.. @operator.Modifiers];
-        if (!modifiers.Contains("static", StringComparer.Ordinal))
-        {
-            modifiers.Add("static");
-        }
+        // C# requires `public static` on every operator (CS0558), whatever the declaration wrote.
+        List<string> modifiers = [.. @operator.Modifiers.Where(modifier => modifier is not ("public" or "private" or "protected" or "internal" or "static"))];
+        modifiers.InsertRange(0, ["public", "static"]);
 
         string signature = $"{string.Join(" ", modifiers)} {EmitType(@operator.ReturnType)} operator {@operator.OperatorTokenText}({string.Join(", ", @operator.Parameters.Select(EmitParameter))})";
         WithReturnType(@operator.ReturnType, () => EmitMethodLike(signature, @operator.Body, isVoidLike: GetIsVoid(@operator.ReturnType)));
@@ -665,6 +727,9 @@ internal sealed partial class CSharpEmitter
     {
         switch (body)
         {
+            case NoMethodBody:
+                _writer.WriteLine(signature + ";");
+                break;
             case ExpressionMethodBody expressionBody:
                 if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike, isProperty: false))
                 {
@@ -766,7 +831,7 @@ internal sealed partial class CSharpEmitter
             prefix += "static ";
         }
 
-        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {function.Name}{function.TypeParameterText}({parameters}){(function.ConstraintText is null ? string.Empty : " " + function.ConstraintText)}");
+        _writer.WriteLine($"{prefix}{EmitType(function.ReturnType)} {EscapeName(function.Name)}{function.TypeParameterText}({parameters}){(function.ConstraintText is null ? string.Empty : " " + function.ConstraintText)}");
         _writer.WriteLine("{");
         _writer.Indent();
         WithReturnType(function.ReturnType, () =>
@@ -976,7 +1041,7 @@ internal sealed partial class CSharpEmitter
     {
         string header = catchClause.Type is null
             ? "catch"
-            : $"catch ({EmitType(catchClause.Type)}{(catchClause.Name is null ? string.Empty : " " + catchClause.Name)})";
+            : $"catch ({EmitType(catchClause.Type)}{(catchClause.Name is null ? string.Empty : " " + EscapeName(catchClause.Name))})";
         return catchClause.Filter is null ? header : $"{header} when ({EmitExpression(catchClause.Filter)})";
     }
 
@@ -1206,6 +1271,19 @@ internal sealed partial class CSharpEmitter
                 case PropertyMember property:
                     _declaredValueNames.Add(property.Name);
                     CollectDeclaredValueNames(property.Body);
+                    if (property.IndexerParameters is not null)
+                    {
+                        CollectDeclaredValueNames(property.IndexerParameters);
+                    }
+
+                    foreach (PropertyAccessor accessor in property.Accessors ?? [])
+                    {
+                        if (accessor.Body is not null)
+                        {
+                            CollectDeclaredValueNames(accessor.Body);
+                        }
+                    }
+
                     break;
                 case MethodMember method:
                     _declaredValueNames.Add(method.Name);
@@ -1564,6 +1642,43 @@ internal sealed partial class CSharpEmitter
         }
     }
 
+    // Spec §3.2: a name that is a C# keyword but not a PSCP keyword (`checked`, `event`, `object`) is written with
+    // `@` in the generated C#. `@checked` and `checked` name the same identifier, so the user's name is kept.
+    private static string EscapeName(string name)
+        => name is not ("this" or "base") && PscpIntrinsicCatalog.CSharpReservedKeywords.Contains(name) ? "@" + name : name;
+
+    // A member name, possibly qualified by an interface (`IFoo.Bar`, `IComparable<Job>.CompareTo`) or carrying
+    // type parameters (`Map<U>`): only the simple name is escaped.
+    private static string EscapeMemberName(string name)
+    {
+        int depth = 0;
+        int simpleStart = 0;
+        int simpleEnd = name.Length;
+        for (int i = 0; i < name.Length; i++)
+        {
+            switch (name[i])
+            {
+                case '<':
+                    if (depth == 0)
+                    {
+                        simpleEnd = i;
+                    }
+
+                    depth++;
+                    break;
+                case '>':
+                    depth--;
+                    break;
+                case '.' when depth == 0:
+                    simpleStart = i + 1;
+                    simpleEnd = name.Length;
+                    break;
+            }
+        }
+
+        return name[..simpleStart] + EscapeName(name[simpleStart..simpleEnd]) + name[simpleEnd..];
+    }
+
     // Spec §28.2: a member without an access modifier is `public`.
     private static string FormatMemberModifiers(IReadOnlyList<string> modifiers)
     {
@@ -1585,7 +1700,7 @@ internal sealed partial class CSharpEmitter
         {
             if (declaration.Targets[0] is NameTarget nameTarget)
             {
-                result.Add((nameTarget.Name, normalizedType, declaration.Initializer));
+                result.Add((EscapeName(nameTarget.Name), normalizedType, declaration.Initializer));
                 return true;
             }
 
@@ -1598,7 +1713,7 @@ internal sealed partial class CSharpEmitter
                         Expression? elementInitializer = declaration.Initializer is TupleExpression tupleInitializer && i < tupleInitializer.Elements.Count
                             ? tupleInitializer.Elements[i]
                             : null;
-                        result.Add((elementName.Name, tupleType.Elements[i], elementInitializer));
+                        result.Add((EscapeName(elementName.Name), tupleType.Elements[i], elementInitializer));
                     }
                 }
 
@@ -1618,7 +1733,7 @@ internal sealed partial class CSharpEmitter
                         ? tupleType.Elements[i]
                         : normalizedType;
                     Expression? initializer = i < tupleExpression.Elements.Count ? tupleExpression.Elements[i] : null;
-                    result.Add((nameTarget.Name, targetType, initializer));
+                    result.Add((EscapeName(nameTarget.Name), targetType, initializer));
                 }
             }
 
@@ -1629,7 +1744,7 @@ internal sealed partial class CSharpEmitter
         {
             if (target is NameTarget nameTarget)
             {
-                result.Add((nameTarget.Name, normalizedType, declaration.Initializer));
+                result.Add((EscapeName(nameTarget.Name), normalizedType, declaration.Initializer));
             }
         }
 
@@ -2382,6 +2497,18 @@ PSCP source:"
         return builder.ToString();
     }
 
+    // A type that reads input or writes output reaches `__pscp_stdin` / `__pscp_stdout` through `using static`.
+    private static bool TypesUseRuntime(PscpProgram program)
+    {
+        RuntimeUsageWalker walker = new();
+        foreach (TypeDeclaration type in program.Types)
+        {
+            walker.VisitTypeDeclaration(type);
+        }
+
+        return walker.NeedsStdin || walker.NeedsStdout;
+    }
+
     private static (bool NeedsStdin, bool NeedsStdout) AnalyzeRuntimeUsage(PscpProgram program)
     {
         RuntimeUsageWalker walker = new();
@@ -2529,12 +2656,15 @@ PSCP source:"
         });
     }
 
+    // `params` and default values are C# pass-through (spec §10.1).
     private string EmitParameter(ParameterSyntax parameter)
     {
         string modifier = EmitArgumentModifier(parameter.Modifier);
-        return string.IsNullOrEmpty(modifier)
-            ? $"{EmitType(parameter.Type)} {EmitBindingPattern(parameter.Target)}"
-            : $"{modifier} {EmitType(parameter.Type)} {EmitBindingPattern(parameter.Target)}";
+        string prefix = (parameter.IsParams ? "params " : string.Empty) + (string.IsNullOrEmpty(modifier) ? string.Empty : modifier + " ");
+        string suffix = parameter.DefaultValue is null
+            ? string.Empty
+            : " = " + EmitExpression(parameter.DefaultValue, parameter.Type);
+        return $"{prefix}{EmitType(parameter.Type)} {EmitBindingPattern(parameter.Target)}{suffix}";
     }
 
     private static string EmitArgumentModifier(ArgumentModifier modifier)

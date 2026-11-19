@@ -86,8 +86,13 @@ internal abstract class SyntaxRewriter
             }
             case PropertyMember property:
             {
+                IReadOnlyList<ParameterSyntax>? parameters = property.IndexerParameters is null ? null : VisitList(property.IndexerParameters, VisitParameter);
                 MethodBody body = VisitMethodBody(property.Body);
-                return Same(body, property.Body) ? member : Replace(member, property with { Body = body });
+                IReadOnlyList<PropertyAccessor>? accessors = property.Accessors is null ? null : VisitList(property.Accessors, VisitPropertyAccessor);
+                Expression? initializer = property.Initializer is null ? null : VisitExpression(property.Initializer);
+                return Same(parameters, property.IndexerParameters) && Same(body, property.Body) && Same(accessors, property.Accessors) && Same(initializer, property.Initializer)
+                    ? member
+                    : Replace(member, property with { IndexerParameters = parameters, Body = body, Accessors = accessors, Initializer = initializer });
             }
             case MethodMember method:
             {
@@ -113,6 +118,17 @@ internal abstract class SyntaxRewriter
             default:
                 return member;
         }
+    }
+
+    public virtual PropertyAccessor VisitPropertyAccessor(PropertyAccessor accessor)
+    {
+        if (accessor.Body is null)
+        {
+            return accessor;
+        }
+
+        MethodBody body = VisitMethodBody(accessor.Body);
+        return Same(body, accessor.Body) ? accessor : Replace(accessor, accessor with { Body = body });
     }
 
     public virtual MethodBody VisitMethodBody(MethodBody body)
@@ -144,7 +160,15 @@ internal abstract class SyntaxRewriter
     }
 
     public virtual ParameterSyntax VisitParameter(ParameterSyntax parameter)
-        => parameter;
+    {
+        if (parameter.DefaultValue is null)
+        {
+            return parameter;
+        }
+
+        Expression defaultValue = VisitExpression(parameter.DefaultValue);
+        return Same(defaultValue, parameter.DefaultValue) ? parameter : Replace(parameter, parameter with { DefaultValue = defaultValue });
+    }
 
     public virtual IReadOnlyList<Statement> VisitStatements(IReadOnlyList<Statement> statements)
         => VisitList(statements, VisitStatement);
@@ -518,7 +542,11 @@ internal abstract class SyntaxRewriter
     public virtual WithAssignment VisitWithAssignment(WithAssignment assignment)
     {
         Expression value = VisitExpression(assignment.Value);
-        return Same(value, assignment.Value) ? assignment : Replace(assignment, assignment with { Value = value });
+        IReadOnlyList<Expression>? indexArguments = assignment.IndexArguments is null ? null : VisitList(assignment.IndexArguments, VisitExpression);
+        IReadOnlyList<Expression>? elementArguments = assignment.ElementArguments is null ? null : VisitList(assignment.ElementArguments, VisitExpression);
+        return Same(value, assignment.Value) && Same(indexArguments, assignment.IndexArguments) && Same(elementArguments, assignment.ElementArguments)
+            ? assignment
+            : Replace(assignment, assignment with { Value = value, IndexArguments = indexArguments, ElementArguments = elementArguments });
     }
 
     public virtual Expression VisitSwitch(SwitchExpression @switch)

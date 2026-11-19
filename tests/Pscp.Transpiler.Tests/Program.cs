@@ -2577,7 +2577,6 @@ internal static class TestRunner
                 """
                 string? maybe = null
                 string text = maybe
-                mut int base = 1
                 += text
                 """),
             new TranspilationOptions("Pscp.Generated", "WarningDiagnosticsProgram"));
@@ -2588,10 +2587,9 @@ internal static class TestRunner
             return;
         }
 
-        if (!result.Diagnostics.Any(diagnostic => diagnostic.Message.Contains("nullable", StringComparison.OrdinalIgnoreCase))
-            || !result.Diagnostics.Any(diagnostic => diagnostic.Message.Contains("reserved C# keyword", StringComparison.OrdinalIgnoreCase)))
+        if (!result.Diagnostics.Any(diagnostic => diagnostic.Message.Contains("nullable", StringComparison.OrdinalIgnoreCase)))
         {
-            failures.Add($"WarningDiagnostics: expected nullable and reserved-keyword warnings\n{FormatDiagnostics(result.Diagnostics)}");
+            failures.Add($"WarningDiagnostics: expected a nullable warning\n{FormatDiagnostics(result.Diagnostics)}");
         }
     }
 

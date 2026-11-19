@@ -53,7 +53,9 @@ public sealed partial class Parser
     private TypeSyntax ParseTypeSyntax(bool allowSizedArrays)
         => TryParseTypeSyntax(allowSizedArrays) ?? new NamedTypeSyntax("object", Immutable.List<TypeSyntax>());
 
-    private TypeSyntax? TryParseTypeSyntax(bool allowSizedArrays)
+    // `stopBeforeSizedDimension` is for `new T[n]`: the type ends before a `[` that holds a length, so the caller
+    // reads the dimensions itself.
+    private TypeSyntax? TryParseTypeSyntax(bool allowSizedArrays, bool stopBeforeSizedDimension = false)
     {
         int savedPosition = _position;
 
@@ -91,6 +93,12 @@ public sealed partial class Parser
 
             if (!allowSizedArrays)
             {
+                if (stopBeforeSizedDimension)
+                {
+                    _position--;
+                    break;
+                }
+
                 _position = savedPosition;
                 return null;
             }

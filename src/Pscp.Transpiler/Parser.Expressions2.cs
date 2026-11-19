@@ -9,6 +9,14 @@ public sealed partial class Parser
 
         if (Current.Kind == TokenKind.OpenBracket)
         {
+            // `new[] { a, b }` is the C# implicitly typed array: the same value as `[a, b]`.
+            if (!autoConstructElements && Peek(1).Kind == TokenKind.CloseBracket && Peek(2).Kind == TokenKind.OpenBrace)
+            {
+                Next();
+                Next();
+                return ParseBracedArrayInitializer();
+            }
+
             List<Expression> dimensions = ParseArrayDimensionList();
             return new TargetTypedNewArrayExpression(dimensions, autoConstructElements);
         }
@@ -27,11 +35,35 @@ public sealed partial class Parser
 
         int typeStart = _position;
         int typeDiagnostics = _diagnostics.Count;
-        TypeSyntax? type = TryParseTypeSyntax(allowSizedArrays: false);
+        TypeSyntax? type = TryParseTypeSyntax(allowSizedArrays: false, stopBeforeSizedDimension: true);
         if (type is not null && Current.Kind == TokenKind.OpenBracket)
         {
-            List<Expression> dimensions = ParseArrayDimensionList();
+            // `new T[n]`, `new T[n][m]` (every row allocated) and `new T[n][]` (rows left null, as in C#).
+            List<Expression> dimensions = [];
+            while (Current.Kind == TokenKind.OpenBracket)
+            {
+                Next();
+                if (Match(TokenKind.CloseBracket))
+                {
+                    type = type is ArrayTypeSyntax rows
+                        ? new ArrayTypeSyntax(rows.ElementType, rows.Depth + 1)
+                        : new ArrayTypeSyntax(type, 1);
+                    continue;
+                }
+
+                dimensions.Add(WithNestedContext(ParseExpression));
+                Expect(TokenKind.CloseBracket, "Expected ']' after array dimension.");
+            }
+
             return new NewArrayExpression(type, dimensions);
+        }
+
+        if (type is ArrayTypeSyntax arrayType && Current.Kind == TokenKind.OpenBrace && !_inStatementHead)
+        {
+            // `new T[] { a, b }`: the collection `[a, b]` with the array type stated.
+            int initializerStart = _position;
+            CollectionExpression elements = Mark(ParseBracedArrayInitializer(), initializerStart);
+            return new CastExpression(arrayType, elements);
         }
 
         if (type is not null && Current.Kind == TokenKind.OpenParen)
@@ -60,6 +92,33 @@ public sealed partial class Parser
         TypeSyntax fallbackType = ParseTypeSyntax(allowSizedArrays: false);
         Expect(TokenKind.OpenParen, "Expected '(' after new expression.");
         return new NewExpression(fallbackType, ParseCallArgumentsTail());
+    }
+
+    // `{ a, b, c }` after `new[]` or `new T[]`: a C# array initializer, read as the elements of a collection.
+    private CollectionExpression ParseBracedArrayInitializer()
+    {
+        Expect(TokenKind.OpenBrace, "Expected '{' to start the array initializer.");
+        List<CollectionElement> elements = WithNestedContext(() =>
+        {
+            List<CollectionElement> parsed = [];
+            SkipSeparators();
+            while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
+            {
+                int elementStart = _position;
+                parsed.Add(Mark(new ExpressionElement(ParseExpression()), elementStart));
+                SkipSeparators();
+                if (!Match(TokenKind.Comma))
+                {
+                    break;
+                }
+
+                SkipSeparators();
+            }
+
+            return parsed;
+        });
+        Expect(TokenKind.CloseBrace, "Expected '}' to close the array initializer.");
+        return new CollectionExpression(elements);
     }
 
     private IReadOnlyList<WithAssignment>? ParseOptionalObjectInitializer()
