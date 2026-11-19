@@ -1,0 +1,21 @@
+// NaN is the smallest value in the default order for every PSCP order operation, constant integer
+// arithmetic wraps like any other, and Stack/Queue/HashSet/SortedSet are valid collection targets.
+let nan = double.NaN
+double[] ds = [1.0, nan, 2.0]
++= (min(1.0, nan), max(1.0, nan), min ds, max ds)
+mut double best = 1.0
++= chmin(ref best, nan)
++= best
++= ds.sort()
+
+let big = 2000000000
++= big + big
++= int.MaxValue + 1
++= int 5000000000L
+
+Stack<int> stack = [1, 2, 3]
+Queue<int> queue = [4, 5]
+SortedSet<string> words = ["b", "B", "a"]
+HashSet<int> unique = [1, 1, 2]
++= (~stack, --queue, unique.Count)
++= words

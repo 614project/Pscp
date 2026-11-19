@@ -1301,6 +1301,7 @@ internal static class TestRunner
         VerifyHoistedValueBlocksAvoidThunks(failures);
         VerifyCodeReviewRegressionShapes(failures);
         VerifyBugReviewRegressions(failures);
+        VerifyCodeReviewDiagnostics(failures);
         VerifyIntrinsicCatalogsAgree(failures);
         await VerifyLanguageServerDiagnosticsAndIntrinsicCompletionAsync(failures);
         await VerifyLanguageServerDotNetCompletionAsync(failures);
@@ -3378,6 +3379,104 @@ internal static class TestRunner
         if (freeFormHelpers.Length > 0)
         {
             failures.Add($"IntrinsicCatalogsAgree: collection helper offered as a free function: {string.Join(", ", freeFormHelpers)}");
+        }
+    }
+
+    // Code that 0.7.0 accepted and then turned into C# that did not compile, or into a silently wrong program:
+    // each case must now be reported in PSCP, with the given code.
+    private static void VerifyCodeReviewDiagnostics(List<string> failures)
+    {
+        (string Name, string Source, string Code, DiagnosticSeverity Severity)[] cases =
+        [
+            ("DiscardedValueInFunction", """
+                bool same(int a, int b) {
+                    if a == b then
+                        false
+                    true
+                }
+                += same(1, 1)
+                """, "PSCP2207", DiagnosticSeverity.Warning),
+            ("DiscardedComparison", """
+                int n = 3
+                n == 3
+                """, "PSCP2207", DiagnosticSeverity.Warning),
+            ("IfExpressionWithoutCommonType", """
+                int idx = 2
+                += if idx >= 0 then idx else "NO"
+                """, "PSCP2600", DiagnosticSeverity.Error),
+            ("ConditionReadAsPattern", """
+                object o = 5
+                if o is int v and v > 0 then += v
+                """, "PSCP1001", DiagnosticSeverity.Error),
+            ("IsInsidePattern", """
+                string? a = null
+                string? b = "x"
+                if a is null or b is null then += "one null"
+                """, "PSCP1001", DiagnosticSeverity.Error),
+            ("IndentedLineAfterInput", """
+                int solve(int a, int b) { a + b }
+                long ans =
+                    solve(1, 2)
+                += ans
+                """, "PSCP1101", DiagnosticSeverity.Warning),
+            ("UntypedGlobalReadByFunction", """
+                let data = Enumerable.Range(0, 5).Select(x => x * 2).ToList()
+                int get(int i) { data[i] }
+                += get(2)
+                """, "PSCP2600", DiagnosticSeverity.Error),
+            ("RedeclarationInOneScope", """
+                let x = 1
+                let x = 2
+                += x
+                """, "PSCP2110", DiagnosticSeverity.Error),
+            ("PatternVariableRedeclared", """
+                object o = 5
+                if o is int v then += v
+                let v = 3
+                += v
+                """, "PSCP2110", DiagnosticSeverity.Error),
+            ("PscpKeywordAsName", """
+                let default = 3
+                += default
+                """, "PSCP2101", DiagnosticSeverity.Error),
+            ("UntypedPipedLambda", """
+                let f = Environment.TickCount
+                += f |> (v => v)
+                """, "PSCP2203", DiagnosticSeverity.Error),
+        ];
+
+        foreach ((string name, string source, string code, DiagnosticSeverity severity) in cases)
+        {
+            TranspilationResult result = PscpTranspiler.Transpile(NormalizeSource(source));
+            if (!result.Diagnostics.Any(diagnostic => diagnostic.EffectiveCode == code && diagnostic.Severity == severity))
+            {
+                failures.Add($"CodeReview_{name}: expected {severity} {code}\nActual:\n{FormatDiagnostics(result.Diagnostics)}");
+            }
+        }
+
+        // A tail value, and a value in a function that returns nothing, are not discarded values.
+        TranspilationResult tail = PscpTranspiler.Transpile(NormalizeSource(
+            """
+            int sign(int v) {
+                if v > 0 then 1 else if v < 0 then -1 else 0
+            }
+            += sign(-3)
+            """));
+        if (tail.Diagnostics.Any(diagnostic => diagnostic.EffectiveCode == "PSCP2207"))
+        {
+            failures.Add($"CodeReview_TailValueIsNotDiscarded: unexpected PSCP2207\n{FormatDiagnostics(tail.Diagnostics)}");
+        }
+
+        // C# keywords that PSCP does not reserve are names; the generated C# escapes them.
+        TranspilationResult keywords = PscpTranspiler.Transpile(NormalizeSource(
+            """
+            let event = 2
+            int fixed(int lock) { lock + 1 }
+            += fixed(event)
+            """));
+        if (!keywords.Success || !keywords.CSharpCode.Contains("@event", StringComparison.Ordinal) || !keywords.CSharpCode.Contains("int @fixed(int @lock)", StringComparison.Ordinal))
+        {
+            failures.Add($"CodeReview_KeywordNamesEscaped: expected @event / @fixed / @lock\n{FormatDiagnostics(keywords.Diagnostics)}\n{keywords.CSharpCode}");
         }
     }
 

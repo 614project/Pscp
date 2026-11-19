@@ -1090,6 +1090,7 @@ public sealed partial class Parser
 
         _ = ParseModifiers();
         bool rawBody = false;
+        bool isInterface = false;
 
         if (Match(TokenKind.Class) || Match(TokenKind.Struct))
         {
@@ -1098,10 +1099,16 @@ public sealed partial class Parser
         {
             _ = Match(TokenKind.Class) || Match(TokenKind.Struct);
         }
-        else if (Current.Kind == TokenKind.Identifier && Current.Text is "interface" or "enum")
+        else if (Current.Kind == TokenKind.Identifier && Current.Text == "enum")
         {
             Next();
             rawBody = true;
+        }
+        else if (Current.Kind == TokenKind.Identifier && Current.Text == "interface")
+        {
+            // Interface members are parsed like other members, so they need no `;` (a method has no body).
+            Next();
+            isInterface = true;
         }
         else
         {
@@ -1147,7 +1154,7 @@ public sealed partial class Parser
             else
             {
                 Next();
-                members = ParseTypeMembers(name);
+                members = ParseTypeMembers(name, isInterface);
             }
 
             Expect(TokenKind.CloseBrace, "Expected '}' after type declaration.");
@@ -1162,7 +1169,7 @@ public sealed partial class Parser
         return true;
     }
 
-    private IReadOnlyList<TypeMember> ParseTypeMembers(string declaringTypeName)
+    private IReadOnlyList<TypeMember> ParseTypeMembers(string declaringTypeName, bool isInterface = false)
     {
         List<TypeMember> members = [];
         SkipSeparators();
@@ -1180,7 +1187,7 @@ public sealed partial class Parser
                 {
                     members.Add(new NestedTypeMember(nestedType!));
                 }
-                else if (TryParseTypeMember(declaringTypeName, members))
+                else if (TryParseTypeMember(declaringTypeName, members, isInterface))
                 {
                 }
                 else
@@ -1221,7 +1228,7 @@ public sealed partial class Parser
         return true;
     }
 
-    private bool TryParseTypeMember(string declaringTypeName, List<TypeMember> members)
+    private bool TryParseTypeMember(string declaringTypeName, List<TypeMember> members, bool isInterface = false)
     {
         int savedPosition = _position;
         int savedDiagnostics = _diagnostics.Count;
@@ -1334,8 +1341,8 @@ public sealed partial class Parser
                     constraintText = TokensToText(constraintStart, _position);
                 }
 
-                // `abstract` and `extern` methods have no body.
-                bool bodiless = modifiers.Any(modifier => modifier is "abstract" or "extern")
+                // `abstract` and `extern` methods, and interface methods without a default body, have no body.
+                bool bodiless = (isInterface || modifiers.Any(modifier => modifier is "abstract" or "extern"))
                     && NextNonNewLineKind(0) is not (TokenKind.OpenBrace or TokenKind.FatArrow);
                 MethodBody body;
                 if (bodiless)
