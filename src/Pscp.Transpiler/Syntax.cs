@@ -466,7 +466,11 @@ public sealed record IdentifierExpression(string Name) : Expression;
 
 public sealed record DiscardExpression() : Expression;
 
-public sealed record TupleExpression(IReadOnlyList<Expression> Elements) : Expression;
+// `(name: "a", age: 3)` keeps its element names in `ElementNames`.
+public sealed record TupleExpression(IReadOnlyList<Expression> Elements) : Expression
+{
+    public IReadOnlyList<string?>? ElementNames { get; init; }
+}
 
 public sealed record BlockExpression(BlockStatement Block) : Expression;
 
@@ -644,8 +648,11 @@ public sealed record NamedTypeSyntax(string Name, IReadOnlyList<TypeSyntax> Type
         => HashCode.Combine(Name, TypeTextEquality.SequenceHash(TypeArguments));
 }
 
+// `ElementNames` (`(int lo, int hi)`) do not take part in equality: C# tuple names do not change the type.
 public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax
 {
+    public IReadOnlyList<string?>? ElementNames { get; init; }
+
     public bool Equals(TupleTypeSyntax? other)
         => other is not null && TypeTextEquality.SequenceEquals(Elements, other.Elements);
 

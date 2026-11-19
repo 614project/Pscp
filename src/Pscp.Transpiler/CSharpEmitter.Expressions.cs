@@ -15,7 +15,7 @@ internal sealed partial class CSharpEmitter
             InterpolatedStringExpression interpolated => EmitInterpolatedStringExpression(interpolated),
             IdentifierExpression identifier => EmitIdentifierExpression(identifier),
             DiscardExpression => "_",
-            TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitExpression(element)))})",
+            TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select((element, index) => TupleElementNamePrefix(tuple.ElementNames, index) + EmitExpression(element)))})",
             BlockExpression block => EmitBlockExpression(block.Block),
             IfExpression ifExpression => $"({EmitExpression(ifExpression.Condition)} ? {EmitExpression(ifExpression.ThenExpression)} : {EmitExpression(ifExpression.ElseExpression)})",
             ConditionalExpression conditional => $"({EmitExpression(conditional.Condition)} ? {EmitExpression(conditional.WhenTrue)} : {EmitExpression(conditional.WhenFalse)})",
@@ -274,6 +274,14 @@ internal sealed partial class CSharpEmitter
 
     private string EmitCallExpression(CallExpression call, TypeSyntax? targetTypeHint)
     {
+        // `x |> (v => e)`: a lambda is invoked through its delegate type, `((Func<int, int>)(v => e))(x)`.
+        if (call.Pipe == PipeKind.Delegate
+            && call.Callee is LambdaExpression pipedLambda
+            && _semantic?.GetExpressionType(pipedLambda) is NamedTypeSyntax delegateType)
+        {
+            return $"(({EmitType(delegateType)})({EmitLambdaExpression(pipedLambda)}))({string.Join(", ", call.Arguments.Select(EmitArgument))})";
+        }
+
         if (call.Callee is MemberAccessExpression stdoutMember
             && stdoutMember.Receiver is IdentifierExpression { Name: PscpBinder.StdoutName }
             && TryEmitExplicitStdoutCall(stdoutMember.MemberName, call.Arguments) is string stdoutCall)
@@ -1033,6 +1041,15 @@ internal sealed partial class CSharpEmitter
             };
         }
 
+        // Spec §16.1: `HashSet<T>`, `SortedSet<T>`, `Queue<T>` and `Stack<T>` targets are built from the elements in
+        // order (so the last element is the top of a stack); a sorted set uses the default order.
+        if (normalizedTargetType is NamedTypeSyntax wrapped && IsSequenceConstructedTarget(wrapped) && elementHint is not null)
+        {
+            string elements = EmitCollectionExpression(collection, new ArrayTypeSyntax(elementHint, 1));
+            string comparer = EmitAutoConstructComparer(wrapped) is string ordered ? ", " + ordered : string.Empty;
+            return $"new {EmitType(wrapped)}({elements}{comparer})";
+        }
+
         if (collection.Elements.All(element => element is ExpressionElement))
         {
             return EmitSimpleCollectionExpression(collection, normalizedTargetType, elementHint);
@@ -1134,7 +1151,7 @@ internal sealed partial class CSharpEmitter
         return lambda.Body switch
         {
             LambdaExpressionBody expressionBody => $"{parameters} => {EmitExpression(expressionBody.Expression)}",
-            LambdaBlockBody blockBody => $"{parameters} => {{ {WithReturnType(null, () => EmitInlineBlock(blockBody.Block, isVoidLike: !LambdaBlockReturnsValue(blockBody.Block)))} }}",
+            LambdaBlockBody blockBody => $"{parameters} => {{ {WithReturnType(null, () => EmitInlineBlock(blockBody.Block, isVoidLike: _semantic?.IsActionLambda(lambda) == true || !LambdaBlockReturnsValue(blockBody.Block)))} }}",
             _ => $"{parameters} => default!"
         };
     }
@@ -1600,12 +1617,18 @@ internal sealed partial class CSharpEmitter
             NamedTypeSyntax named => named.TypeArguments.Count == 0
                 ? named.Name
                 : $"{named.Name}<{string.Join(", ", named.TypeArguments.Select(argument => EmitType(argument)))}>",
-            TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitType(element)))})",
+            TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select((element, index) => EmitType(element) + TupleElementNameSuffix(tuple.ElementNames, index)))})",
             ArrayTypeSyntax array => $"{EmitType(array.ElementType)}{string.Concat(Enumerable.Repeat("[]", array.Depth))}",
             NullableTypeSyntax nullable => $"{EmitType(nullable.InnerType)}?",
             SizedArrayTypeSyntax sized => EmitType(new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count)),
             _ => "object"
         };
+
+    private static string TupleElementNamePrefix(IReadOnlyList<string?>? names, int index)
+        => names is not null && index < names.Count && names[index] is string name ? EscapeName(name) + ": " : string.Empty;
+
+    private static string TupleElementNameSuffix(IReadOnlyList<string?>? names, int index)
+        => names is not null && index < names.Count && names[index] is string name ? " " + EscapeName(name) : string.Empty;
 
     private string EmitEnumerable(Expression expression)
         => expression is RangeExpression range ? EmitRangeEnumerable(range, null) : EmitExpression(expression);
@@ -2119,6 +2142,13 @@ internal sealed partial class CSharpEmitter
 
     private static bool IsLinkedListType(NamedTypeSyntax named)
         => named.Name is "LinkedList" or "System.Collections.Generic.LinkedList";
+
+    private static bool IsSequenceConstructedTarget(NamedTypeSyntax named)
+        => named.TypeArguments.Count == 1
+            && named.Name is "HashSet" or "System.Collections.Generic.HashSet"
+                or "SortedSet" or "System.Collections.Generic.SortedSet"
+                or "Queue" or "System.Collections.Generic.Queue"
+                or "Stack" or "System.Collections.Generic.Stack";
 
     private static bool IsKnownAutoConstructType(NamedTypeSyntax named)
         => named.Name is "List" or "System.Collections.Generic.List"

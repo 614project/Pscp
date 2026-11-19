@@ -49,6 +49,13 @@ internal sealed class SemanticAnalysisResult
 
     public IReadOnlyDictionary<IdentifierExpression, string> ReferenceRenames { get; init; } = new Dictionary<IdentifierExpression, string>(ReferenceEqualityComparer.Instance);
 
+    // Block lambdas whose target delegate returns nothing (`Action<T>`, `List<T>.ForEach`): their last
+    // statement is not returned (spec §10.6).
+    public IReadOnlySet<LambdaExpression> ActionLambdas { get; init; } = new HashSet<LambdaExpression>(ReferenceEqualityComparer.Instance);
+
+    public bool IsActionLambda(LambdaExpression lambda)
+        => ActionLambdas.Contains(lambda);
+
     public string? GetLocalRename(NameTarget target)
         => LocalRenames.TryGetValue(target, out string? name) ? name : null;
 
@@ -89,6 +96,7 @@ internal static class PscpSemanticAnalyzer
             MutatedImmutableFields = analyzer.MutatedImmutableFields,
             KeywordNamedReferences = analyzer.KeywordNamedReferences,
             LocalRenames = analyzer.LocalRenames,
+            ActionLambdas = analyzer.ActionLambdas,
             ReferenceRenames = analyzer.ReferenceRenames,
         };
     }
@@ -229,12 +237,65 @@ internal static class PscpSemanticAnalyzer
 
         public Dictionary<NameTarget, string> LocalRenames { get; } = new(ReferenceEqualityComparer.Instance);
 
+        public HashSet<LambdaExpression> ActionLambdas { get; } = new(ReferenceEqualityComparer.Instance);
+
+        private static bool IsActionType(TypeSyntax? type)
+            => type is NamedTypeSyntax { Name: "Action" or "System.Action" };
+
+        private void NoteActionTarget(Expression? value, TypeSyntax? targetType)
+        {
+            if (value is LambdaExpression lambda && IsActionType(targetType))
+            {
+                ActionLambdas.Add(lambda);
+            }
+        }
+
+        // Top-level names read inside top-level functions: they become fields of the program class (§7.5).
+        private readonly HashSet<string> _globalsReadByFunctions = new(StringComparer.Ordinal);
+        private int _topLevelFunctionDepth;
+
         public Dictionary<IdentifierExpression, string> ReferenceRenames { get; } = new(ReferenceEqualityComparer.Instance);
 
         private int _renameCounter;
 
+        // Spec §7.5: a top-level variable that a function reads is a field of the program class, and a C# field
+        // needs a type. A `let` whose value comes from .NET code the analyzer cannot type must state its type.
+        private void CheckHoistedGlobalTypes(PscpProgram program)
+        {
+            foreach (DeclarationStatement declaration in program.GlobalStatements.OfType<DeclarationStatement>())
+            {
+                if (declaration.ExplicitType is not null || declaration.IsInputShorthand || declaration.Initializer is null)
+                {
+                    continue;
+                }
+
+                TypeSyntax? type = GetType(declaration.Initializer);
+                bool known = type is not null && !IsUnknownLike(type) && type is not NamedTypeSyntax { Name: "void" };
+                foreach ((string name, _) in EnumerateNamedBindings(declaration))
+                {
+                    if (_globalsReadByFunctions.Contains(name) && (!known || (declaration.Targets.Count > 1 && type is not TupleTypeSyntax)))
+                    {
+                        Error(
+                            DiagnosticCodes.SurfaceTypeError,
+                            $"`{name}` is used inside a function, so it is stored in a field of the program class, and its type is not known here (the value comes from .NET code). Declare the type: `T {name} = ...`.",
+                            _spans.Get(declaration));
+                        break;
+                    }
+                }
+            }
+        }
+
         private void NoteReference(IdentifierExpression identifier, Symbol symbol)
         {
+            if (_topLevelFunctionDepth > 0
+                && symbol.Kind == SymbolKind.Field
+                && symbol.OwnerType is null
+                && _global.TryResolveValue(identifier.Name, out Symbol? global)
+                && ReferenceEquals(global, symbol))
+            {
+                _globalsReadByFunctions.Add(identifier.Name);
+            }
+
             if (symbol.EmittedName is not null)
             {
                 ReferenceRenames[identifier] = symbol.EmittedName;
@@ -388,8 +449,11 @@ internal static class PscpSemanticAnalyzer
         public void Analyze(PscpProgram program)
         {
             foreach (TypeDeclaration type in program.Types) AnalyzeType(type, _global);
+            _topLevelFunctionDepth++;
             foreach (FunctionDeclaration function in program.Functions) AnalyzeFunction(function, _global);
+            _topLevelFunctionDepth--;
             AnalyzeStatements(program.GlobalStatements, _global);
+            CheckHoistedGlobalTypes(program);
             foreach ((TypeDeclaration declaration, HashSet<string> constructorAssigned) in _pendingFieldChecks)
             {
                 ReportUnassignedImmutableFields(declaration, constructorAssigned);
@@ -753,6 +817,11 @@ internal static class PscpSemanticAnalyzer
                         _statementAssignments.Add(statementAssignment);
                     }
 
+                    if (expressionStatement.Expression is IfExpression statementIf)
+                    {
+                        _statementConditionals.Add(statementIf);
+                    }
+
                     AnalyzeExpression(expressionStatement.Expression, scope);
                     CheckExpressionStatement(expressionStatement);
                     break;
@@ -861,6 +930,18 @@ internal static class PscpSemanticAnalyzer
                         "This statement computes a value and discards it. A line that starts with `+` or `-` begins a new statement; to continue the previous line, end that line with the operator.",
                         _spans.Get(expression)));
                     break;
+                case not null when IsPureValue(expression):
+                {
+                    string hint = _currentReturnType is not null && !IsNamed(_currentReturnType, "void")
+                        ? " Only the last statement of a function returns its value; to return it here, write `return` before it."
+                        : string.Empty;
+                    _discardedValueWarnings.Add((
+                        statement,
+                        DiagnosticCodes.UnusedUnaryStatement,
+                        $"This statement computes a value and discards it.{hint}",
+                        _spans.Get(expression)));
+                    break;
+                }
                 case CallExpression { Callee: MemberAccessExpression member } call
                     when IsIntrinsicCallNode(call)
                         && PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName) is "sort" or "sortBy" or "sortWith" or "distinct" or "reverse" or "copy" or "map" or "filter" or "scan":
@@ -881,6 +962,17 @@ internal static class PscpSemanticAnalyzer
         }
 
         private bool IsIntrinsicCallNode(CallExpression call) => IntrinsicCalls.Contains(call);
+
+        // An expression whose only effect is its value: discarding it is a mistake (spec §4.3).
+        private static bool IsPureValue(Expression expression)
+            => expression switch
+            {
+                LiteralExpression or IdentifierExpression or TupleExpression or IsPatternExpression or RangeExpression or TupleProjectionExpression => true,
+                BinaryExpression binary => binary.Operator is not (BinaryOperator.PipeLeft or BinaryOperator.PipeRight),
+                ConditionalExpression conditional => IsPureValue(conditional.WhenTrue) && IsPureValue(conditional.WhenFalse),
+                IfExpression ifExpression => IsPureValue(ifExpression.ThenExpression) && IsPureValue(ifExpression.ElseExpression),
+                _ => false,
+            };
 
         private void AnalyzeDeclaration(DeclarationStatement declaration, Scope scope)
         {
@@ -912,6 +1004,7 @@ internal static class PscpSemanticAnalyzer
 
             if (declaration.Initializer is not null)
             {
+                NoteActionTarget(declaration.Initializer, explicitType);
                 TypeSyntax? initializerType = AnalyzeExpression(declaration.Initializer, scope, explicitType);
                 if (explicitType is not null)
                 {
@@ -1173,10 +1266,10 @@ internal static class PscpSemanticAnalyzer
                 LiteralExpression literal => LiteralType(literal),
                 InterpolatedStringExpression interpolated => AnalyzeInterpolatedString(interpolated, scope),
                 IdentifierExpression identifier => AnalyzeIdentifier(identifier, scope),
-                TupleExpression tuple => new TupleTypeSyntax(tuple.Elements.Select(e => AnalyzeExpression(e, scope) ?? TypeName("object")).ToArray()),
+                TupleExpression tuple => new TupleTypeSyntax(tuple.Elements.Select(e => AnalyzeExpression(e, scope) ?? TypeName("object")).ToArray()) { ElementNames = tuple.ElementNames },
                 BlockExpression block => AnalyzeBlockLike(block.Block, scope),
-                IfExpression ifExpression => Merge(AnalyzeExpression(ifExpression.ThenExpression, scope), AnalyzeExpression(ifExpression.ElseExpression, scope)),
-                ConditionalExpression conditional => Merge(AnalyzeExpression(conditional.WhenTrue, scope), AnalyzeExpression(conditional.WhenFalse, scope)),
+                IfExpression ifExpression => AnalyzeBranches(ifExpression, ifExpression.Condition, ifExpression.ThenExpression, ifExpression.ElseExpression, scope),
+                ConditionalExpression conditional => AnalyzeBranches(conditional, conditional.Condition, conditional.WhenTrue, conditional.WhenFalse, scope),
                 UnaryExpression unary => AnalyzeUnaryExpression(unary, scope),
                 AssignmentExpression assignment => AnalyzeAssignmentExpression(assignment, scope),
                 PrefixExpression prefix => AnalyzePrefixExpression(prefix, scope),
@@ -1205,6 +1298,33 @@ internal static class PscpSemanticAnalyzer
             ExpressionTypes[expression] = type;
             return type;
         }
+
+        // `if c then a else b` used as a value needs a common type of the branches (spec §12.1). An `if` written
+        // as a statement is control flow and is exempt.
+        private readonly HashSet<Expression> _statementConditionals = new(ReferenceEqualityComparer.Instance);
+
+        private TypeSyntax? AnalyzeBranches(Expression expression, Expression condition, Expression whenTrue, Expression whenFalse, Scope scope)
+        {
+            AnalyzeExpression(condition, scope);
+            TypeSyntax? trueType = AnalyzeExpression(whenTrue, scope);
+            TypeSyntax? falseType = AnalyzeExpression(whenFalse, scope);
+            if (!_statementConditionals.Contains(expression)
+                && IsSimpleScalarType(trueType)
+                && IsSimpleScalarType(falseType)
+                && !Equals(trueType, falseType)
+                && Promote(trueType, falseType) is null)
+            {
+                Error(
+                    DiagnosticCodes.SurfaceTypeError,
+                    $"The branches of this conditional have no common type (`{DisplayType(trueType)}` and `{DisplayType(falseType)}`). Convert one of them, for example with `string x`.",
+                    _spans.Get(expression));
+            }
+
+            return Merge(trueType, falseType);
+        }
+
+        private static bool IsSimpleScalarType(TypeSyntax? type)
+            => type is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "double" or "decimal" or "bool" or "char" or "string" };
 
         private TypeSyntax? AnalyzeIdentifier(IdentifierExpression identifier, Scope scope)
         {
@@ -1280,6 +1400,7 @@ internal static class PscpSemanticAnalyzer
         {
             TypeSyntax? targetType = GetType(assignment.Target) ?? InferAssignmentTargetType(assignment.Target, scope);
             bool knownRewrite = IsKnownDataStructureMutationTarget(targetType, assignment.Operator);
+            NoteActionTarget(assignment.Value, targetType);
             AnalyzeAssignmentTarget(assignment.Target, scope, knownRewrite);
             TypeSyntax? valueType = AnalyzeExpression(assignment.Value, scope, knownRewrite ? null : Normalize(targetType));
             WarnIfNullabilityMismatch(assignment.Value, Normalize(targetType), _spans.Get(assignment.Value));
@@ -1590,6 +1711,18 @@ internal static class PscpSemanticAnalyzer
 
         private TypeSyntax? AnalyzeCall(CallExpression call, Scope scope)
         {
+            // `xs.ForEach(x => { ... })` and `Array.ForEach(xs, x => { ... })` take an `Action<T>`.
+            if (call.Callee is MemberAccessExpression { MemberName: "ForEach" })
+            {
+                foreach (ArgumentSyntax argument in call.Arguments)
+                {
+                    if (argument is ExpressionArgumentSyntax { Expression: LambdaExpression actionLambda })
+                    {
+                        ActionLambdas.Add(actionLambda);
+                    }
+                }
+            }
+
             foreach (ArgumentSyntax argument in call.Arguments)
             {
                 if (argument is ExpressionArgumentSyntax { Modifier: ArgumentModifier.Ref or ArgumentModifier.Out } byReference)
@@ -1605,8 +1738,23 @@ internal static class PscpSemanticAnalyzer
 
             if (call.Pipe == PipeKind.Delegate && call.Callee is LambdaExpression pipedLambda && call.Arguments.Count == 1 && call.Arguments[0] is ExpressionArgumentSyntax pipedValue)
             {
+                // `x |> (v => e)` invokes the lambda, which C# can only do through a delegate type.
                 TypeSyntax? valueType = AnalyzeExpression(pipedValue.Expression, scope);
-                return AnalyzeLambdaWithParameterTypes(pipedLambda, scope, [valueType]);
+                TypeSyntax? parameterType = pipedLambda.Parameters.Count == 1 ? Normalize(pipedLambda.Parameters[0].Type) ?? valueType : null;
+                TypeSyntax? resultType = AnalyzeLambdaWithParameterTypes(pipedLambda, scope, [valueType]);
+                if (parameterType is null || resultType is null || IsUnknownLike(parameterType) || IsUnknownLike(resultType))
+                {
+                    Error(
+                        DiagnosticCodes.NotCallable,
+                        "The types of this piped lambda are not known, so it cannot be invoked. Write the parameter type (`x |> ((int v) => ...)`) or call a named function.",
+                        _spans.Get(pipedLambda));
+                    return null;
+                }
+
+                ExpressionTypes[pipedLambda] = IsNamed(resultType, "void")
+                    ? new NamedTypeSyntax("Action", Immutable.List(parameterType))
+                    : new NamedTypeSyntax("Func", Immutable.List(parameterType, resultType));
+                return resultType;
             }
 
             TypeSyntax? calleeType = AnalyzeExpression(call.Callee, scope);
@@ -2452,6 +2600,16 @@ internal static class PscpSemanticAnalyzer
                 return TypeName("int");
             }
 
+            // `(int lo, int hi) r`: `r.hi` names an element.
+            if (effectiveReceiverType is TupleTypeSyntax { ElementNames: { } elementNames } namedTuple)
+            {
+                int position = elementNames.Select((elementName, index) => elementName == memberName ? index : -1).FirstOrDefault(index => index >= 0, -1);
+                if (position >= 0 && position < namedTuple.Elements.Count)
+                {
+                    return namedTuple.Elements[position];
+                }
+            }
+
             if (effectiveReceiverType is NamedTypeSyntax named
                 && memberName == "Count"
                 && named.Name is "List" or "LinkedList" or "Queue" or "Stack" or "HashSet" or "Dictionary" or "PriorityQueue" or "SortedSet" or "SortedDictionary")
@@ -2938,6 +3096,13 @@ internal static class PscpSemanticAnalyzer
                         return;
                     }
 
+                    if (expression is IfExpression tailIf)
+                    {
+                        CheckTailValue(name, returnType, StatementFor(tailIf.ThenExpression), declarationSpan);
+                        CheckTailValue(name, returnType, StatementFor(tailIf.ElseExpression), declarationSpan);
+                        return;
+                    }
+
                     TypeSyntax? tailType = GetType(expression);
                     if (IsNamed(tailType, "void"))
                     {
@@ -3008,6 +3173,13 @@ internal static class PscpSemanticAnalyzer
                         span);
                     return;
             }
+        }
+
+        private ExpressionStatement StatementFor(Expression expression)
+        {
+            ExpressionStatement statement = new(expression, false);
+            _spans.Copy(expression, statement);
+            return statement;
         }
 
         // The statement never completes normally: every path ends in `return` or `throw`.

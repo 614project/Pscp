@@ -833,6 +833,7 @@ public sealed partial class Parser
 
                 declarations = [Mark(new DeclarationStatement(mutability, explicitType, targets, null, true), savedPosition)];
                 TryConsumeSemicolon();
+                WarnIfIndentedLineFollowsInput(savedPosition, equalToken);
                 return true;
             }
 
@@ -880,6 +881,50 @@ public sealed partial class Parser
         declarations = [Mark(new DeclarationStatement(mutability, explicitType, targets, null, false), savedPosition)];
         TryConsumeSemicolon();
         return true;
+    }
+
+    // Spec §4.3: `long ans =` at the end of a line reads input. A more indented line right after it looks like the
+    // intended value, but it is a separate statement, so the input is read and the value is lost.
+    private void WarnIfIndentedLineFollowsInput(int declarationStart, Token equalToken)
+    {
+        if (Current.Kind != TokenKind.NewLine)
+        {
+            return;
+        }
+
+        int next = _position;
+        while (next < _tokens.Count && _tokens[next].Kind == TokenKind.NewLine)
+        {
+            next++;
+        }
+
+        if (next >= _tokens.Count
+            || _tokens[next].Kind is TokenKind.EndOfFile or TokenKind.CloseBrace
+            || next - _position > 1
+            || ColumnOf(next) <= ColumnOf(declarationStart))
+        {
+            return;
+        }
+
+        AddDiagnostic(
+            DiagnosticCodes.TrailingAssignment,
+            "A declaration that ends with `=` reads its value from input. The indented line below is a separate statement, not the value; to assign a value, write it on the same line as `=`.",
+            equalToken.Span,
+            DiagnosticSeverity.Warning);
+    }
+
+    // Column of a token: its distance from the start of its line.
+    private int ColumnOf(int tokenIndex)
+    {
+        for (int i = tokenIndex - 1; i >= 0; i--)
+        {
+            if (_tokens[i].Kind == TokenKind.NewLine)
+            {
+                return _tokens[tokenIndex].Position - (_tokens[i].Position + _tokens[i].Text.Length);
+            }
+        }
+
+        return _tokens[tokenIndex].Position;
     }
 
     private static string DescribeTargets(IReadOnlyList<BindingTarget> targets)

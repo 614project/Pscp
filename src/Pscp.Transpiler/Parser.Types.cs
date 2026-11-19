@@ -139,36 +139,33 @@ public sealed partial class Parser
             return null;
         }
 
+        // Elements may be named, as in C#: `(int lo, int hi)`.
         List<TypeSyntax> elements = [];
-        TypeSyntax? first = TryParseTypeSyntax(allowSizedArrays: false);
-        if (first is null)
-        {
-            _position = savedPosition;
-            return null;
-        }
-
-        elements.Add(first);
-        if (!Match(TokenKind.Comma))
-        {
-            _position = savedPosition;
-            return null;
-        }
-
+        List<string?> names = [];
         do
         {
-            TypeSyntax? next = TryParseTypeSyntax(allowSizedArrays: false);
-            if (next is null)
+            TypeSyntax? element = TryParseTypeSyntax(allowSizedArrays: false);
+            if (element is null)
             {
                 _position = savedPosition;
                 return null;
             }
 
-            elements.Add(next);
+            elements.Add(element);
+            names.Add(Current.Kind == TokenKind.Identifier && Peek(1).Kind is TokenKind.Comma or TokenKind.CloseParen ? Next().Text : null);
         }
         while (Match(TokenKind.Comma));
 
-        Expect(TokenKind.CloseParen, "Expected ')' after tuple type.");
-        return new TupleTypeSyntax(elements);
+        if (elements.Count < 2 || Current.Kind != TokenKind.CloseParen)
+        {
+            _position = savedPosition;
+            return null;
+        }
+
+        Next();
+        return names.Any(name => name is not null)
+            ? new TupleTypeSyntax(elements) { ElementNames = names }
+            : new TupleTypeSyntax(elements);
     }
 
     private IReadOnlyList<TypeSyntax> ParseOptionalTypeArguments()

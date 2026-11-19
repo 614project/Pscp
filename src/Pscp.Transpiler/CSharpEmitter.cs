@@ -529,6 +529,14 @@ internal sealed partial class CSharpEmitter
         _writer.WriteLine(emittedHeader);
         _writer.WriteLine("{");
         _writer.Indent();
+        if (NeedsStructInitializingConstructor(declaration))
+        {
+            // C# 10 requires a declared constructor in a struct with field initializers (CS8983). `new T()` runs
+            // the initializers, so auto-constructed collection fields exist after `new()` (§28.2).
+            _writer.WriteLine($"public {declaration.Name}() {{ }}");
+            _writer.WriteLine();
+        }
+
         foreach (TypeMember member in declaration.Members)
         {
             EmitTypeMember(member);
@@ -536,6 +544,27 @@ internal sealed partial class CSharpEmitter
         _writer.Unindent();
         _writer.WriteLine("}");
         _currentTypeStack.Pop();
+    }
+
+    private static bool NeedsStructInitializingConstructor(TypeDeclaration declaration)
+    {
+        if (!IsValueTypeDeclaration(declaration.HeaderText)
+            || declaration.HeaderText.Contains('(')
+            || declaration.Members.OfType<MethodMember>().Any(method => method.IsConstructor))
+        {
+            return false;
+        }
+
+        return declaration.Members.Any(member => member switch
+        {
+            FieldMember field => !field.Modifiers.Contains("static", StringComparer.Ordinal)
+                && !field.Modifiers.Contains("const", StringComparer.Ordinal)
+                && (field.Declaration.Initializer is not null
+                    || field.Declaration.ExplicitType is SizedArrayTypeSyntax
+                    || field.Declaration.ExplicitType is NamedTypeSyntax named && IsKnownAutoConstructType(named)),
+            PropertyMember property => property.Initializer is not null && !property.Modifiers.Contains("static", StringComparer.Ordinal),
+            _ => false,
+        });
     }
 
     private static bool HasAccessModifier(string header)
@@ -1957,6 +1986,11 @@ internal sealed partial class CSharpEmitter
                     return true;
                 }
             }
+        }
+
+        if (declaredType is NamedTypeSyntax sequenceTarget && IsSequenceConstructedTarget(sequenceTarget))
+        {
+            return false;
         }
 
         bool isList = declaredType is NamedTypeSyntax named && IsListType(named);

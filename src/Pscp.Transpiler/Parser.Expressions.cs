@@ -995,7 +995,45 @@ public sealed partial class Parser
             SimpleType = TryGetSimplePatternType(start, end),
         };
         Mark(pattern, start);
+        ReportConditionReadAsPattern(start, end, pattern);
         return pattern;
+    }
+
+    // Spec §13.9: in a pattern `and` / `or` / `not` combine patterns, so `x is int v and v > 0` and
+    // `a is null or b is null` read the condition after them as part of the pattern, which is not a valid C#
+    // pattern. Report it instead of generating C# that does not compile.
+    private void ReportConditionReadAsPattern(int start, int end, PatternSyntax pattern)
+    {
+        int depth = 0;
+        for (int i = start; i < end; i++)
+        {
+            TokenKind kind = _tokens[i].Kind;
+            if (kind is TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace)
+            {
+                depth++;
+                continue;
+            }
+
+            if (kind is TokenKind.CloseParen or TokenKind.CloseBracket or TokenKind.CloseBrace)
+            {
+                depth--;
+                continue;
+            }
+
+            bool comparisonAfterCombinator = kind is TokenKind.And or TokenKind.Or
+                && i + 2 < end
+                && _tokens[i + 1].Kind == TokenKind.Identifier
+                && (_tokens[i + 2].Kind is TokenKind.GreaterThan or TokenKind.GreaterEqual or TokenKind.LessEqual
+                    || (_tokens[i + 2].Kind == TokenKind.LessThan && i + 3 < end && _tokens[i + 3].Kind is TokenKind.IntegerLiteral or TokenKind.FloatLiteral or TokenKind.Minus));
+            if (depth == 0 && (kind == TokenKind.Is || comparisonAfterCombinator))
+            {
+                AddDiagnostic(
+                    DiagnosticCodes.Syntax,
+                    "In a pattern, `and` / `or` / `not` combine patterns, so the condition after them is read as part of the pattern. Combine conditions with `&&` / `||`, or put the `is` test in parentheses: `(x is int v) and v > 0`.",
+                    _spans.Get(pattern));
+                return;
+            }
+        }
     }
 
     // The pattern is exactly a type, optionally followed by a designation: `int`, `int v`, `List<int> xs`.
@@ -1294,32 +1332,56 @@ public sealed partial class Parser
                 return ParseForGeneratorExpression();
             }
 
+            string? firstName = TryParseTupleElementName();
             Expression first = ParseExpression();
-            if (Match(TokenKind.Arrow))
+            if (firstName is null && Match(TokenKind.Arrow))
             {
                 return ParseArrowGeneratorExpression(first);
             }
 
             if (!Match(TokenKind.Comma))
             {
+                if (firstName is not null)
+                {
+                    AddDiagnostic(DiagnosticCodes.Syntax, "A named tuple element needs at least one more element: `(a: 1, b: 2)`.", Current.Span);
+                }
+
                 return first;
             }
 
             List<Expression> elements = [first];
+            List<string?> names = [firstName];
             do
             {
                 SkipSeparators();
+                names.Add(TryParseTupleElementName());
                 elements.Add(ParseExpression());
                 SkipSeparators();
             }
             while (Match(TokenKind.Comma));
 
-            return new TupleExpression(elements);
+            return names.Any(name => name is not null)
+                ? new TupleExpression(elements) { ElementNames = names }
+                : new TupleExpression(elements);
         });
 
         SkipSeparators();
         Expect(TokenKind.CloseParen, result is TupleExpression ? "Expected ')' after tuple expression." : "Expected ')' after parenthesized expression.");
         return result;
+    }
+
+    // `name:` before a tuple element (`(lo: 1, hi: 5)`).
+    private string? TryParseTupleElementName()
+    {
+        if (Current.Kind == TokenKind.Identifier && Peek(1).Kind == TokenKind.Colon && Current.Text != "_")
+        {
+            string name = Next().Text;
+            Next();
+            SkipSeparators();
+            return name;
+        }
+
+        return null;
     }
 
     private GeneratorExpression ParseArrowGeneratorExpression(Expression source)
@@ -1567,8 +1629,9 @@ public sealed partial class Parser
             {
                 depth--;
             }
-            else if (depth == 0 && ch == ',' && alignmentStart < 0)
+            else if (depth == 0 && ch == ',' && alignmentStart < 0 && IsAlignmentClause(hole, i + 1))
             {
+                // A comma inside type arguments (`new KeyValuePair<int, double>(...)`) is not the alignment.
                 alignmentStart = i;
             }
             else if (depth == 0 && ch == ':' && !(i + 1 < hole.Length && hole[i + 1] == '='))
@@ -1582,6 +1645,18 @@ public sealed partial class Parser
         return alignmentStart >= 0
             ? (alignmentStart, hole[(alignmentStart + 1)..].Trim(), null)
             : (hole.Length, null, null);
+    }
+
+    // `,5`, `,-10` or `,width` up to the format `:` or the end of the hole.
+    private static bool IsAlignmentClause(string hole, int start)
+    {
+        int end = start;
+        while (end < hole.Length && hole[end] != ':')
+        {
+            end++;
+        }
+
+        return System.Text.RegularExpressions.Regex.IsMatch(hole[start..end], @"^\s*[-+]?\s*[A-Za-z0-9_.]+\s*$");
     }
 
     private Expression ParseInterpolatedHoleExpression(string expressionText, int sourceOffset)
