@@ -907,7 +907,7 @@ public sealed partial class Parser
         }
 
         AddDiagnostic(
-            DiagnosticCodes.TrailingAssignment,
+            DiagnosticCodes.IndentedLineAfterInput,
             "A declaration that ends with `=` reads its value from input. The indented line below is a separate statement, not the value; to assign a value, write it on the same line as `=`.",
             equalToken.Span,
             DiagnosticSeverity.Warning);

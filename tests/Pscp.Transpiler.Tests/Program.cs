@@ -3407,18 +3407,18 @@ internal static class TestRunner
             ("ConditionReadAsPattern", """
                 object o = 5
                 if o is int v and v > 0 then += v
-                """, "PSCP1001", DiagnosticSeverity.Error),
+                """, "PSCP1107", DiagnosticSeverity.Error),
             ("IsInsidePattern", """
                 string? a = null
                 string? b = "x"
                 if a is null or b is null then += "one null"
-                """, "PSCP1001", DiagnosticSeverity.Error),
+                """, "PSCP1107", DiagnosticSeverity.Error),
             ("IndentedLineAfterInput", """
                 int solve(int a, int b) { a + b }
                 long ans =
                     solve(1, 2)
                 += ans
-                """, "PSCP1101", DiagnosticSeverity.Warning),
+                """, "PSCP1106", DiagnosticSeverity.Warning),
             ("UntypedGlobalReadByFunction", """
                 let data = Enumerable.Range(0, 5).Select(x => x * 2).ToList()
                 int get(int i) { data[i] }

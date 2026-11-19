@@ -1028,7 +1028,7 @@ public sealed partial class Parser
             if (depth == 0 && (kind == TokenKind.Is || comparisonAfterCombinator))
             {
                 AddDiagnostic(
-                    DiagnosticCodes.Syntax,
+                    DiagnosticCodes.ConditionReadAsPattern,
                     "In a pattern, `and` / `or` / `not` combine patterns, so the condition after them is read as part of the pattern. Combine conditions with `&&` / `||`, or put the `is` test in parentheses: `(x is int v) and v > 0`.",
                     _spans.Get(pattern));
                 return;

@@ -11,6 +11,8 @@ public static class DiagnosticCodes
     public const string IfExpressionWithoutElse = "PSCP1103";
     public const string MixedPipeDirections = "PSCP1104";
     public const string RemovedSectionLabel = "PSCP1105";
+    public const string IndentedLineAfterInput = "PSCP1106";
+    public const string ConditionReadAsPattern = "PSCP1107";
 
     // Control flow, names, declarations.
     public const string JumpOutsideLoop = "PSCP2008";
@@ -88,6 +90,8 @@ public static class DiagnosticCodes
         [UnsupportedStatement] = ("§6.3", "63-지원하지-않는-c-문장"),
         [IfExpressionWithoutElse] = ("§12.1", "121-if"),
         [MixedPipeDirections] = ("§13.3", "133-pipe"),
+        [IndentedLineAfterInput] = ("§4.3", "43-줄-이어짐이-아닌-것"),
+        [ConditionReadAsPattern] = ("§13.9", "139-패턴-문맥"),
         [JumpOutsideLoop] = ("§12.5", "125-break-continue-return"),
         [ReservedIdentifier] = ("§3.2", "32-식별자"),
         [VariableFunctionConflict] = ("§5.1", "51-비한정-이름의-우선순위"),
