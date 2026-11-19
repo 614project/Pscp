@@ -58,14 +58,16 @@ internal sealed partial class CSharpEmitter
         };
 
     private string EmitIdentifierExpression(IdentifierExpression identifier)
-        => TryGetIdentifierAlias(identifier.Name, out string? alias)
-            ? alias!
-            : _semantic?.IsUserValueWithKeywordName(identifier) == true ? EscapeName(identifier.Name) : identifier.Name;
+        => _semantic?.GetReferenceRename(identifier) is string renamed
+            ? renamed
+            : TryGetIdentifierAlias(identifier.Name, out string? alias)
+                ? alias!
+                : _semantic?.IsUserValueWithKeywordName(identifier) == true ? EscapeName(identifier.Name) : identifier.Name;
 
     private string EmitBindingPattern(BindingTarget target)
         => target switch
         {
-            NameTarget nameTarget => EscapeName(nameTarget.Name),
+            NameTarget nameTarget => _semantic?.GetLocalRename(nameTarget) ?? EscapeName(nameTarget.Name),
             DiscardTarget => "_",
             TupleTarget tuple => $"({string.Join(", ", tuple.Elements.Select(EmitBindingPattern))})",
             _ => NextTemporary("target")
@@ -1402,12 +1404,11 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        return TryEmitDirectSizedInputInitialization(nameTarget.Name, sized, hoisted);
+        return TryEmitDirectSizedInputInitialization(EmitBindingPattern(nameTarget), sized, hoisted);
     }
 
-    private bool TryEmitDirectSizedInputInitialization(string targetName, SizedArrayTypeSyntax sized, bool hoisted)
+    private bool TryEmitDirectSizedInputInitialization(string normalizedTargetName, SizedArrayTypeSyntax sized, bool hoisted)
     {
-        string normalizedTargetName = EmitBindingPattern(new NameTarget(targetName));
         string elementRead = EmitInputRead(sized.ElementType);
         if (elementRead == "default!")
         {

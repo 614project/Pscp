@@ -23,6 +23,7 @@ public static class DiagnosticCodes
     public const string ReadBeforeInitialization = "PSCP2107";
     public const string ImmutableMutation = "PSCP2108";
     public const string TypeReferencesProgramScope = "PSCP2109";
+    public const string DuplicateDeclaration = "PSCP2110";
 
     // Functions, returns, calls, operators.
     public const string MissingRec = "PSCP2201";
@@ -97,6 +98,7 @@ public static class DiagnosticCodes
         [ReadBeforeInitialization] = ("§7.3", "73-프로그램-scope"),
         [ImmutableMutation] = ("§9.2", "92-불변성의-의미와-진단"),
         [TypeReferencesProgramScope] = ("§7.4", "74-타입-선언에서의-가시성"),
+        [DuplicateDeclaration] = ("§5.1", "51-비한정-이름의-우선순위"),
         [MissingRec] = ("§10.3", "103-rec"),
         [MissingReturnValue] = ("§10.5", "105-꼬리-위치와-암묵적-반환"),
         [NotCallable] = ("§11.2", "112-space-call"),
