@@ -45,6 +45,16 @@ public static class PscpIntrinsicCatalog
         "ulong", "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while"
     };
 
+    // Spec §3.3 reserved keywords that the lexer reads as identifiers (the rest are keyword tokens). None of them
+    // can name a user declaration.
+    public static readonly IReadOnlySet<string> PscpReservedIdentifierKeywords = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "interface", "enum", "params", "this", "base", "as",
+        "public", "private", "protected", "internal", "static", "readonly", "const",
+        "void", "int", "long", "double", "decimal", "bool", "char", "string",
+        "try", "catch", "finally", "throw", "operator", "default", "typeof"
+    };
+
     public static readonly IReadOnlySet<string> StrictIntrinsicReceivers = new HashSet<string>(StringComparer.Ordinal)
     {
         "stdin", "stdout"

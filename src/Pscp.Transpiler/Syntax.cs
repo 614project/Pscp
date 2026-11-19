@@ -315,11 +315,25 @@ public sealed record FieldMember(
     IReadOnlyList<string> Modifiers,
     DeclarationStatement Declaration) : TypeMember;
 
+// `T Name => e` and `T Name { ... }` are getters and keep their body in `Body`. The C# accessor forms
+// (`{ get; set; }`, `{ get { ... } private set { ... } }`) fill `Accessors` and leave `Body` empty. An indexer
+// (`T this[int i]`) is a property named `this` with `IndexerParameters`.
 public sealed record PropertyMember(
     IReadOnlyList<string> Modifiers,
     TypeSyntax Type,
     string Name,
-    MethodBody Body) : TypeMember;
+    MethodBody Body) : TypeMember
+{
+    public IReadOnlyList<PropertyAccessor>? Accessors { get; init; }
+
+    // `= value` after an auto-property.
+    public Expression? Initializer { get; init; }
+
+    public IReadOnlyList<ParameterSyntax>? IndexerParameters { get; init; }
+}
+
+// `Kind` is `get`, `set` or `init`. A missing body is an auto-accessor (`get;`).
+public sealed record PropertyAccessor(IReadOnlyList<string> Modifiers, string Kind, MethodBody? Body);
 
 public sealed record MethodMember(
     IReadOnlyList<string> Modifiers,
@@ -349,6 +363,9 @@ public sealed record BlockMethodBody(BlockStatement Block) : MethodBody;
 
 public sealed record ExpressionMethodBody(Expression Expression) : MethodBody;
 
+// A member declared without a body: `abstract` and `extern` methods, and a property that has accessors instead.
+public sealed record NoMethodBody() : MethodBody;
+
 // `TypeParameterText` (`<T>`) and `ConstraintText` (`where T : IComparable<T>`) are C# pass-through text.
 // An expression body (`=> e`) is parsed as a block whose only statement is `e`.
 public sealed record FunctionDeclaration(
@@ -360,10 +377,13 @@ public sealed record FunctionDeclaration(
     string? TypeParameterText = null,
     string? ConstraintText = null);
 
+// `IsParams` and `DefaultValue` are C# pass-through (spec §10.1): `params int[] xs`, `int b = 10`.
 public sealed record ParameterSyntax(
     ArgumentModifier Modifier,
     TypeSyntax Type,
-    BindingTarget Target);
+    BindingTarget Target,
+    bool IsParams = false,
+    Expression? DefaultValue = null);
 
 public abstract record Statement;
 
@@ -446,7 +466,11 @@ public sealed record IdentifierExpression(string Name) : Expression;
 
 public sealed record DiscardExpression() : Expression;
 
-public sealed record TupleExpression(IReadOnlyList<Expression> Elements) : Expression;
+// `(name: "a", age: 3)` keeps its element names in `ElementNames`.
+public sealed record TupleExpression(IReadOnlyList<Expression> Elements) : Expression
+{
+    public IReadOnlyList<string?>? ElementNames { get; init; }
+}
 
 public sealed record BlockExpression(BlockStatement Block) : Expression;
 
@@ -525,7 +549,17 @@ public sealed record IndexExpression(Expression Receiver, IReadOnlyList<Expressi
 
 public sealed record WithExpression(Expression Receiver, IReadOnlyList<WithAssignment> Assignments) : Expression;
 
-public sealed record WithAssignment(string MemberName, Expression Value);
+// `Member = value` in a `with` or object initializer. The C# collection initializer forms after `new` leave
+// `MemberName` empty: `[k] = v` carries `IndexArguments`; an element carries `ElementArguments`, which is empty
+// for a single element kept in `Value` (`{ 1, 2 }`) and holds the `Add` arguments of a group (`{ { k, v } }`).
+public sealed record WithAssignment(string MemberName, Expression Value)
+{
+    public IReadOnlyList<Expression>? IndexArguments { get; init; }
+
+    public IReadOnlyList<Expression>? ElementArguments { get; init; }
+
+    public bool IsMemberAssignment => IndexArguments is null && ElementArguments is null;
+}
 
 public sealed record SwitchExpression(Expression Receiver, IReadOnlyList<SwitchArm> Arms) : Expression;
 
@@ -614,8 +648,11 @@ public sealed record NamedTypeSyntax(string Name, IReadOnlyList<TypeSyntax> Type
         => HashCode.Combine(Name, TypeTextEquality.SequenceHash(TypeArguments));
 }
 
+// `ElementNames` (`(int lo, int hi)`) do not take part in equality: C# tuple names do not change the type.
 public sealed record TupleTypeSyntax(IReadOnlyList<TypeSyntax> Elements) : TypeSyntax
 {
+    public IReadOnlyList<string?>? ElementNames { get; init; }
+
     public bool Equals(TupleTypeSyntax? other)
         => other is not null && TypeTextEquality.SequenceEquals(Elements, other.Elements);
 

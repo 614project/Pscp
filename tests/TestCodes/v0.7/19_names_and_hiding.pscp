@@ -1,0 +1,45 @@
+// Names: a local that hides an enclosing name keeps working (C# forbids the hiding, so the generated
+// C# renames it), C# keywords that PSCP does not reserve can be names, and block lambdas passed to
+// `ForEach` do not return their last value.
+let x = 1
+if x == 1 {
+    let x = 2
+    += x
+}
++= x
+
+{
+    let y = 10
+    += y
+}
+let y = 20
++= y
+
+int f(int a) {
+    if a > 0 {
+        let a = 3
+        return a
+    }
+    a
+}
++= f(1)
+
+var z = 1
+for i in 0..<2 {
+    var z = i * 10
+    z += 1
+    = $"{z} "
+}
++= z
+
+int t =
+bool[t] checked
+let event = 2
+int fixed(int lock) { lock + 1 }
+checked[0] = true
++= (event + fixed(event), checked[0], checked[1])
+
+List<int> xs = [1, 2, 3]
+HashSet<int> seen
+xs.ForEach(v => { seen.Add(v * 2) })
++= seen.Count

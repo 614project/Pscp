@@ -1,0 +1,83 @@
+// C# pass-through forms that 0.7.0 rejected or turned into C# that did not compile:
+// new T[n], array and collection initializers, properties with accessors, indexers, abstract and
+// override members, explicit interface implementations, user operators, params and default values,
+// named tuples, delegates called through variables, piped lambdas and `(int, string).asc`.
+int n =
+
+let squares = new int[n]
+for i in 0..<n do squares[i] = i * i
+let rows = new long[2][]
+rows[0] = new long[] { 1, 2 }
+rows[1] = new[] { 3L }
+let grid = new int[2][3]
++= (squares[n - 1], rows[0].Length + rows[1].Length, grid[1].Length)
+
+let primes = new List<int> { 2, 3, 5 }
+let moves = new Dictionary<char, int> { ['U'] = -1, ['D'] = 1 }
+let names = new Dictionary<int, string> { { 1, "one" }, { 2, "two" } }
++= (primes.Count, moves['U'], names[2])
+
+interface IShape {
+    double Area()
+    string Name { get; }
+}
+
+abstract class Shape : IShape {
+    abstract double Area()
+    virtual string Name => "shape"
+    string IShape.Name => Name
+}
+
+class Square : Shape {
+    double side
+    Square(double side) { this.side = side }
+    override double Area() { side * side }
+    override string Name => "square"
+}
+
+class Counter {
+    mut int count
+    int Count => count
+    int Twice { get { count * 2 } }
+    string Label { get; set; } = "c"
+    int Size { get; private set; }
+    int Stored {
+        get => count
+        set { count = value }
+    }
+    const int Limit = 5
+    void Inc() { count += 1; Size = count }
+    int this[int i] => count + i
+    static Counter operator +(Counter a, Counter b) {
+        let c = new Counter()
+        c.count = a.count + b.count
+        c
+    }
+}
+
+IShape shape = new Square(2.0)
++= (shape.Area(), shape.Name)
+let counter = new Counter()
+counter.Inc()
+counter.Label = "x"
++= (counter.Count, counter.Twice, counter.Label, counter.Size, counter[5], (counter + counter).Count, Counter.Limit)
+counter.Stored = 7
++= counter.Count
+
+int add(int a, int b = 10) { a + b }
+int total(params int[] xs) { sum xs }
++= (add(1), add(1, 2), total(1, 2, 3), add(b: 2, a: 1))
+
+(int lo, int hi) range = (1, 5)
+(int q, int r) divmod(int a, int b) { (a / b, a % b) }
+let person = (name: "kim", age: 3)
++= (range.hi - range.lo, divmod(7, 2).r, person.name, person.age)
+
+Func<int, int> inc = x => x + 1
+int apply(Func<int, int> f, int x) { f(x) }
+Func<int, int> adder(int k) { x => x + k }
++= (apply(inc, 2), adder(2)(3), 5 |> ((int v) => v * 3))
+
+(int, string)[] pairs = [(1, "b"), (1, "B"), (0, "z")]
+Array.Sort(pairs, (int, string).asc)
++= pairs

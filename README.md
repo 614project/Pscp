@@ -108,17 +108,17 @@ rec int find(int x) {
 
 // 4. 튜플 스왑과 제어 흐름
 bool union(int a, int b) {
-    a = find(a)
-    b = find(b)
-    if a == b then
-        false
+    var x = find(a)
+    var y = find(b)
+    if x == y then
+        return false // 함수 중간에서는 return이 필요하다
 
-    if parent[a] < parent[b] {
-        (a, b) = (b, a) // 튜플 스왑
+    if parent[x] < parent[y] {
+        (x, y) = (y, x) // 튜플 스왑
     }
 
-    parent[b] = a
-    true // 암묵적 true 반환
+    parent[y] = x
+    true // 암묵적 true 반환 (마지막 문장)
 }
 
 // 5. 간결한 foreach
@@ -176,7 +176,7 @@ dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- init .\sample
 
 주요 명령어 설명:
 
-- `pscp init`: 현재 폴더에 `main.pscp`, 하위 `.pscp` 폴더에 C# 프로젝트를 만듭니다.
+- `pscp init`: 현재 폴더에 `main.pscp`, 하위 `.pscp` 폴더에 C# 프로젝트를 만듭니다. `--force`는 `.pscp` 프로젝트를 다시 만들고, 이미 있는 `main.pscp`는 그대로 둡니다.
 - `pscp run [file.pscp]`: `.pscp\Program.cs`로 트랜스파일한 뒤 `dotnet run`까지 이어서 실행합니다.
 - `pscp build [file.pscp]`: `.pscp\Program.cs`로 트랜스파일한 뒤 `dotnet build`를 수행합니다.
 - 파일명을 생략하면 현재 폴더의 `main.pscp`를 자동으로 찾습니다.
@@ -220,7 +220,7 @@ pscp version
 
 ### 진단
 
-진단마다 코드가 붙습니다(`PSCP2108` 등). 코드 범위는 스펙 [부록 B](docs/pscp_v_0_7_spec.md)에 있습니다.
+진단마다 코드가 붙습니다(`PSCP2108` 등). 진단 조건은 스펙 [부록 B](docs/pscp_v_0_7_spec.md#부록-b-진단-목록)에, 코드별 목록은 [언어 서버 가이드 부록 B](docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md#부록-b-진단-코드-표)에 있습니다.
 
 ```text
 2:1: warning PSCP2108: `y` is immutable but is modified here. Declare it with `mut` or `var` to make the mutation explicit.

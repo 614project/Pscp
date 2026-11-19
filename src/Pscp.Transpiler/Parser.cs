@@ -711,12 +711,12 @@ public sealed partial class Parser
         return true;
     }
 
-    private IReadOnlyList<ParameterSyntax> ParseParameterListTail()
+    private IReadOnlyList<ParameterSyntax> ParseParameterListTail(TokenKind closeKind = TokenKind.CloseParen)
     {
         List<ParameterSyntax> parameters = [];
         SkipSeparators();
 
-        if (Match(TokenKind.CloseParen))
+        if (Match(closeKind))
         {
             return parameters;
         }
@@ -726,9 +726,11 @@ public sealed partial class Parser
             SkipSeparators();
             int start = _position;
             ArgumentModifier modifier = ParseOptionalArgumentModifier();
+            bool isParams = false;
             if (Current.Kind == TokenKind.Identifier && Current.Text == "params")
             {
                 Next();
+                isParams = true;
             }
 
             TypeSyntax? parameterType = TryParseTypeSyntax(allowSizedArrays: false);
@@ -739,19 +741,20 @@ public sealed partial class Parser
             }
 
             BindingTarget target = ParseBindingTarget();
+            Expression? defaultValue = null;
             if (Current.Kind == TokenKind.Equal)
             {
                 // Default values are C# pass-through; the parameter keeps its declared type.
                 Next();
-                _ = ParseExpression();
+                defaultValue = WithNestedContext(ParseExpression);
             }
 
-            parameters.Add(Mark(new ParameterSyntax(modifier, parameterType, target), start));
+            parameters.Add(Mark(new ParameterSyntax(modifier, parameterType, target, isParams, defaultValue), start));
             SkipSeparators();
         }
         while (Match(TokenKind.Comma));
 
-        Expect(TokenKind.CloseParen, "Expected ')' after function parameter list.");
+        Expect(closeKind, closeKind == TokenKind.CloseBracket ? "Expected ']' after indexer parameter list." : "Expected ')' after function parameter list.");
         return parameters;
     }
 
@@ -777,6 +780,12 @@ public sealed partial class Parser
         }
         else
         {
+            // `const T x = e` is the C# spelling of an immutable typed declaration.
+            if (Current.Kind == TokenKind.Identifier && Current.Text == "const" && Peek(1).Kind == TokenKind.Identifier)
+            {
+                Next();
+            }
+
             bool hadMut = Match(TokenKind.Mut);
             if (TryParseTypedTupleDeclarationHead(out TypeSyntax? tupleType, out List<BindingTarget>? tupleTargets))
             {
@@ -824,6 +833,7 @@ public sealed partial class Parser
 
                 declarations = [Mark(new DeclarationStatement(mutability, explicitType, targets, null, true), savedPosition)];
                 TryConsumeSemicolon();
+                WarnIfIndentedLineFollowsInput(savedPosition, equalToken);
                 return true;
             }
 
@@ -871,6 +881,50 @@ public sealed partial class Parser
         declarations = [Mark(new DeclarationStatement(mutability, explicitType, targets, null, false), savedPosition)];
         TryConsumeSemicolon();
         return true;
+    }
+
+    // Spec §4.3: `long ans =` at the end of a line reads input. A more indented line right after it looks like the
+    // intended value, but it is a separate statement, so the input is read and the value is lost.
+    private void WarnIfIndentedLineFollowsInput(int declarationStart, Token equalToken)
+    {
+        if (Current.Kind != TokenKind.NewLine)
+        {
+            return;
+        }
+
+        int next = _position;
+        while (next < _tokens.Count && _tokens[next].Kind == TokenKind.NewLine)
+        {
+            next++;
+        }
+
+        if (next >= _tokens.Count
+            || _tokens[next].Kind is TokenKind.EndOfFile or TokenKind.CloseBrace
+            || next - _position > 1
+            || ColumnOf(next) <= ColumnOf(declarationStart))
+        {
+            return;
+        }
+
+        AddDiagnostic(
+            DiagnosticCodes.IndentedLineAfterInput,
+            "A declaration that ends with `=` reads its value from input. The indented line below is a separate statement, not the value; to assign a value, write it on the same line as `=`.",
+            equalToken.Span,
+            DiagnosticSeverity.Warning);
+    }
+
+    // Column of a token: its distance from the start of its line.
+    private int ColumnOf(int tokenIndex)
+    {
+        for (int i = tokenIndex - 1; i >= 0; i--)
+        {
+            if (_tokens[i].Kind == TokenKind.NewLine)
+            {
+                return _tokens[tokenIndex].Position - (_tokens[i].Position + _tokens[i].Text.Length);
+            }
+        }
+
+        return _tokens[tokenIndex].Position;
     }
 
     private static string DescribeTargets(IReadOnlyList<BindingTarget> targets)
@@ -1036,6 +1090,7 @@ public sealed partial class Parser
 
         _ = ParseModifiers();
         bool rawBody = false;
+        bool isInterface = false;
 
         if (Match(TokenKind.Class) || Match(TokenKind.Struct))
         {
@@ -1044,10 +1099,16 @@ public sealed partial class Parser
         {
             _ = Match(TokenKind.Class) || Match(TokenKind.Struct);
         }
-        else if (Current.Kind == TokenKind.Identifier && Current.Text is "interface" or "enum")
+        else if (Current.Kind == TokenKind.Identifier && Current.Text == "enum")
         {
             Next();
             rawBody = true;
+        }
+        else if (Current.Kind == TokenKind.Identifier && Current.Text == "interface")
+        {
+            // Interface members are parsed like other members, so they need no `;` (a method has no body).
+            Next();
+            isInterface = true;
         }
         else
         {
@@ -1093,7 +1154,7 @@ public sealed partial class Parser
             else
             {
                 Next();
-                members = ParseTypeMembers(name);
+                members = ParseTypeMembers(name, isInterface);
             }
 
             Expect(TokenKind.CloseBrace, "Expected '}' after type declaration.");
@@ -1108,7 +1169,7 @@ public sealed partial class Parser
         return true;
     }
 
-    private IReadOnlyList<TypeMember> ParseTypeMembers(string declaringTypeName)
+    private IReadOnlyList<TypeMember> ParseTypeMembers(string declaringTypeName, bool isInterface = false)
     {
         List<TypeMember> members = [];
         SkipSeparators();
@@ -1126,7 +1187,7 @@ public sealed partial class Parser
                 {
                     members.Add(new NestedTypeMember(nestedType!));
                 }
-                else if (TryParseTypeMember(declaringTypeName, members))
+                else if (TryParseTypeMember(declaringTypeName, members, isInterface))
                 {
                 }
                 else
@@ -1167,7 +1228,7 @@ public sealed partial class Parser
         return true;
     }
 
-    private bool TryParseTypeMember(string declaringTypeName, List<TypeMember> members)
+    private bool TryParseTypeMember(string declaringTypeName, List<TypeMember> members, bool isInterface = false)
     {
         int savedPosition = _position;
         int savedDiagnostics = _diagnostics.Count;
@@ -1224,13 +1285,45 @@ public sealed partial class Parser
             }
         }
 
+        // `T this[int i] => e` or `T this[int i] { get ...; set ...; }`.
+        if (returnType is not null
+            && Current.Kind == TokenKind.Identifier
+            && Current.Text == "this"
+            && Peek(1).Kind == TokenKind.OpenBracket)
+        {
+            Token thisToken = Next();
+            Next();
+            IReadOnlyList<ParameterSyntax> indexerParameters = ParseParameterListTail(TokenKind.CloseBracket);
+            SkipSeparators();
+            PropertyMember indexer = ParsePropertyBody(modifiers, returnType, thisToken.Text) with { IndexerParameters = indexerParameters };
+            Mark(indexer, savedPosition);
+            _spans.SetName(indexer, thisToken.Span);
+            members.Add(indexer);
+            return true;
+        }
+
         if (returnType is not null && Current.Kind == TokenKind.Identifier)
         {
             Token nameToken = Next();
+            string qualifiedName = nameToken.Text;
             string? typeParameterText = null;
-            if (Current.Kind == TokenKind.LessThan && IsCurrentAdjacentToPreviousToken() && LooksLikeGenericArgumentSuffix())
+            while (true)
             {
-                typeParameterText = ParseGenericArgumentSuffixText();
+                typeParameterText = null;
+                if (Current.Kind == TokenKind.LessThan && IsCurrentAdjacentToPreviousToken() && LooksLikeGenericArgumentSuffix())
+                {
+                    typeParameterText = ParseGenericArgumentSuffixText();
+                }
+
+                // `int IComparable<Job>.CompareTo(Job other)`: an explicit interface implementation.
+                if (Current.Kind != TokenKind.Dot || Peek(1).Kind != TokenKind.Identifier)
+                {
+                    break;
+                }
+
+                Next();
+                nameToken = Next();
+                qualifiedName += typeParameterText + "." + nameToken.Text;
             }
 
             if (Match(TokenKind.OpenParen))
@@ -1240,7 +1333,7 @@ public sealed partial class Parser
                 if (Current.Kind == TokenKind.Where)
                 {
                     int constraintStart = _position;
-                    while (Current.Kind is not (TokenKind.OpenBrace or TokenKind.FatArrow or TokenKind.NewLine or TokenKind.EndOfFile))
+                    while (Current.Kind is not (TokenKind.OpenBrace or TokenKind.FatArrow or TokenKind.NewLine or TokenKind.Semicolon or TokenKind.EndOfFile))
                     {
                         Next();
                     }
@@ -1248,9 +1341,22 @@ public sealed partial class Parser
                     constraintText = TokensToText(constraintStart, _position);
                 }
 
-                SkipSeparators();
-                MethodBody body = ParseMethodBody();
-                string methodName = typeParameterText is null ? nameToken.Text : nameToken.Text + typeParameterText;
+                // `abstract` and `extern` methods, and interface methods without a default body, have no body.
+                bool bodiless = (isInterface || modifiers.Any(modifier => modifier is "abstract" or "extern"))
+                    && NextNonNewLineKind(0) is not (TokenKind.OpenBrace or TokenKind.FatArrow);
+                MethodBody body;
+                if (bodiless)
+                {
+                    TryConsumeSemicolon();
+                    body = new NoMethodBody();
+                }
+                else
+                {
+                    SkipSeparators();
+                    body = ParseMethodBody();
+                }
+
+                string methodName = typeParameterText is null ? qualifiedName : qualifiedName + typeParameterText;
                 MethodMember method = Mark(new MethodMember(modifiers, returnType, methodName, parameters, body, IsConstructor: false, ConstraintText: constraintText), savedPosition);
                 _spans.SetName(method, nameToken.Span);
                 members.Add(method);
@@ -1261,10 +1367,9 @@ public sealed partial class Parser
             {
                 int beforeBody = _position;
                 SkipSeparators();
-                if (Current.Kind is TokenKind.FatArrow || (Current.Kind == TokenKind.OpenBrace && LooksLikeAccessorBlock()))
+                if (Current.Kind is TokenKind.FatArrow or TokenKind.OpenBrace)
                 {
-                    MethodBody body = ParseMethodBody();
-                    PropertyMember property = Mark(new PropertyMember(modifiers, returnType, nameToken.Text, body), savedPosition);
+                    PropertyMember property = Mark(ParsePropertyBody(modifiers, returnType, qualifiedName), savedPosition);
                     _spans.SetName(property, nameToken.Span);
                     members.Add(property);
                     return true;
@@ -1291,9 +1396,82 @@ public sealed partial class Parser
         return false;
     }
 
-    // `{ get; set; }` or a getter body `{ ... }`: any block directly after a member name.
-    private bool LooksLikeAccessorBlock()
-        => Current.Kind == TokenKind.OpenBrace;
+    // After a property or indexer head: `=> e` and `{ ... }` are a getter; `{ get; set; }` is a C# accessor list,
+    // optionally followed by `= value`.
+    private PropertyMember ParsePropertyBody(IReadOnlyList<string> modifiers, TypeSyntax type, string name)
+    {
+        if (Current.Kind == TokenKind.OpenBrace && LooksLikeAccessorList())
+        {
+            IReadOnlyList<PropertyAccessor> accessors = ParseAccessorList();
+            Expression? initializer = null;
+            if (Match(TokenKind.Equal))
+            {
+                SkipExpressionNewLines();
+                initializer = WithNestedContext(ParseExpression);
+            }
+
+            TryConsumeSemicolon();
+            return new PropertyMember(modifiers, type, name, new NoMethodBody()) { Accessors = accessors, Initializer = initializer };
+        }
+
+        return new PropertyMember(modifiers, type, name, ParseMethodBody());
+    }
+
+    // `{ get` / `{ private set` followed by `;`, `=>`, `{`, a line break or `}`.
+    private bool LooksLikeAccessorList()
+    {
+        int offset = 1;
+        while (Peek(offset).Kind is TokenKind.NewLine or TokenKind.Semicolon)
+        {
+            offset++;
+        }
+
+        while (Peek(offset).Kind == TokenKind.Identifier && SectionAccessNames.Contains(Peek(offset).Text))
+        {
+            offset++;
+        }
+
+        Token accessor = Peek(offset);
+        return accessor.Kind == TokenKind.Identifier
+            && accessor.Text is "get" or "set" or "init"
+            && Peek(offset + 1).Kind is TokenKind.Semicolon or TokenKind.FatArrow or TokenKind.OpenBrace or TokenKind.NewLine or TokenKind.CloseBrace;
+    }
+
+    private IReadOnlyList<PropertyAccessor> ParseAccessorList()
+    {
+        Expect(TokenKind.OpenBrace, "Expected '{' to start the accessor list.");
+        List<PropertyAccessor> accessors = [];
+        SkipSeparators();
+        while (Current.Kind is not TokenKind.CloseBrace and not TokenKind.EndOfFile)
+        {
+            int start = _position;
+            IReadOnlyList<string> accessorModifiers = ParseModifiers();
+            if (Current.Kind != TokenKind.Identifier || Current.Text is not ("get" or "set" or "init"))
+            {
+                AddDiagnostic(DiagnosticCodes.Syntax, "Expected `get`, `set` or `init` in the property accessor list.", Current.Span);
+                while (Current.Kind is not (TokenKind.CloseBrace or TokenKind.EndOfFile))
+                {
+                    if (Current.Kind is TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace)
+                    {
+                        int close = FindMatchingClose(_position);
+                        _position = close < 0 ? _tokens.Count - 1 : close;
+                    }
+
+                    Next();
+                }
+
+                break;
+            }
+
+            string kind = Next().Text;
+            MethodBody? body = NextNonNewLineKind(0) is TokenKind.OpenBrace or TokenKind.FatArrow ? ParseMethodBody() : null;
+            accessors.Add(Mark(new PropertyAccessor(accessorModifiers, kind, body), start));
+            SkipSeparators();
+        }
+
+        Expect(TokenKind.CloseBrace, "Expected '}' to close the accessor list.");
+        return accessors;
+    }
 
     private MethodBody ParseMethodBody()
     {

@@ -15,7 +15,7 @@ internal sealed partial class CSharpEmitter
             InterpolatedStringExpression interpolated => EmitInterpolatedStringExpression(interpolated),
             IdentifierExpression identifier => EmitIdentifierExpression(identifier),
             DiscardExpression => "_",
-            TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitExpression(element)))})",
+            TupleExpression tuple => $"({string.Join(", ", tuple.Elements.Select((element, index) => TupleElementNamePrefix(tuple.ElementNames, index) + EmitExpression(element)))})",
             BlockExpression block => EmitBlockExpression(block.Block),
             IfExpression ifExpression => $"({EmitExpression(ifExpression.Condition)} ? {EmitExpression(ifExpression.ThenExpression)} : {EmitExpression(ifExpression.ElseExpression)})",
             ConditionalExpression conditional => $"({EmitExpression(conditional.Condition)} ? {EmitExpression(conditional.WhenTrue)} : {EmitExpression(conditional.WhenFalse)})",
@@ -41,6 +41,8 @@ internal sealed partial class CSharpEmitter
             CollectionExpression collection => EmitCollectionExpression(collection, targetTypeHint),
             AggregationExpression aggregation => EmitAggregationExpression(aggregation),
             GeneratorExpression generator => EmitBuilderEnumerable(new BuilderElement(generator.Source, generator.IndexTarget, generator.ItemTarget, generator.Body)),
+            // `new T[] { a, b }` is parsed as the collection `[a, b]` with the array type stated.
+            CastExpression { Operand: CollectionExpression typedCollection } typedArray => EmitCollectionExpression(typedCollection, NormalizeSizedType(typedArray.Type)),
             CastExpression cast => $"(({EmitType(NormalizeSizedType(cast.Type))}){EmitExpression(cast.Operand)})",
             AsExpression asExpression => $"({EmitExpression(asExpression.Operand)} as {EmitType(NormalizeSizedType(asExpression.Type))})",
             NullForgivingExpression nullForgiving => $"{EmitExpression(nullForgiving.Operand)}!",
@@ -56,12 +58,16 @@ internal sealed partial class CSharpEmitter
         };
 
     private string EmitIdentifierExpression(IdentifierExpression identifier)
-        => TryGetIdentifierAlias(identifier.Name, out string? alias) ? alias! : identifier.Name;
+        => _semantic?.GetReferenceRename(identifier) is string renamed
+            ? renamed
+            : TryGetIdentifierAlias(identifier.Name, out string? alias)
+                ? alias!
+                : _semantic?.IsUserValueWithKeywordName(identifier) == true ? EscapeName(identifier.Name) : identifier.Name;
 
     private string EmitBindingPattern(BindingTarget target)
         => target switch
         {
-            NameTarget nameTarget => nameTarget.Name,
+            NameTarget nameTarget => _semantic?.GetLocalRename(nameTarget) ?? EscapeName(nameTarget.Name),
             DiscardTarget => "_",
             TupleTarget tuple => $"({string.Join(", ", tuple.Elements.Select(EmitBindingPattern))})",
             _ => NextTemporary("target")
@@ -101,6 +107,23 @@ internal sealed partial class CSharpEmitter
             return $"__PscpSeq.compare({left}, {right})";
         }
 
+        if (_uncheckedDepth == 0
+            && binary.Operator is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply or BinaryOperator.Divide or BinaryOperator.Modulo or BinaryOperator.ShiftLeft
+            && IsIntegralType(_semantic?.GetExpressionType(binary))
+            && IsCSharpConstant(binary.Left)
+            && IsCSharpConstant(binary.Right))
+        {
+            _uncheckedDepth++;
+            try
+            {
+                return $"unchecked{EmitBinaryExpression(binary)}";
+            }
+            finally
+            {
+                _uncheckedDepth--;
+            }
+        }
+
         string op = binary.Operator switch
         {
             BinaryOperator.Add => "+",
@@ -127,6 +150,27 @@ internal sealed partial class CSharpEmitter
 
         return $"({EmitExpression(binary.Left)} {op} {EmitExpression(binary.Right)})";
     }
+
+    private static bool IsIntegralType(TypeSyntax? type)
+        => type is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "uint" or "ulong" or "short" or "ushort" or "byte" or "sbyte" };
+
+    // An operand C# treats as a constant: a literal, a name emitted as `const`, `int.MaxValue`, or arithmetic
+    // over those.
+    private bool IsCSharpConstant(Expression expression)
+        => expression switch
+        {
+            LiteralExpression { Kind: LiteralKind.Integer or LiteralKind.Char or LiteralKind.Float } => true,
+            IdentifierExpression identifier => _semantic?.GetReferenceRename(identifier) is null
+                && !IsIdentifierAliasActive(identifier.Name)
+                && _constNames.Contains(identifier.Name),
+            MemberAccessExpression { Receiver: IdentifierExpression { Name: "int" or "long" or "uint" or "ulong" or "short" or "ushort" or "byte" or "sbyte" or "char" }, MemberName: "MaxValue" or "MinValue" } => true,
+            UnaryExpression { Operator: UnaryOperator.Plus or UnaryOperator.Negate or UnaryOperator.Peek } unary => IsCSharpConstant(unary.Operand),
+            BinaryExpression binary => binary.Operator is not (BinaryOperator.PipeLeft or BinaryOperator.PipeRight or BinaryOperator.Spaceship or BinaryOperator.Coalesce)
+                && IsCSharpConstant(binary.Left)
+                && IsCSharpConstant(binary.Right),
+            CastExpression cast => IsIntegralType(cast.Type) && IsCSharpConstant(cast.Operand),
+            _ => false,
+        };
 
     private string EmitPipeRight(Expression left, Expression right)
     {
@@ -230,6 +274,14 @@ internal sealed partial class CSharpEmitter
 
     private string EmitCallExpression(CallExpression call, TypeSyntax? targetTypeHint)
     {
+        // `x |> (v => e)`: a lambda is invoked through its delegate type, `((Func<int, int>)(v => e))(x)`.
+        if (call.Pipe == PipeKind.Delegate
+            && call.Callee is LambdaExpression pipedLambda
+            && _semantic?.GetExpressionType(pipedLambda) is NamedTypeSyntax delegateType)
+        {
+            return $"(({EmitType(delegateType)})({EmitLambdaExpression(pipedLambda)}))({string.Join(", ", call.Arguments.Select(EmitArgument))})";
+        }
+
         if (call.Callee is MemberAccessExpression stdoutMember
             && stdoutMember.Receiver is IdentifierExpression { Name: PscpBinder.StdoutName }
             && TryEmitExplicitStdoutCall(stdoutMember.MemberName, call.Arguments) is string stdoutCall)
@@ -744,7 +796,7 @@ internal sealed partial class CSharpEmitter
 
     private string EmitArgument(ArgumentSyntax argument)
     {
-        string namePrefix = string.IsNullOrWhiteSpace(argument.Name) ? string.Empty : argument.Name + ": ";
+        string namePrefix = string.IsNullOrWhiteSpace(argument.Name) ? string.Empty : EscapeName(argument.Name) + ": ";
         return argument switch
         {
             OutDeclarationArgumentSyntax outDeclaration => $"{namePrefix}out {EmitType(outDeclaration.Type)} {EmitBindingPattern(outDeclaration.Target)}",
@@ -772,8 +824,15 @@ internal sealed partial class CSharpEmitter
         }
 
         string access = member.IsNullConditional ? "?." : ".";
-        return $"{EmitMemberReceiverExpression(member.Receiver)}{access}{EmitMemberName(member.Receiver, member.MemberName)}";
+        // `HasValue`, `Value` and the `object` members belong to `T?` itself, not to the value inside it.
+        string receiver = IsNullableOwnMember(PscpIntrinsicCatalog.StripGenericSuffix(member.MemberName))
+            ? EmitExpression(member.Receiver)
+            : EmitMemberReceiverExpression(member.Receiver);
+        return $"{receiver}{access}{EmitMemberName(member.Receiver, member.MemberName)}";
     }
+
+    internal static bool IsNullableOwnMember(string memberName)
+        => memberName is "HasValue" or "Value" or "GetValueOrDefault" or "ToString" or "Equals" or "GetHashCode" or "GetType";
 
     private bool TryGetTypeLikeText(Expression expression, out string? typeText)
     {
@@ -785,6 +844,24 @@ internal sealed partial class CSharpEmitter
             case MemberAccessExpression member when TryGetTypeLikeText(member.Receiver, out string? receiverText):
                 typeText = receiverText + "." + member.MemberName;
                 return true;
+            case TupleExpression tuple:
+            {
+                // `(int, string).asc`: a tuple of type names.
+                List<string> elements = [];
+                foreach (Expression element in tuple.Elements)
+                {
+                    if (!TryGetTypeLikeText(element, out string? elementText))
+                    {
+                        typeText = null;
+                        return false;
+                    }
+
+                    elements.Add(elementText!);
+                }
+
+                typeText = $"({string.Join(", ", elements)})";
+                return true;
+            }
             default:
                 typeText = null;
                 return false;
@@ -837,7 +914,7 @@ internal sealed partial class CSharpEmitter
             }
         }
 
-        return name;
+        return EscapeMemberName(name);
     }
 
     private string EmitNewExpression(NewExpression creation, TypeSyntax? targetTypeHint)
@@ -857,13 +934,30 @@ internal sealed partial class CSharpEmitter
             : $"new {EmitType(effectiveType)}({arguments})";
         if (creation.Initializer is { } initializer)
         {
-            // An object initializer: `new Edge { to = 3, w = 10 }`.
+            // An object or collection initializer: `new Edge { to = 3, w = 10 }`, `new List<int> { 1, 2 }`.
             emitted += initializer.Count == 0
                 ? " { }"
-                : $" {{ {string.Join(", ", initializer.Select(assignment => $"{assignment.MemberName} = {EmitExpression(assignment.Value)}"))} }}";
+                : $" {{ {string.Join(", ", initializer.Select(EmitInitializerEntry))} }}";
         }
 
         return emitted;
+    }
+
+    private string EmitInitializerEntry(WithAssignment assignment)
+    {
+        if (assignment.IndexArguments is { } indexArguments)
+        {
+            return $"[{string.Join(", ", indexArguments.Select(argument => EmitExpression(argument)))}] = {EmitExpression(assignment.Value)}";
+        }
+
+        if (assignment.ElementArguments is { } elementArguments)
+        {
+            return elementArguments.Count == 0
+                ? EmitExpression(assignment.Value)
+                : $"{{ {string.Join(", ", elementArguments.Select(argument => EmitExpression(argument)))} }}";
+        }
+
+        return $"{EscapeName(assignment.MemberName)} = {EmitExpression(assignment.Value)}";
     }
 
     private bool TryEmitObjectInitializerNewExpression(
@@ -945,6 +1039,15 @@ internal sealed partial class CSharpEmitter
                 NamedTypeSyntax named when IsKnownAutoConstructType(named) => EmitAutoConstruction(named, targetTyped: false),
                 _ => $"Array.Empty<{EmitType(elementHint ?? new NamedTypeSyntax("object", Immutable.List<TypeSyntax>()))}>()",
             };
+        }
+
+        // Spec §16.1: `HashSet<T>`, `SortedSet<T>`, `Queue<T>` and `Stack<T>` targets are built from the elements in
+        // order (so the last element is the top of a stack); a sorted set uses the default order.
+        if (normalizedTargetType is NamedTypeSyntax wrapped && IsSequenceConstructedTarget(wrapped) && elementHint is not null)
+        {
+            string elements = EmitCollectionExpression(collection, new ArrayTypeSyntax(elementHint, 1));
+            string comparer = EmitAutoConstructComparer(wrapped) is string ordered ? ", " + ordered : string.Empty;
+            return $"new {EmitType(wrapped)}({elements}{comparer})";
         }
 
         if (collection.Elements.All(element => element is ExpressionElement))
@@ -1048,7 +1151,7 @@ internal sealed partial class CSharpEmitter
         return lambda.Body switch
         {
             LambdaExpressionBody expressionBody => $"{parameters} => {EmitExpression(expressionBody.Expression)}",
-            LambdaBlockBody blockBody => $"{parameters} => {{ {WithReturnType(null, () => EmitInlineBlock(blockBody.Block, isVoidLike: !LambdaBlockReturnsValue(blockBody.Block)))} }}",
+            LambdaBlockBody blockBody => $"{parameters} => {{ {WithReturnType(null, () => EmitInlineBlock(blockBody.Block, isVoidLike: _semantic?.IsActionLambda(lambda) == true || !LambdaBlockReturnsValue(blockBody.Block)))} }}",
             _ => $"{parameters} => default!"
         };
     }
@@ -1356,12 +1459,11 @@ internal sealed partial class CSharpEmitter
             return false;
         }
 
-        return TryEmitDirectSizedInputInitialization(nameTarget.Name, sized, hoisted);
+        return TryEmitDirectSizedInputInitialization(EmitBindingPattern(nameTarget), sized, hoisted);
     }
 
-    private bool TryEmitDirectSizedInputInitialization(string targetName, SizedArrayTypeSyntax sized, bool hoisted)
+    private bool TryEmitDirectSizedInputInitialization(string normalizedTargetName, SizedArrayTypeSyntax sized, bool hoisted)
     {
-        string normalizedTargetName = EmitBindingPattern(new NameTarget(targetName));
         string elementRead = EmitInputRead(sized.ElementType);
         if (elementRead == "default!")
         {
@@ -1515,12 +1617,18 @@ internal sealed partial class CSharpEmitter
             NamedTypeSyntax named => named.TypeArguments.Count == 0
                 ? named.Name
                 : $"{named.Name}<{string.Join(", ", named.TypeArguments.Select(argument => EmitType(argument)))}>",
-            TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select(element => EmitType(element)))})",
+            TupleTypeSyntax tuple => $"({string.Join(", ", tuple.Elements.Select((element, index) => EmitType(element) + TupleElementNameSuffix(tuple.ElementNames, index)))})",
             ArrayTypeSyntax array => $"{EmitType(array.ElementType)}{string.Concat(Enumerable.Repeat("[]", array.Depth))}",
             NullableTypeSyntax nullable => $"{EmitType(nullable.InnerType)}?",
             SizedArrayTypeSyntax sized => EmitType(new ArrayTypeSyntax(sized.ElementType, sized.Dimensions.Count)),
             _ => "object"
         };
+
+    private static string TupleElementNamePrefix(IReadOnlyList<string?>? names, int index)
+        => names is not null && index < names.Count && names[index] is string name ? EscapeName(name) + ": " : string.Empty;
+
+    private static string TupleElementNameSuffix(IReadOnlyList<string?>? names, int index)
+        => names is not null && index < names.Count && names[index] is string name ? " " + EscapeName(name) : string.Empty;
 
     private string EmitEnumerable(Expression expression)
         => expression is RangeExpression range ? EmitRangeEnumerable(range, null) : EmitExpression(expression);
@@ -1812,7 +1920,10 @@ internal sealed partial class CSharpEmitter
 
         if (IsNumericType(sourceType) || IsCharType(sourceType))
         {
-            return $"(({targetType})({operand}))";
+            // Spec §21.1: narrowing an integer wraps, also for a constant (which C# would reject as CS0221).
+            return targetType is "int" or "long"
+                ? $"unchecked(({targetType})({operand}))"
+                : $"(({targetType})({operand}))";
         }
 
         return $"{convertMethod}({operand}, CultureInfo.InvariantCulture)";
@@ -1936,7 +2047,7 @@ internal sealed partial class CSharpEmitter
             return $"{receiver} with {{ }}";
         }
 
-        string assignments = string.Join(", ", withExpression.Assignments.Select(assignment => $"{assignment.MemberName} = {EmitExpression(assignment.Value)}"));
+        string assignments = string.Join(", ", withExpression.Assignments.Select(EmitInitializerEntry));
         return $"{receiver} with {{ {assignments} }}";
     }
 
@@ -2031,6 +2142,13 @@ internal sealed partial class CSharpEmitter
 
     private static bool IsLinkedListType(NamedTypeSyntax named)
         => named.Name is "LinkedList" or "System.Collections.Generic.LinkedList";
+
+    private static bool IsSequenceConstructedTarget(NamedTypeSyntax named)
+        => named.TypeArguments.Count == 1
+            && named.Name is "HashSet" or "System.Collections.Generic.HashSet"
+                or "SortedSet" or "System.Collections.Generic.SortedSet"
+                or "Queue" or "System.Collections.Generic.Queue"
+                or "Stack" or "System.Collections.Generic.Stack";
 
     private static bool IsKnownAutoConstructType(NamedTypeSyntax named)
         => named.Name is "List" or "System.Collections.Generic.List"
@@ -2274,7 +2392,7 @@ internal sealed partial class CSharpEmitter
         {
             NameTarget nameTarget when nameTarget.Name == sourceName => string.Empty,
             NameTarget nameTarget when IsIdentifierAliasActive(nameTarget.Name) => string.Empty,
-            NameTarget nameTarget => $"var {nameTarget.Name} = {sourceName};",
+            NameTarget nameTarget => $"var {EscapeName(nameTarget.Name)} = {sourceName};",
             TupleTarget tupleTarget => $"var {EmitBindingPattern(tupleTarget)} = {sourceName};",
             DiscardTarget => string.Empty,
             _ => string.Empty,
@@ -3032,7 +3150,8 @@ internal sealed partial class CSharpEmitter
         for (int i = 1; i < positional.Count; i++)
         {
             string candidate = EmitExpression(positional[i].Expression);
-            current = PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType)
+            // `Math.Max(1.0, NaN)` is NaN, but NaN is the smallest value in the default order (§25.1).
+            current = PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType) && !IsRealNumberType(commonType)
                 ? $"System.Math.{char.ToUpperInvariant(name[0]) + name[1..]}({current}, {candidate})"
                 : $"__PscpSeq.{name}({current}, {candidate})";
         }

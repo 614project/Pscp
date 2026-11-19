@@ -68,6 +68,35 @@ internal static class PscpSyntaxFacts
         }
     }
 
+    // `for (;;)` and `for (init; ; step)`: a C-style loop without a condition (or with `true`) runs until a
+    // `break` or `return`.
+    public static bool HasEmptyCStyleForCondition(string headerText)
+    {
+        List<string> segments = [];
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < headerText.Length; i++)
+        {
+            char ch = headerText[i];
+            if (ch is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (ch is ')' or ']' or '}')
+            {
+                depth--;
+            }
+            else if (ch == ';' && depth == 0)
+            {
+                segments.Add(headerText[start..i]);
+                start = i + 1;
+            }
+        }
+
+        segments.Add(headerText[start..]);
+        return segments.Count == 3 && segments[1].Trim() is "" or "true";
+    }
+
     // Parameter names of a positional record header: `record struct Job(int Id, long Time)`.
     public static IEnumerable<string> GetPrimaryConstructorParameterNames(string headerText)
     {

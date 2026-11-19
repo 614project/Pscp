@@ -1,6 +1,6 @@
 # PSCP v0.7 적합성 테스트
 
-이 폴더의 프로그램들은 **0.6에서 문제가 됐고 0.7 초안에서 해결되는 코드**다. 스펙은 `docs/pscp_v_0_7_spec.md`, 항목별 해설은 `docs/pscp_v_0_7_changes.md`에 있다.
+이 폴더의 프로그램들은 **0.6에서 문제가 됐고 0.7에서 해결되는 코드**다. 스펙은 `docs/pscp_v_0_7_spec.md`, 항목별 해설은 `docs/pscp_v_0_7_changes.md`에 있다.
 
 ## 구성
 
@@ -51,3 +51,13 @@ for f in *.pscp; do pscp test "$f" || echo "FAIL $f"; done
 | 17_new_input_api | PSCP 오류 | D1, B16 |
 
 기대 출력 중 BFS(01), 이분 탐색(12), 그래프 차수(14), 암묵적 반환(03), 큰 수 계산(08)은 Python 참조 계산으로 다시 확인했다.
+
+## 0.7.0 이후 추가한 프로그램
+
+18~20은 0.7.0 구현이 **PSCP 단계는 통과시키고 C# 컴파일 오류를 내거나 조용히 틀린 값을 내던** 코드다(스펙 §34의 14번 조건 위반). 지금 구현에서는 모두 기대 출력을 낸다.
+
+| 프로그램 | 0.7.0 결과 | 내용 |
+|---|---|---|
+| 18_csharp_passthrough | PSCP 오류, C# 오류 | `new T[n]`, 컬렉션 initializer, 속성 접근자, 인덱서, `abstract`/`override`, 명시적 인터페이스 구현, 사용자 연산자, `params`와 기본값, 이름 있는 튜플, delegate 변수 호출, pipe로 람다 호출, `(int, string).asc` |
+| 19_names_and_hiding | C# 오류 | 바깥 이름을 가리는 지역 선언(§5.1), C# 키워드인 이름(`checked`, `event`), `ForEach`에 넘긴 블록 람다 |
+| 20_order_constants_collections | 다른 출력, C# 오류 | `NaN`의 기본 순서(§25.1), 상수 정수 산술의 wrap-around(§8.1), `Stack`/`Queue`/`HashSet`/`SortedSet` target 컬렉션 식 |

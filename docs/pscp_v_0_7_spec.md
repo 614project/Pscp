@@ -1,9 +1,10 @@
-# PSCP v0.7 통합 언어 / API / 트랜스파일 사양서 (초안)
+# PSCP v0.7 통합 언어 / API / 트랜스파일 사양서
 
-- 상태: **초안(Draft)** — 구현(트랜스파일러 0.6.7)에는 아직 반영되지 않았다.
+- 상태: 규범 문서. 저장소의 도구 0.7.0이 이 문서를 구현한다.
 - 기준 문서: `deprecated/pscp_v_0_6_spec.md`
 - 동반 문서: `pscp_v_0_7_changes.md` (v0.6 → v0.7 변경 해설, 항목별 before/after 코드)
 - 작성일: 2026-09-26
+- 개정: 2026-11-19 — 구현 리뷰 반영. 정한 것: C# 키워드인 이름(§3.3), 값을 버리는 문장(§4.3), 가림과 재선언(§5.1), 필드가 되는 최상위 변수의 타입(§7.5), 상수 산술(§8.1), `Action` 대상 람다(§10.6), `if` 식의 공통 타입(§12.1), 람다로의 pipe(§13.3), 패턴 결합자 오용(§13.9), 이름 있는 튜플(§20), NaN 순서(§25.1), 타입을 모르는 값의 rewrite(§26.1), C# 배열 생성 형태(§27.1), 타입 멤버(§28), Debug 검사(§29.1). 고친 것: §21.1·§23.1 예제의 부호, §7.4·§22.6의 범위, 부록 A·B
 
 ---
 
@@ -127,6 +128,10 @@ operator where default typeof
 
 `match`는 v0.6부터 예약어가 아니다.
 
+예약 키워드는 이름으로 쓸 수 없다(오류: `let default = 3`).
+
+예약 키워드도 문맥 키워드도 아닌 C# 키워드(`checked`, `event`, `object`, `fixed`, `lock`, `delegate` 등)는 이름으로 쓸 수 있다. 생성 C#에서는 `@`를 붙인다(`@checked`). 단, 타입 선언 머리는 그대로 C#에 넘어가므로 이런 단어를 타입 이름으로 쓰면 오류다.
+
 ### 3.4 리터럴
 
 - 숫자 리터럴은 C# 표기를 따른다: `0x` 16진, `0b` 2진, `_` 자릿수 구분자(`1_000_000`), 정수 접미사 `u`/`l`/`ul`, 실수 접미사 `f`/`d`/`m`. 접미사 없는 정수 리터럴의 타입도 C#과 같다(`int`에 안 들어가면 `uint` → `long` → `ulong`).
@@ -164,7 +169,7 @@ Queue<int> q          // `Queue<int> q;` 와 같다
 3. **다음 줄이 이어짐 토큰으로 시작할 때**: 다음 비어 있지 않은 줄의 첫 토큰이 다음 중 하나이면 앞 문장에 이어진다.
    - `.` `?.` `|>` `<|` `&&` `||` `and` `or`
    - `else` (직전 `if`에 이어진다)
-   - `{` (직전 문장이 본문을 기다리는 머리일 때만: `if cond`, `while cond`, `for x in src`, 함수 선언 머리, 타입 선언 머리)
+   - `{` (직전 문장이 본문을 기다리는 머리일 때만: `if cond`, `else`, `while cond`, `for x in src`, `try`, `catch (…)`, `finally`, 함수 선언 머리, 타입 선언 머리)
 
 ```txt
 let total = xs
@@ -198,6 +203,29 @@ if s > 0
 - **줄 시작의 `=`, `+=`**: 출력 shorthand([§18.1](#181-출력-shorthand))다.
 - **줄 시작의 `+`, `-`, `*` 등 그 밖의 이항 연산자**: 새 문장의 시작이다. 따라서 `- b`는 앞 줄에 이어지지 않는다. 결과를 쓰지 않는 단항식 문장이 되므로 경고 대상이다.
 
+#### 값을 버리는 문장
+
+값만 계산하는 식 문장이 tail position([§10.5](#105-꼬리-위치와-암묵적-반환)) 밖에 있으면 그 값은 버려진다. 거의 항상 실수이므로 **경고**한다. 대상은 리터럴, 이름, 연산자 식(대입과 pipe는 제외), 튜플, `is` 검사, range, 그리고 분기가 모두 이런 식인 `if` 식과 조건 연산자다. 호출, 대입, `++`/`--`는 부수 효과가 있으므로 대상이 아니다.
+
+함수 안에서는 진단이 `return`을 제안한다. 마지막 문장만 암묵적으로 반환되기 때문이다.
+
+```txt
+bool union(int a, int b) {
+    if a == b then
+        false          // 경고: 값을 버린다. return false로 쓴다
+    ...
+}
+```
+
+#### 입력 선언 다음의 들여쓴 줄
+
+줄 끝 `=`로 끝나는 선언은 입력이다. 바로 다음 줄이 그 선언보다 더 들여쓰여 있으면 값을 다음 줄에 쓰려던 것으로 보이지만, 실제로는 별개의 문장이다. 이 경우 **경고**한다. 값은 `=`와 같은 줄에 쓴다.
+
+```txt
+long ans =
+    solve(1, 2)        // 경고: ans는 입력에서 읽고, solve의 결과는 버려진다
+```
+
 ### 4.4 블록
 
 PSCP는 들여쓰기가 아니라 **중괄호**를 쓴다. 들여쓰기는 의미가 없다.
@@ -225,6 +253,21 @@ lowering: 중괄호 블록은 가능한 한 C# 블록으로 그대로 보존한�
 5. **PSCP intrinsic**: `stdin`, `stdout`, aggregate family, math family.
 
 같은 scope 안에서 변수와 함수가 같은 이름을 가지면 오류다.
+
+같은 scope에 같은 이름을 다시 선언하는 것도 오류다(`let x = 1` 다음 `let x = 2`). 값을 바꾸려면 한 번 `mut`/`var`로 선언하고 다시 대입한다. `if x is int v`의 패턴 변수는 C#과 같이 `if` 문을 둘러싼 scope에 선언되므로, 같은 scope에서 `v`를 다시 선언할 수 없다.
+
+안쪽 scope의 선언은 바깥 scope의 이름을 **가릴 수 있다**. 가려진 이름은 안쪽 scope가 끝나면 다시 보인다.
+
+```txt
+let x = 1
+if x == 1 {
+    let x = 2      // 바깥 x를 가린다
+    += x           // 2
+}
++= x               // 1
+```
+
+C#은 한 메서드 안의 이런 가림을 허용하지 않는다(CS0136). 그래서 트랜스파일러는 가리는 선언의 이름을 예약 접두사가 붙은 생성 이름(`__pscp_x_1`)으로 바꾼다. 이것이 [§5.4](#54-문법이-소유한-표면과-생성-이름)의 "사용자 이름 유지"의 유일한 예외다. 패턴 변수는 C# 패턴 텍스트 그대로 생성되어 이름을 바꿀 수 없으므로, 패턴 변수가 다른 이름을 가리면 오류다.
 
 트랜스파일러는 이 순서를 임의로 바꿔서는 안 된다.
 
@@ -376,7 +419,7 @@ let helper = 10
 타입 선언(class, struct, record) 안의 코드는 프로그램 scope 중 다음만 볼 수 있다.
 
 - 최상위 타입
-- **컴파일 시점 상수인 최상위 `let` 바인딩** (예: `let MOD = 1_000_000_007`)
+- **컴파일 시점 상수로 초기화한 최상위 불변 바인딩** (예: `let MOD = 1_000_000_007`, `int BASE = 31`)
 
 컴파일 시점 상수가 아닌 최상위 변수나 최상위 함수를 타입 안에서 참조하면 오류다.
 
@@ -395,6 +438,7 @@ reference backend는 synthetic program class 하나를 만든다.
 - 최상위 문장은 `Run()` 메서드 본문이 된다.
 - 최상위 함수는 program class의 static 메서드가 된다.
 - 최상위 함수가 참조하는 최상위 변수는 program class의 static 필드가 된다. 그렇지 않은 최상위 변수는 `Run()`의 지역 변수로 남는다.
+  필드에는 타입이 필요하다. 함수가 읽는 최상위 `let`/`var`의 초기화식 타입을 PSCP가 알 수 없으면(.NET 메서드 호출의 결과 등) **오류**이며, 타입을 명시해야 한다(`List<int> data = …`).
 - 타입에서 참조하는 최상위 상수는 타입에서 접근 가능한 `const`로 생성한다.
 - 진입점은 다음 형태를 권장한다.
 
@@ -423,6 +467,7 @@ C#의 다른 숫자 타입(`byte`, `short`, `uint`, `ulong`, `float` 등)도 pas
 
 - 정수 나눗셈은 0 방향으로 버린다. `%`의 부호는 피제수를 따른다. 내림/올림 나눗셈은 `floor(a, b)` / `ceil(a, b)`를 쓴다([§23](#23-math-family)).
 - 정수 오버플로는 wrap-around(unchecked)다. PSCP는 일반 산술에 검사를 추가하지 않는다. PSCP 고유 연산의 오버플로 규칙은 해당 절에서 정한다.
+- 컴파일 시점 상수끼리의 산술(`let A = 2000000000` 다음의 `A + A`, `int.MaxValue + 1`)도 wrap-around다. C#은 상수 식의 오버플로를 컴파일 오류로 보므로 생성 C#은 이런 식을 `unchecked`로 감싼다.
 - `char + int`의 결과는 `int`다. `char`가 필요하면 `char (c + 1)`로 변환한다([§21](#21-변환-키워드)).
 
 ### 8.2 튜플, 배열, generic, nullable
@@ -528,6 +573,8 @@ C# 형태 `int a = 1, b = 2`처럼 **이름마다 `=`가 있으면** 각각 독�
 | `(arr[i], arr[j]) = (arr[j], arr[i])` | 원소 swap |
 
 한 괄호 안에서 선언과 기존 변수를 섞은 `(int x, y) = e`는 오류다.
+
+괄호 바로 뒤에 `=`가 오면 구조 분해다. 괄호 뒤에 이름이 오면(`(int lo, int hi) r = e`) 이름 있는 튜플 타입의 선언이다([§20](#20-튜플)).
 
 lowering: 가능하면 C# deconstruction으로 그대로 보존한다. 불가능하면 임시값을 만든 뒤 원소 접근으로 분해할 수 있다.
 
@@ -725,7 +772,7 @@ _ => 1
 }
 ```
 
-- 블록 람다의 반환은 [§10.5](#105-꼬리-위치와-암묵적-반환)를 따른다.
+- 블록 람다의 반환은 [§10.5](#105-꼬리-위치와-암묵적-반환)를 따른다. 단, 대상 delegate가 값을 반환하지 않는 것으로 알려진 블록 람다(`Action<…>`으로 선언한 변수의 초기화식과 대입, `ForEach`의 인자)는 마지막 식을 반환하지 않는다. `xs.ForEach(x => { seen.Add(x) })`의 `seen.Add(x)`는 결과를 버리는 호출이다.
 - 람다는 space-call 인자로 쓸 때 괄호로 감싸야 한다: `sumBy arr (x => x * x)`.
 
 ---
@@ -873,6 +920,8 @@ else
 
 식 위치에서 `if c then e1 else e2`는 값을 낸다. 식 위치에서는 `else`가 필수다.
 
+두 분기에는 공통 타입이 있어야 한다. 같은 타입이거나 숫자 승격으로 맞출 수 있어야 하며, 그렇지 않으면 오류다. `+= if ok then idx else "NO"`는 `+= if ok then string idx else "NO"`로 쓴다. 조건 연산자 `c ? a : b`도 같다. 문장 위치의 `if c then f() else g()`는 제어 흐름이므로 이 규칙을 받지 않는다.
+
 ```txt
 let label = if score >= 90 then "A" else if score >= 80 then "B" else "C"
 ```
@@ -1004,6 +1053,8 @@ pipe는 **range보다 약하고 관계 연산자보다 강하다**. 그래서 pi
 | 변환 키워드 `long` | `long lhs` |
 | 괄호 식 `(e)` (람다 포함) | `(e)(lhs)` — delegate 호출 |
 
+괄호 식이 람다면 매개변수 타입(쓰지 않았으면 `lhs`의 타입)과 본문 타입으로 delegate 타입을 정해 호출한다. `5 |> (v => v + 1)`은 `((Func<int, int>)(v => v + 1))(5)`로 낮춘다. 타입을 알 수 없으면 오류이며, 매개변수 타입을 쓴다(`x |> ((int v) => v + 1)`).
+
 `rhs`를 **마지막 인자**로 넣는 `<|`는 대칭이다: `f x y <| rhs`는 `f x y rhs`, `f(x, y) <| rhs`는 `f(x, y, rhs)`.
 
 #### collection helper로의 pipe
@@ -1096,6 +1147,8 @@ if x is int v && v > 0 then ...        // OK
 if (x is int v) and v > 0 then ...     // OK
 if x is int v and v > 0 then ...       // 오류: `v > 0`을 패턴으로 읽는다
 ```
+
+트랜스파일러는 패턴 결합자 뒤에 `v > 0` 같은 조건식이 오거나 패턴 안에 `is`가 나오면(`a is null or b is null`) 오류로 진단한다. C#으로 넘기지 않는다.
 
 `if`/`while` 머리에서 패턴 뒤의 `{`는 블록 시작이다. 속성 패턴으로 머리를 끝내려면 괄호로 감싼다: `if (p is Point { X: 0 }) { ... }`.
 
@@ -1280,6 +1333,7 @@ let bad = []          // 오류: 빈 컬렉션의 타입을 알 수 없습니다
 
 #### lowering
 
+- `HashSet<T>`, `SortedSet<T>`, `Queue<T>`, `Stack<T>` target은 원소를 순서대로 담은 배열로 생성자를 부른다. `SortedSet<T>`에는 기본 순서의 비교자를 넘긴다([§25.4](#254-net-정렬-컬렉션과-문자열)).
 - 크기를 알 수 있으면 한 번 할당하고 직접 채운다.
 - spread가 있으면 크기를 싸게 알 수 있을 때 미리 할당하고, 아니면 growable builder를 쓴 뒤 finalize한다.
 - range 원소는 helper enumerable 없이 직접 채운다.
@@ -1686,7 +1740,7 @@ p.2
 ```
 
 - tuple projection `.1`, `.2`, …는 1부터 시작하는 원소 접근이다. C# `.Item1`, `.Item2`, …로 낮춘다. 8번째 이후는 `.Rest.Item1` 등으로 낮춘다.
-- 이름 있는 튜플 원소(`(int x, int y)`, `p.x`)는 C#과 같다.
+- 이름 있는 튜플 원소는 C#과 같다. 타입(`(int lo, int hi) r`, 함수 반환 타입 포함)과 리터럴(`(lo: 1, hi: 5)`) 모두 쓸 수 있고, `r.hi`로 접근한다. 원소 이름은 타입 동일성에 영향을 주지 않는다.
 - 튜플 대입과 swap은 C# 튜플 대입으로 보존한다.
 
 ---
@@ -1710,7 +1764,7 @@ string 0.5
 | `string` → 숫자 | InvariantCulture 파싱 | `int "42"` → `42` |
 | `string` → `bool` | `readBool`과 같은 파싱: `true`/`false`/`1`/`0` (대소문자 무관) | `bool "false"` → `false` |
 | `string` → `char` | 길이 1인 문자열의 그 문자 | `char "x"` → `'x'` |
-| 실수 → 정수 | **0 방향 버림** (C# 캐스트와 같다) | `int 3.7` → `3`, `int -3.7` → `-3` |
+| 실수 → 정수 | **0 방향 버림** (C# 캐스트와 같다) | `int 3.7` → `3`, `int (-3.7)` → `-3` |
 | 정수 → 정수 | C# 캐스트 (좁히면 wrap) | `int 5000000000L` → wrap |
 | `char` → 정수 | **코드 값** | `int 'A'` → `65`, `int '7'` → `55` |
 | 정수 → `char` | 코드 값의 문자 | `char 65` → `'A'` |
@@ -1719,6 +1773,7 @@ string 0.5
 | 모든 값 → `string` | [§18.3](#183-렌더링-규칙) 렌더링 | `string true` → `"true"`, `string ['a','b']` → `"ab"` |
 
 - 숫자 문자 하나의 값을 얻으려면 `c - '0'`을 쓴다.
+- 음수 리터럴은 괄호로 감싼다. `int -3.7`은 [§11.3](#113-부호와-space-call)에 따라 `int - 3.7`이다.
 - 반올림이 필요하면 `round`를 먼저 쓴다: `long (round x)`.
 - 문자열의 "비어 있음" 검사는 변환이 아니라 `s.Length > 0` 또는 `s != ""`로 쓴다.
 
@@ -1814,7 +1869,7 @@ lowering: 직접 비교-갱신으로 낮춘다.
 직접 target-typed 위치는 호출이 **식 전체**인 다음 위치다.
 
 - 명시 타입 선언의 초기화식: `long total = sum arr`
-- 타입이 정해진 변수로의 대입: `total = sum arr`
+- 타입이 정해진 변수로의 대입과 복합 대입: `total = sum arr`, `total += sum arr`
 - 매개변수 타입이 정해진 인자
 - 반환 타입이 정해진 함수의 `return` 또는 tail value
 
@@ -1831,7 +1886,7 @@ long s4 = sum (a -> x do long x)  // long 누산
 
 ### 22.7 lowering contract
 
-- 작은 fixed-arity `min`/`max` → 비교 트리
+- 작은 fixed-arity `min`/`max` → 비교 트리. 실수는 `CompareTo`로 비교한다(`Math.Max(1.0, NaN)`은 `NaN`이라 [§25.1](#251-기본-순서)과 다르다)
 - iterable `min`/`max`/`sum` → direct loop
 - generator 인자 → fused loop (중간 materialization 금지)
 - `minBy`/`maxBy` → best 원소와 best key 추적
@@ -1852,7 +1907,7 @@ long s4 = sum (a -> x do long x)  // long 누산
 | `lcm(a, b)` | `int`, `long` | 음이 아닌 최소공배수. 하나라도 0이면 0 |
 | `floor(x)` / `ceil(x)` | `double`→`double`, `decimal`→`decimal` | 내림 / 올림 |
 | `floor(a, b)` / `ceil(a, b)` | `int`, `long` | 정수 나눗셈의 내림 / 올림: `floor(-7, 2) = -4`, `ceil(7, 2) = 4`. `b = 0`이면 .NET `DivideByZeroException` |
-| `round(x)` | `double`→`double`, `decimal`→`decimal` | **0에서 먼 쪽으로 반올림**: `round 2.5 = 3`, `round -2.5 = -3` |
+| `round(x)` | `double`→`double`, `decimal`→`decimal` | **0에서 먼 쪽으로 반올림**: `round 2.5 = 3`, `round (-2.5) = -3` |
 | `round(x, d)` | 위와 같음 | 소수 `d`자리에서 같은 규칙으로 반올림 |
 | `pow(a, e)` | `int, int`→`int`, `long, int`→`long` | **정확한 정수 거듭제곱**. `e < 0`은 전제조건 위반. 누산 타입은 [§22.6](#226-정수-누산-타입) |
 | `pow(a, e)` | `double, double`→`double` | 실수 거듭제곱 |
@@ -2009,6 +2064,8 @@ PSCP가 소유한 모든 순서 연산은 다음 **기본 순서**를 쓴다: `<
 
 기본 순서가 없는 타입에 순서 연산을 쓰면 오류다.
 
+PSCP 순서 연산은 모두 이 순서를 쓴다. 따라서 `min(1.0, NaN)`은 `NaN`, `max(1.0, NaN)`은 `1.0`이고, `chmin(ref x, NaN)`은 `x`를 `NaN`으로 바꾸고 `true`를 반환한다. NaN이 끼면 항상 `false`인 C#의 `<`/`>`나 `Math.Max`와는 다르다.
+
 **문자열이 ordinal인 이유**: .NET의 기본 문자열 비교(`Comparer<string>.Default`, `string.CompareTo`)는 현재 culture의 언어 규칙을 따른다. 그러면 `["b", "B", "a", "A"]`가 `a A b B`로 정렬되고, 결과가 실행 환경에 따라 달라진다. 채점 환경이 기대하는 것은 ASCII 순서 `A B a b`다.
 
 ### 25.2 `T.asc`, `T.desc`
@@ -2064,6 +2121,7 @@ record struct Job(int Id, long Time) {
 ### 26.1 적용 조건
 
 - 피연산자의 **정적 타입이 정확히** 아래 표의 BCL 타입일 때만 적용한다. 하위 클래스, wrapper, 사용자 타입에는 적용하지 않는다.
+- PSCP가 정적 타입을 알 수 없는 값(.NET 메서드의 결과를 타입 없이 `let`으로 받은 값 등)에도 적용하지 않는다. 그런 값의 `+=`는 C# 연산자 그대로다. 컬렉션 연산자를 쓰려면 타입을 명시해 선언한다(`List<int> picked = …`).
 - rewrite는 **호출**이다. 반환 타입은 기반 .NET 메서드의 반환 타입이다. 값이 있는 rewrite는 식 안에서 쓸 수 있고 tail position에서 반환된다([§10.5](#105-꼬리-위치와-암묵적-반환)).
 
 ### 26.2 표
@@ -2120,6 +2178,7 @@ NodeInfo[] nodes = new[n]
 ```
 
 - target type을 보고 배열을 할당한다. 원소는 기본값이다.
+- C# 형태도 쓸 수 있다: `new int[n]`, `new int[n][m]`(모든 층 할당, `new[n][m]`과 같다), `new long[n][]`(행은 `null`, C#과 같다), `new int[] { 1, 2 }`와 `new[] { 1, 2 }`(컬렉션 식 `[1, 2]`와 같다).
 - 여러 차원을 쓰면 **모든 층을 할당한 jagged 배열**이다.
 - target type이 없으면 오류다.
 
@@ -2186,6 +2245,8 @@ class A : B, IFoo {
 
 `class`, `struct`, `record`, `record struct`, `interface`, `enum`, 기반/인터페이스 목록, generic, constraint는 C#과 같다(pass-through). C# 10 범위를 따르므로 class의 primary constructor는 쓸 수 없다. positional record는 쓸 수 있다.
 
+`interface`의 멤버도 다른 타입의 멤버처럼 `;` 없이 쓴다. 본문이 없는 메서드는 선언이다. `enum` 본문은 C# 그대로다.
+
 ### 28.2 멤버
 
 - **기본 접근성은 `public`이다.** 접근 한정자를 쓰지 않은 멤버(필드, 메서드, 생성자, 중첩 타입)는 `public`으로 생성한다. 명시한 한정자(`private` 등)는 그대로 보존한다.
@@ -2203,6 +2264,12 @@ class A : B, IFoo {
 - 메서드는 [§10](#10-함수)을 따른다. 암묵적 반환이 적용되며, 재귀에 `rec`이 필요 없다([§10.3](#103-rec)).
 - 생성자, 속성(`{ get; set; }`), 연산자 선언, `this`/`base`는 C# 문법을 따른다.
 - `operator<=>`는 [§25.3](#253-operator)을 따른다.
+- `abstract`/`extern` 메서드에는 본문이 없다. `virtual`/`override`, 명시적 인터페이스 구현(`int IComparable<Job>.CompareTo(Job o)`), `const` 멤버는 C#과 같다.
+- 속성은 식 본문(`T Name => e`), getter 블록(`T Name { … }`), C# 접근자 목록(`{ get; set; }`, `{ get; private set; }`, `init`, 본문 있는 접근자)으로 쓴다. 자동 속성은 `= 값`으로 초기화할 수 있다. `set`/`init` 본문에서는 `value`를 쓴다.
+- 인덱서 `T this[int i]`는 속성과 같은 본문 형태를 쓴다.
+- 사용자 연산자 선언(`static V operator +(V a, V b)`)은 C#이 요구하는 대로 항상 `public static`으로 생성한다.
+- struct의 필드에 초기화식이 있으면(known auto-constructible 필드와 크기 있는 배열 필드 포함) 트랜스파일러는 매개변수 없는 생성자를 생성한다(C# 10 요구). 초기화식은 `new T()`일 때만 실행되며, `default(T)`나 배열의 원소는 기본값이다.
+- object initializer(`new Edge { to = 3 }`)나 `with`로 불변 필드에 값을 주는 것은 생성자 밖의 대입이다. 불변 위반 경고 후 그 필드는 일반 필드로 생성한다.
 - 타입 안에서 보이는 최상위 이름은 [§7.4](#74-타입-선언에서의-가시성)를 따른다.
 
 ```txt
@@ -2223,7 +2290,7 @@ let e = new Edge { to = 3, w = 10 }
 - **Release 빌드에는 PSCP가 추가로 넣은 검사나 `throw`가 없어야 한다.**
   - 허용: 사용자가 직접 쓴 `throw`, pass-through .NET API가 원래 던지는 예외
   - 금지: 방어적 range step 검사, generic fallback helper의 인위적 throw, 트랜스파일러가 편의상 넣은 sanity check
-- Debug 전용 검사는 `#if DEBUG` 또는 `Debug.Assert`로 감싼다.
+- Debug 전용 검사는 `#if DEBUG`로 감싸고 [§29.2](#292-전제조건-위반)의 예외를 던진다. `Debug.Assert`는 그 예외를 던지지 않으므로 전제조건 검사에 쓰지 않는다.
 - 컴파일 시점에 알 수 있는 위반(상수 step 0 등)은 빌드 모드와 관계없이 **진단**한다.
 
 ### 29.2 전제조건 위반
@@ -2451,7 +2518,7 @@ v0.7이 더한 것은 **"조용히 틀리지 않는다"**는 원칙이다. 같�
 
 ## 부록 A. 문법 요약
 
-EBNF 비슷한 표기로 쓴 요약이다. 정확한 해석은 본문 규칙(특히 [§4](#4-문장-줄바꿈-블록) 줄 이어짐, [§11](#11-호출) space-call, [§13.9](#139-패턴-문맥) 패턴 문맥)을 따른다. 타입, 패턴, 생성자, 속성, switch 식 arm 등 C# pass-through 문법은 C# 10 문법을 참조한다.
+EBNF 비슷한 표기로 쓴 요약이다. 정확한 해석은 본문 규칙(특히 [§4](#4-문장-줄바꿈-블록) 줄 이어짐, [§11](#11-호출) space-call, [§13.9](#139-패턴-문맥) 패턴 문맥)을 따른다. 타입(이름 있는 튜플 원소 `(int lo, int hi)` 포함), 패턴, 생성자, 속성과 접근자, 인덱서, 연산자 선언, switch 식 arm 등 C# pass-through 문법은 C# 10 문법을 참조한다. 단, 멤버 끝의 `;`은 선택이다([§4.1](#41-기본-규칙)).
 
 ```ebnf
 program        = { top-item } ;
@@ -2520,10 +2587,10 @@ application    = postfix { WS group } ;             (* head가 호출 가능할 
 group          = [ "ref" | "out" | "in" ] postfix   (* postfix는 부호 연산자로 시작할 수 없다 *)
                | "(" expr { "," expr } ")" ;
 postfix        = primary { postfix-op } ;           (* 후위 연산은 공백 없이 붙는다 *)
-postfix-op     = "." IDENT | "?." IDENT | "." INT-LITERAL | "[" index-args "]" | "?[" expr "]"
+postfix-op     = "." IDENT [ type-args ] | "?." IDENT | "." INT-LITERAL | "[" index-args "]" | "?[" expr "]"
                | "(" [ args ] ")" | "++" | "--" | "!" ;
 primary        = literal | IDENT | "_" | "this" | "base" | type-keyword
-               | "(" expr ")" | "(" expr "," expr { "," expr } ")"
+               | "(" expr ")" | "(" tuple-elem "," tuple-elem { "," tuple-elem } ")"
                | collection | generator | interpolated
                | new-expr | if-expr | comparer ;
 if-expr        = "if" expr "then" expr "else" expr ;
@@ -2532,9 +2599,20 @@ collection     = "[" [ coll-elem { "," coll-elem } ] "]"
                | "[" expr "->" iter-binding "do" expr "]" ;
 coll-elem      = ".." expr | expr ;                 (* range 문법 원소는 자동 펼침 *)
 generator      = "(" expr "->" iter-binding "do" expr ")" ;
+tuple-elem     = [ IDENT ":" ] expr ;                (* 이름 있는 원소: (lo: 1, hi: 5) *)
 new-expr       = "new" "[" expr "]" { "[" expr "]" }
                | "new!" "[" expr "]"
-               | "new" [ type ] "(" [ args ] ")" [ init-body ] ;
+               | "new" type "[" expr "]" { "[" [ expr ] "]" }   (* new int[n], new int[n][m], new long[n][] *)
+               | "new" [ type ] "[" "]" array-init               (* new int[] { 1, 2 }, new[] { 1, 2 } *)
+               | "new" [ type ] "(" [ args ] ")" [ init-body ]
+               | "new" type init-body ;
+array-init     = "{" [ expr { "," expr } ] "}" ;
+init-body      = "{" [ init-entry { "," init-entry } ] "}" ;
+init-entry     = IDENT "=" expr                                  (* object initializer *)
+               | "[" expr { "," expr } "]" "=" expr              (* index initializer *)
+               | "{" expr { "," expr } "}"                       (* Add(a, b) *)
+               | expr ;                                          (* collection initializer element *)
+type-args      = "<" type { "," type } ">" ;                     (* 공백 없이 이름에 붙는다: readArray<int> *)
 index-args     = index | slice ;
 index          = [ "^" ] expr ;
 slice          = [ index ] ( "..<" | "..=" ) index | index ".." | ".." ;
@@ -2549,10 +2627,13 @@ slice          = [ index ] ( "..<" | "..=" ) index | index ".." | ".." ;
 | 조건 | 절 |
 |---|---|
 | `__pscp`/`__Pscp`로 시작하는 사용자 식별자 | §3.2 |
+| 예약 키워드인 이름, C# 키워드인 타입 이름 | §3.3 |
 | 선언이 아닌 곳의 줄 끝 `=` | §4.3 |
 | 같은 scope에서 변수와 함수의 이름 충돌 | §5.1 |
+| 같은 scope의 재선언, 다른 이름을 가리는 패턴 변수 | §5.1 |
 | 지원하지 않는 C# 문장 (`foreach`, `do-while`, `switch` 문, `goto` 등) | §6.3 |
 | 타입 안에서 상수가 아닌 최상위 변수나 최상위 함수를 참조 | §7.4 |
+| 함수가 읽지만 타입을 알 수 없는 최상위 변수 | §7.5 |
 | 초기화 없는 불변 지역 선언 (known collection, 크기 있는 배열 제외) | §9.3 |
 | 한 괄호 안에서 선언과 기존 변수를 섞은 구조 분해 | §9.5 |
 | 재귀 순환에 속한 함수의 `rec` 누락 | §10.3 |
@@ -2560,8 +2641,9 @@ slice          = [ index ] ( "..<" | "..=" ) index | index ".." | ".." ;
 | space-call head가 호출 불가 | §11.2 |
 | 함수(메서드 그룹)에서의 뺄셈 (`f -1`), 인자가 모자란 application 뒤의 뺄셈 | §11.3 |
 | 문장 시작 `A b`에서 `A`가 타입도 호출 가능한 것도 아님 | §11.5 |
-| 식 위치 `if`에 `else` 없음 | §12.1 |
-| pipe 대상이 호출 불가, `\|>`와 `<\|` 혼용 | §13.3 |
+| 식 위치 `if`에 `else` 없음, 공통 타입이 없는 `if` 식과 조건 연산자의 분기 | §12.1 |
+| pipe 대상이 호출 불가, `\|>`와 `<\|` 혼용, 타입을 알 수 없는 람다로의 pipe | §13.3 |
+| 패턴 결합자 뒤의 조건식, 패턴 안의 `is` | §13.9 |
 | known DS에 후위 `++`/`--` | §13.5, §26 |
 | 상수 step 0, `char`와 정수 bound 혼합 | §14 |
 | 인덱서 안의 `a..b`, `..b`, stepped range | §15.2 |
@@ -2579,7 +2661,8 @@ slice          = [ index ] ( "..<" | "..=" ) index | index ".." | ".." ;
 
 | 조건 | 절 |
 |---|---|
-| 결과를 쓰지 않는 단항식 문장 (`- b`) | §4.3 |
+| 값을 버리는 식 문장 (`- b`, `n == 3`, 함수 중간의 `false`) | §4.3 |
+| 줄 끝 `=` 입력 선언 바로 다음의 더 들여쓴 줄 | §4.3 |
 | 초기화 전 최상위 변수를 읽을 수 있는 최상위 호출 | §7.3 |
 | 불변 바인딩/필드 수정 | §9.2, §28.2 |
 | 재귀하지 않는 함수의 `rec`, 타입 멤버의 `rec` | §10.3 |

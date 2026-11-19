@@ -11,6 +11,8 @@ public static class DiagnosticCodes
     public const string IfExpressionWithoutElse = "PSCP1103";
     public const string MixedPipeDirections = "PSCP1104";
     public const string RemovedSectionLabel = "PSCP1105";
+    public const string IndentedLineAfterInput = "PSCP1106";
+    public const string ConditionReadAsPattern = "PSCP1107";
 
     // Control flow, names, declarations.
     public const string JumpOutsideLoop = "PSCP2008";
@@ -23,6 +25,7 @@ public static class DiagnosticCodes
     public const string ReadBeforeInitialization = "PSCP2107";
     public const string ImmutableMutation = "PSCP2108";
     public const string TypeReferencesProgramScope = "PSCP2109";
+    public const string DuplicateDeclaration = "PSCP2110";
 
     // Functions, returns, calls, operators.
     public const string MissingRec = "PSCP2201";
@@ -87,6 +90,8 @@ public static class DiagnosticCodes
         [UnsupportedStatement] = ("§6.3", "63-지원하지-않는-c-문장"),
         [IfExpressionWithoutElse] = ("§12.1", "121-if"),
         [MixedPipeDirections] = ("§13.3", "133-pipe"),
+        [IndentedLineAfterInput] = ("§4.3", "43-줄-이어짐이-아닌-것"),
+        [ConditionReadAsPattern] = ("§13.9", "139-패턴-문맥"),
         [JumpOutsideLoop] = ("§12.5", "125-break-continue-return"),
         [ReservedIdentifier] = ("§3.2", "32-식별자"),
         [VariableFunctionConflict] = ("§5.1", "51-비한정-이름의-우선순위"),
@@ -97,6 +102,7 @@ public static class DiagnosticCodes
         [ReadBeforeInitialization] = ("§7.3", "73-프로그램-scope"),
         [ImmutableMutation] = ("§9.2", "92-불변성의-의미와-진단"),
         [TypeReferencesProgramScope] = ("§7.4", "74-타입-선언에서의-가시성"),
+        [DuplicateDeclaration] = ("§5.1", "51-비한정-이름의-우선순위"),
         [MissingRec] = ("§10.3", "103-rec"),
         [MissingReturnValue] = ("§10.5", "105-꼬리-위치와-암묵적-반환"),
         [NotCallable] = ("§11.2", "112-space-call"),

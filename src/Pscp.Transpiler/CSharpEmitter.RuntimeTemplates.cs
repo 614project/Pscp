@@ -327,7 +327,8 @@ internal sealed partial class CSharpEmitter
                     Read();
             #if DEBUG
                     hasDigits = true;
-                    overflow |= value > 1844674407370955161UL;
+                    // `value * 10 + digit` exceeds ulong exactly when this holds.
+                    overflow |= value > 1844674407370955161UL || (value == 1844674407370955161UL && next > '5');
             #endif
                     value = unchecked(value * 10 + (ulong)(next - '0'));
                 }
@@ -1268,11 +1269,11 @@ internal sealed partial class CSharpEmitter
 
             public static bool chmin(ref int target, int value) { if (value < target) { target = value; return true; } return false; }
             public static bool chmin(ref long target, long value) { if (value < target) { target = value; return true; } return false; }
-            public static bool chmin(ref double target, double value) { if (value < target) { target = value; return true; } return false; }
+            public static bool chmin(ref double target, double value) { if (value.CompareTo(target) < 0) { target = value; return true; } return false; }
             public static bool chmin(ref char target, char value) { if (value < target) { target = value; return true; } return false; }
             public static bool chmax(ref int target, int value) { if (value > target) { target = value; return true; } return false; }
             public static bool chmax(ref long target, long value) { if (value > target) { target = value; return true; } return false; }
-            public static bool chmax(ref double target, double value) { if (value > target) { target = value; return true; } return false; }
+            public static bool chmax(ref double target, double value) { if (value.CompareTo(target) > 0) { target = value; return true; } return false; }
             public static bool chmax(ref char target, char value) { if (value > target) { target = value; return true; } return false; }
 
             public static bool chmin<T>(ref T target, T value)

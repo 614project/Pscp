@@ -46,14 +46,23 @@ internal sealed partial class CSharpEmitter
             _ => $"Comparer<{EmitType(type)}>.Default.Compare({left}, {right})",
         };
 
-    // `left < right` (or `>`) in the default order.
+    // `left < right` (or `>`) in the default order. `NaN` is below every other value (§25.1), which the C#
+    // operators do not give, so real numbers compare with `CompareTo`.
     private string EmitPreferredComparison(string left, string right, TypeSyntax type, bool preferLower)
     {
         string op = preferLower ? "<" : ">";
+        if (IsRealNumberType(type))
+        {
+            return $"{left}.CompareTo({right}) {op} 0";
+        }
+
         return GetOrderKind(type) == OrderKind.Numeric
             ? $"{left} {op} {right}"
             : $"{EmitDefaultOrderCompare(left, right, type)} {op} 0";
     }
+
+    private static bool IsRealNumberType(TypeSyntax? type)
+        => type is NamedTypeSyntax { TypeArguments.Count: 0, Name: "double" or "float" or "Double" or "Single" or "System.Double" or "System.Single" };
 
     // The comparer an auto-constructed ordered collection needs (§9.3, §25.4), or null when `new()` already
     // uses the default order.
