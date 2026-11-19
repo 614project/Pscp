@@ -107,6 +107,23 @@ internal sealed partial class CSharpEmitter
             return $"__PscpSeq.compare({left}, {right})";
         }
 
+        if (_uncheckedDepth == 0
+            && binary.Operator is BinaryOperator.Add or BinaryOperator.Subtract or BinaryOperator.Multiply or BinaryOperator.Divide or BinaryOperator.Modulo or BinaryOperator.ShiftLeft
+            && IsIntegralType(_semantic?.GetExpressionType(binary))
+            && IsCSharpConstant(binary.Left)
+            && IsCSharpConstant(binary.Right))
+        {
+            _uncheckedDepth++;
+            try
+            {
+                return $"unchecked{EmitBinaryExpression(binary)}";
+            }
+            finally
+            {
+                _uncheckedDepth--;
+            }
+        }
+
         string op = binary.Operator switch
         {
             BinaryOperator.Add => "+",
@@ -133,6 +150,27 @@ internal sealed partial class CSharpEmitter
 
         return $"({EmitExpression(binary.Left)} {op} {EmitExpression(binary.Right)})";
     }
+
+    private static bool IsIntegralType(TypeSyntax? type)
+        => type is NamedTypeSyntax { TypeArguments.Count: 0, Name: "int" or "long" or "uint" or "ulong" or "short" or "ushort" or "byte" or "sbyte" };
+
+    // An operand C# treats as a constant: a literal, a name emitted as `const`, `int.MaxValue`, or arithmetic
+    // over those.
+    private bool IsCSharpConstant(Expression expression)
+        => expression switch
+        {
+            LiteralExpression { Kind: LiteralKind.Integer or LiteralKind.Char or LiteralKind.Float } => true,
+            IdentifierExpression identifier => _semantic?.GetReferenceRename(identifier) is null
+                && !IsIdentifierAliasActive(identifier.Name)
+                && _constNames.Contains(identifier.Name),
+            MemberAccessExpression { Receiver: IdentifierExpression { Name: "int" or "long" or "uint" or "ulong" or "short" or "ushort" or "byte" or "sbyte" or "char" }, MemberName: "MaxValue" or "MinValue" } => true,
+            UnaryExpression { Operator: UnaryOperator.Plus or UnaryOperator.Negate or UnaryOperator.Peek } unary => IsCSharpConstant(unary.Operand),
+            BinaryExpression binary => binary.Operator is not (BinaryOperator.PipeLeft or BinaryOperator.PipeRight or BinaryOperator.Spaceship or BinaryOperator.Coalesce)
+                && IsCSharpConstant(binary.Left)
+                && IsCSharpConstant(binary.Right),
+            CastExpression cast => IsIntegralType(cast.Type) && IsCSharpConstant(cast.Operand),
+            _ => false,
+        };
 
     private string EmitPipeRight(Expression left, Expression right)
     {
@@ -3082,7 +3120,8 @@ internal sealed partial class CSharpEmitter
         for (int i = 1; i < positional.Count; i++)
         {
             string candidate = EmitExpression(positional[i].Expression);
-            current = PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType)
+            // `Math.Max(1.0, NaN)` is NaN, but NaN is the smallest value in the default order (§25.1).
+            current = PscpIntrinsicCatalog.IsMathMinMaxCompatible(commonType) && !IsRealNumberType(commonType)
                 ? $"System.Math.{char.ToUpperInvariant(name[0]) + name[1..]}({current}, {candidate})"
                 : $"__PscpSeq.{name}({current}, {candidate})";
         }

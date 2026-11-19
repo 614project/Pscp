@@ -2399,6 +2399,14 @@ internal static class PscpSemanticAnalyzer
 
             if (hasTypeLikeReceiver)
             {
+                // `int.MaxValue`, `double.NaN`: the constants of the numeric types have the type itself.
+                if (receiverName is "int" or "long" or "double" or "decimal" or "char" or "float" or "uint" or "ulong" or "short" or "ushort" or "byte" or "sbyte"
+                    && (memberName is "MaxValue" or "MinValue"
+                        || (receiverName is "double" or "float" && memberName is "NaN" or "PositiveInfinity" or "NegativeInfinity" or "Epsilon")))
+                {
+                    return TypeName(receiverName);
+                }
+
                 if (TryResolveType(receiverName, out TypeInfo? receiverTypeInfo) && receiverTypeInfo is not null)
                 {
                     if (receiverTypeInfo.NestedTypes.TryGetValue(memberName, out TypeInfo? nestedType))

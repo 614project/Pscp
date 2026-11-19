@@ -12,6 +12,11 @@ internal sealed partial class CSharpEmitter
     private readonly HashSet<string> _declaredTypeNames = new(StringComparer.Ordinal);
     private readonly HashSet<string> _declaredValueNames = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Stack<string>> _identifierAliases = new(StringComparer.Ordinal);
+
+    // Names emitted as C# `const`. Integer arithmetic over constants only is a C# constant expression, which
+    // the compiler checks for overflow (CS0220); PSCP arithmetic wraps (§8.1), so it is written `unchecked`.
+    private readonly HashSet<string> _constNames = new(StringComparer.Ordinal);
+    private int _uncheckedDepth;
     private readonly Dictionary<string, DeclaredTypeShape> _declaredTypeShapes = new(StringComparer.Ordinal);
     private string _className = string.Empty;
     private string _runMethodName = "Run";
@@ -335,6 +340,7 @@ internal sealed partial class CSharpEmitter
                 && IsConstInitializerCompatible(constTypeText, constType!))
             {
                 _writer.WriteLine($"public const {constTypeText} {name} = {constText};");
+                _constNames.Add(name);
             }
             else
             {
@@ -1161,6 +1167,7 @@ internal sealed partial class CSharpEmitter
         }
 
         _writer.WriteLine($"const {typeText} {name} = {initializerText};");
+        _constNames.Add(name);
         return true;
     }
 
@@ -1172,7 +1179,23 @@ internal sealed partial class CSharpEmitter
             && _semantic?.GetExpressionType(expression) is NamedTypeSyntax { TypeArguments.Count: 0 } constantType
             && TryGetConstTypeText(constantType) is string constantTypeText)
         {
-            initializerText = constantTypeText is "string" or "bool" ? EmitExpression(expression) : $"unchecked({EmitExpression(expression)})";
+            if (constantTypeText is "string" or "bool")
+            {
+                initializerText = EmitExpression(expression);
+            }
+            else
+            {
+                _uncheckedDepth++;
+                try
+                {
+                    initializerText = $"unchecked({EmitExpression(expression)})";
+                }
+                finally
+                {
+                    _uncheckedDepth--;
+                }
+            }
+
             literalType = constantTypeText;
             return true;
         }
