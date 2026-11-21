@@ -134,249 +134,30 @@ query -> q {
 
 ---
 
-## 빠른 시작
+## 시작하기
 
-.NET 10 이상의 [SDK](https://dotnet.microsoft.com/)를 설치한 후, `installer/Build-Installer.ps1` 을 실행하면 `artifacts/installer/setup` 폴더에 `setup.exe`라는 파일명으로 pscp의 SDK 설치 파일이 생성되는데, 이를 설치하시면 됩니다.  
-이후 원하는 폴더에서 `main.pscp` 파일을 생성하고, pscp 코드를 작성한 후 터미널에 `pscp run`를 입력하면 실행 결과를 바로 볼수 있습니다.
-
-## 구성
-
-이 저장소에는 다음 구현이 들어 있습니다:
-- `src/Pscp.Transpiler`: `pscp` -> C# 트랜스파일러
-- `src/Pscp.Cli`: CLI 및 SDK 진입점 (`pscp.exe`)
-- `src/Pscp.LanguageServer`: LSP 서버
-- `src/Pscp.Installer`: Windows 설치기
-- `tests/Pscp.Transpiler.Tests`: 트랜스파일러 스모크 테스트
-- `vscode/pscp-vscode`: VS Code 확장
-- `vscode/Build-Vsix.ps1`: VSIX 빌드 스크립트
-- `installer/Build-Installer.ps1`: 설치기 빌드 스크립트
-- `tests/TestCodes/v0.7`: v0.7 적합성 프로그램 (`.pscp` / `.in` / `.out`)
-- `docs` : 언어 및 서버 관련 문서
-  - `docs/pscp_v_0_7_spec.md`: 언어 스펙 (규범). 진단 목록은 부록 B
-  - `docs/pscp_v_0_7_changes.md`: 0.6 대비 변경 항목 해설
-  - `docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md`: 언어 서버와 VS Code 확장의 계약
-  - `docs/deprecated`: 이전 버전 문서
-
-## 빠른 SDK 빌드
-
-저장소에서 바로 CLI를 실행하려면:
+1. [.NET 10 SDK](https://dotnet.microsoft.com/) 이상을 설치합니다.
+2. [Releases](https://github.com/614project/Pscp/releases)에서 PSCP SDK를 받아 설치합니다. (직접 빌드하는 방법은 [위키의 설치 문서](https://github.com/614project/Pscp/wiki/Installation)에 있습니다.)
+3. 원하는 폴더에 `main.pscp`를 만들고 코드를 작성한 뒤 `pscp run`을 실행합니다.
 
 ```powershell
-dotnet build src\Pscp.Cli\Pscp.Cli.csproj
-dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- init .\sample
+pscp init      # main.pscp와 .pscp 프로젝트 생성
+pscp run       # 트랜스파일 후 실행
+pscp test      # name.in / name.out 샘플로 채점
 ```
 
-그러면 다음이 생성됩니다.
+## 문서
 
-- `sample\main.pscp`
-- `sample\.pscp\Pscp.Generated.csproj`
-- `sample\.pscp\Program.cs`
+도구 사용법은 [GitHub 위키](https://github.com/614project/Pscp/wiki)에 정리되어 있습니다.
 
-## 사용자 코드 실행 방법
+- [설치](https://github.com/614project/Pscp/wiki/Installation): Windows 설치기, Linux 패키지
+- [CLI 사용법](https://github.com/614project/Pscp/wiki/CLI): 명령과 옵션, 진단, 샘플 실행
+- [언어 서버 (LSP)](https://github.com/614project/Pscp/wiki/Language-Server)
+- [VS Code 확장](https://github.com/614project/Pscp/wiki/VS-Code-Extension)
+- [개발 및 빌드](https://github.com/614project/Pscp/wiki/Development): 저장소 구성, 소스 빌드, Native AOT, 릴리즈
 
-주요 명령어 설명:
+언어 규범 문서:
 
-- `pscp init`: 현재 폴더에 `main.pscp`, 하위 `.pscp` 폴더에 C# 프로젝트를 만듭니다. `--force`는 `.pscp` 프로젝트를 다시 만들고, 이미 있는 `main.pscp`는 그대로 둡니다.
-- `pscp run [file.pscp]`: `.pscp\Program.cs`로 트랜스파일한 뒤 `dotnet run`까지 이어서 실행합니다.
-- `pscp build [file.pscp]`: `.pscp\Program.cs`로 트랜스파일한 뒤 `dotnet build`를 수행합니다.
-- 파일명을 생략하면 현재 폴더의 `main.pscp`를 자동으로 찾습니다.
-
-예시:
-
-```powershell
-pscp run code.pscp
-```
-
-또는 현재 폴더에 `main.pscp`가 있다면:
-
-```powershell
-pscp run
-```
-
-입력 처리:
-
-- `pscp run --stdin-file input.txt`: 파일 내용을 표준 입력으로 넘깁니다.
-- `--stdin-file` 없이 실행하면 콘솔에서 직접 입력할 수 있습니다.
-- 파이프/리다이렉션된 표준 입력도 그대로 프로그램으로 전달됩니다.
-
-저장소에서 직접 실행할 때는 다음처럼 사용할 수 있습니다.
-
-```powershell
-dotnet run --project src\Pscp.Cli\Pscp.Cli.csproj -- run .\sample\main.pscp --stdin-file .\sample\input.txt
-```
-
-## CLI 명령
-
-```text
-pscp init [directory] [--force]
-pscp check [file.pscp] [--json]
-pscp transpile [file.pscp] [-o output.cs] [--print] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack]
-pscp build [file.pscp] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]
-pscp run [file.pscp] [--stdin-file input.txt] [-c Debug|Release] [--release] [--debug] [--namespace N] [--class-name C] [--compact|--verbose] [--pretty] [--explain] [--large-stack] [--older]
-pscp test [file.pscp] [--json] [-c Debug|Release] [--timeout ms] [--float-tolerance eps]
-pscp lsp
-pscp version
-```
-
-### 진단
-
-진단마다 코드가 붙습니다(`PSCP2108` 등). 진단 조건은 스펙 [부록 B](docs/pscp_v_0_7_spec.md#부록-b-진단-목록)에, 코드별 목록은 [언어 서버 가이드 부록 B](docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md#부록-b-진단-코드-표)에 있습니다.
-
-```text
-2:1: warning PSCP2108: `y` is immutable but is modified here. Declare it with `mut` or `var` to make the mutation explicit.
-```
-
-`pscp check --json`은 편집기나 CI가 읽기 좋은 형태로 같은 진단을 내보냅니다. 각 항목에 코드, 범위, 심각도, 스펙 절 링크(`codeDescription`), 태그, 관련 위치(`relatedInformation`)가 들어갑니다.
-
-### 샘플 실행 (`pscp test`)
-
-`dir/name.pscp`의 샘플은 같은 폴더의 `name.in`/`name.out`과 `name.<k>.in`/`name.<k>.out` 쌍입니다. `pscp test`는 **한 번만 빌드**하고 샘플을 모두 실행해 기대 출력과 비교합니다.
-
-```powershell
-pscp test                 # 현재 폴더의 main.pscp
-pscp test code.pscp --json
-```
-
-비교할 때 줄 끝 `\r\n`은 `\n`으로 바꾸고, 줄 끝 공백과 끝의 빈 줄은 무시합니다. `--float-tolerance`를 주면 같은 자리의 실수 토큰을 그 오차 안에서 같다고 봅니다.
-
-종료 코드는 모두 통과하면 `0`, 하나라도 실패하면 `1`, 빌드 실패면 `2`입니다. `--json`은 빌드 결과와 샘플별 `status`(`passed`, `failed`, `error`, `timeout`, `noExpected`)를 냅니다.
-
-기본적으로 생성된 `Main`은 `Run()`을 메인 스레드에서 바로 호출합니다. 대부분의 온라인 저지는 메인 스레드에 넉넉한 스택을 주기 때문입니다. 로컬 환경(Windows 기본 1MB 등)에서 깊은 재귀가 필요하면 `--large-stack`을 붙이세요. 그러면 프로그램 본문이 256MB 스택 스레드에서 실행됩니다.
-
-## Native AOT
-
-Windows 배포용 빌드에서는 다음을 우선적으로 Native AOT로 publish합니다.
-
-- `pscp.exe`
-- `Pscp.LanguageServer.exe`
-- `setup.exe`
-
-`src/Pscp.Transpiler`는 라이브러리 프로젝트이므로 자체적으로 독립 exe를 만들지는 않지만, AOT 호환 속성을 적용했고 `pscp.exe`와 `Pscp.LanguageServer.exe` 안에 함께 포함됩니다.
-
-언어 서버는 AOT 환경에서도 동작하도록 `System.Text.Json` 반사 기반 직렬화를 명시적으로 허용했습니다.
-
-## Windows 설치기
-
-설치기 빌드:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1
-```
-
-필요하면 Native AOT를 끄고 단일 파일 self-contained 빌드로 강제할 수도 있습니다.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -NoNativeAot
-```
-
-빌드가 끝나면 설치기는 아래 경로에 생성됩니다.
-
-```text
-artifacts\installer\setup\setup.exe
-```
-
-기본 설치 동작:
-
-- `%LOCALAPPDATA%\Programs\Pscp`에 설치
-- `pscp.exe`와 `Pscp.LanguageServer.exe`를 함께 배치
-- 사용자 PATH에 설치 경로 추가 시도
-- Windows 프로그램 제거 목록에 등록 시도
-- `uninstall.exe`를 함께 설치해 제거 가능
-
-직접 설치/제거:
-
-```powershell
-.\artifacts\installer\setup\setup.exe
-.\artifacts\installer\setup\setup.exe --install-dir D:\Tools\Pscp
-D:\Tools\Pscp\uninstall.exe --uninstall --install-dir D:\Tools\Pscp
-```
-
-설치 후에는 새 터미널에서 바로 `pscp`를 사용할 수 있습니다.
-
-## Linux 배포 패키지
-
-Windows 설치기와 별도로 Linux용 self-contained SDK 배포본을 빌드할 수 있습니다. 현재 머신의 아키텍처를 자동 감지하며 `linux-x64`와 `linux-arm64`를 지원합니다. Native AOT를 우선 시도하고, 준비되지 않은 빌드 환경에서는 self-contained 단일 파일로 자동 전환합니다.
-
-```bash
-./installer/Build-Linux-Packages.sh
-```
-
-다른 아키텍처용 산출물은 해당 Linux 아키텍처 환경에서 다음처럼 빌드합니다.
-
-```bash
-./installer/Build-Linux-Packages.sh --runtime linux-x64
-# 또는
-./installer/Build-Linux-Packages.sh --runtime linux-arm64
-```
-
-빌드 결과는 다음 경로에 생성됩니다.
-
-```text
-artifacts/linux/<runtime>/pscp_<version>_<architecture>.deb
-artifacts/linux/<runtime>/pscp-sdk_<version>_<runtime>.tar.gz
-```
-
-Debian/Ubuntu 계열에서는 `.deb`를 설치합니다.
-
-```bash
-sudo apt install ./artifacts/linux/linux-x64/pscp_0.7.0_amd64.deb
-pscp version
-```
-
-다른 배포판 또는 관리자 권한이 없는 환경에서는 `.tar.gz`를 풀고 포함된 `bin` 디렉터리를 `PATH`에 추가하면 됩니다. 두 방식 모두 `pscp` CLI와 `pscp-lsp` 언어 서버 명령을 제공합니다.
-
-## 릴리즈
-
-`.github/workflows/release.yml`이 전체 CI(테스트, Windows 설치기 프로젝트 빌드)를 먼저 실행하고, 모두 통과하면 다음 파일을 빌드해 GitHub Release에 올립니다.
-
-- `pscp-setup_<version>_win-x64.exe`: Windows 설치기 (`installer/Build-Installer.ps1`, 설치 검증 포함)
-- `pscp_<version>_amd64.deb`, `pscp-sdk_<version>_linux-x64.tar.gz`
-- `pscp_<version>_arm64.deb`, `pscp-sdk_<version>_linux-arm64.tar.gz`
-- `SHA256SUMS.txt`
-
-릴리즈 방법:
-
-1. `src/Pscp.Transpiler/Syntax.cs`의 `ToolVersion`을 올리고 main에 병합합니다.
-2. `v<ToolVersion>` 태그를 푸시하거나(`git tag v0.7.1 && git push origin v0.7.1`), Actions 탭에서 **Release** 워크플로를 수동 실행합니다. 수동 실행하면 선택한 커밋에 태그가 만들어집니다.
-
-태그와 `ToolVersion`이 다르면 릴리즈는 실패합니다. 이미 다른 커밋을 가리키는 태그로 수동 실행해도 실패합니다. `-`가 들어간 버전(예: `0.7.0-beta.1`)은 pre-release로 올라가고, 같은 태그로 다시 실행하면 기존 릴리즈의 파일을 교체합니다.
-
-## VS Code 확장
-
-VS Code 확장은 [vscode/pscp-vscode](./vscode/pscp-vscode)에 있습니다.
-
-기본 동작 순서:
-
-1. 설정된 `pscp.languageServerPath` 사용
-2. 설정된 `pscp.sdkPath` 사용
-3. 설치된 PSCP SDK 자동 탐색
-4. PATH의 `pscp`/`pscp.exe` 탐색
-5. 마지막으로 저장소 개발 빌드 폴백 사용
-
-개발 모드로 실행하려면:
-
-```powershell
-code .\vscode\pscp-vscode
-```
-
-그 뒤 `F5`로 Extension Development Host를 띄우고 `.pscp` 파일을 열면 됩니다.
-
-VSIX 빌드:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vscode\Build-Vsix.ps1
-```
-
-생성 위치:
-
-```text
-artifacts\vscode\local.pscp-vscode-0.7.0.vsix
-```
-
-설치 방법:
-
-```powershell
-code --install-extension .\artifacts\vscode\local.pscp-vscode-0.7.0.vsix
-```
-
-또는 VS Code에서 `Extensions: Install from VSIX...`를 사용하면 됩니다.
+- [`docs/pscp_v_0_7_spec.md`](docs/pscp_v_0_7_spec.md): 언어 스펙 (규범)
+- [`docs/pscp_v_0_7_changes.md`](docs/pscp_v_0_7_changes.md): 0.6 대비 변경 사항
+- [`docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md`](docs/pscp_v_0_7_language_server_and_vscode_extension_guide.md): 언어 서버와 VS Code 확장의 계약
