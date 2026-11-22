@@ -38,6 +38,11 @@ internal static class PscpIntrinsics
     public static readonly IReadOnlyDictionary<string, PscpCompletionEntry> IntrinsicFunctions = Table(
         PscpIntrinsicDocs.Of(IntrinsicDocKind.Aggregate).Concat(PscpIntrinsicDocs.Of(IntrinsicDocKind.Math)).Select(doc => Completion(doc, kind: 3)));
 
+    // `chmin` / `chmax` are deprecated (spec appendix C): they keep their hover and signature but are not offered.
+    public static bool IsOffered(string name) => name is not ("chmin" or "chmax");
+
+
+
     public static readonly IReadOnlyDictionary<string, PscpSignatureEntry> Signatures = CreateSignatures();
 
     public static readonly IReadOnlyDictionary<string, string> HoverDocs = CreateHoverDocs();

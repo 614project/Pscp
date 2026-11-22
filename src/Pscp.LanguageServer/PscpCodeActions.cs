@@ -187,6 +187,12 @@ internal static class PscpCodeActions
     private static void AddRenameFix(PscpAnalysisResult analysis, PscpServerDiagnostic diagnostic, List<PscpQuickFix> fixes)
     {
         int index = TokenIndexAt(analysis.Tokens, diagnostic.Span.Start);
+        if (index >= 0 && analysis.Tokens[index].Text is "chmin" or "chmax")
+        {
+            AddConditionalAssignmentFix(analysis, diagnostic, fixes, index);
+            return;
+        }
+
         if (index < 0 || GetReplacement(analysis.Tokens[index].Text) is not string replacement)
         {
             return;
@@ -195,7 +201,93 @@ internal static class PscpCodeActions
         fixes.Add(new PscpQuickFix($"Replace with `{replacement}`", diagnostic, [new PscpTextEdit(analysis.Tokens[index].Span, replacement)], IsPreferred: true));
     }
 
+    // `chmin(ref best, d)` as a whole statement (or `_ = chmin(...)`) → `best >= d` (spec §12.7). Only the
+    // parenthesized call has a rewrite; where the `bool` result is used there is none.
+    private static void AddConditionalAssignmentFix(PscpAnalysisResult analysis, PscpServerDiagnostic diagnostic, List<PscpQuickFix> fixes, int index)
+    {
+        IReadOnlyList<Token> tokens = analysis.Tokens;
+        int open = index + 1;
+        if (open + 1 >= tokens.Count || tokens[open].Kind != TokenKind.OpenParen || tokens[open + 1].Kind != TokenKind.Ref)
+        {
+            return;
+        }
+
+        int depth = 0;
+        int comma = -1;
+        int close = -1;
+        bool valueNeedsParentheses = false;
+        for (int i = open; i < tokens.Count && close < 0; i++)
+        {
+            switch (tokens[i].Kind)
+            {
+                case TokenKind.OpenParen or TokenKind.OpenBracket or TokenKind.OpenBrace:
+                    depth++;
+                    break;
+                case TokenKind.CloseParen or TokenKind.CloseBracket or TokenKind.CloseBrace:
+                    depth--;
+                    if (depth == 0)
+                    {
+                        close = i;
+                    }
+
+                    break;
+                case TokenKind.Comma when depth == 1:
+                    if (comma >= 0)
+                    {
+                        return;
+                    }
+
+                    comma = i;
+                    break;
+                case TokenKind.EndOfFile:
+                    return;
+                default:
+                    // Anything that binds weaker than `>=` would change how the statement parses (spec §13.1).
+                    valueNeedsParentheses |= depth == 1 && comma >= 0 && !BindsTighterThanComparison(tokens[i].Kind);
+                    break;
+            }
+        }
+
+        if (close < 0 || comma < open + 3 || comma + 1 >= close)
+        {
+            return;
+        }
+
+        int first = index;
+        if (index >= 2 && tokens[index - 1].Kind == TokenKind.Equal && tokens[index - 2].Text == "_")
+        {
+            first = index - 2;
+        }
+
+        bool startsStatement = first == 0 || tokens[first - 1].Kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.OpenBrace or TokenKind.CloseBrace or TokenKind.Then or TokenKind.Else;
+        bool endsStatement = close + 1 >= tokens.Count || tokens[close + 1].Kind is TokenKind.NewLine or TokenKind.Semicolon or TokenKind.CloseBrace or TokenKind.EndOfFile or TokenKind.Else;
+        if (!startsStatement || !endsStatement)
+        {
+            return;
+        }
+
+        string text = analysis.Snapshot.Text;
+        string target = text[tokens[open + 2].Position..(tokens[comma - 1].Position + tokens[comma - 1].Text.Length)];
+        string value = text[tokens[comma + 1].Position..(tokens[close - 1].Position + tokens[close - 1].Text.Length)];
+        if (valueNeedsParentheses)
+        {
+            value = $"({value})";
+        }
+
+        string op = tokens[index].Text == "chmin" ? ">=" : "<=";
+        TextSpan span = new(tokens[first].Position, tokens[close].Position + 1 - tokens[first].Position);
+        fixes.Add(new PscpQuickFix($"Use `{target} {op} {value}`", diagnostic, [new PscpTextEdit(span, $"{target} {op} {value}")], IsPreferred: true));
+    }
+
+    private static bool BindsTighterThanComparison(TokenKind kind)
+        => kind is TokenKind.Identifier or TokenKind.IntegerLiteral or TokenKind.FloatLiteral or TokenKind.StringLiteral
+            or TokenKind.InterpolatedStringLiteral or TokenKind.CharLiteral or TokenKind.True or TokenKind.False or TokenKind.Null
+            or TokenKind.Dot or TokenKind.QuestionDot or TokenKind.Plus or TokenKind.Minus or TokenKind.Star or TokenKind.Slash
+            or TokenKind.Percent or TokenKind.PlusPlus or TokenKind.MinusMinus or TokenKind.Bang or TokenKind.Tilde
+            or TokenKind.PipeGreater or TokenKind.LessPipe or TokenKind.New;
+
     // `new SortedSet<string>()` → `new SortedSet<string>(string.asc)`, `Array.Sort(xs)` → `Array.Sort(xs, string.asc)`.
+
     private static void AddOrdinalComparerFix(PscpAnalysisResult analysis, PscpServerDiagnostic diagnostic, List<PscpQuickFix> fixes)
     {
         Token[] tokens = TokensIn(analysis.Tokens, diagnostic.Span).ToArray();

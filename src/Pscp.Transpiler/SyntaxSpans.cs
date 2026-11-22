@@ -7,6 +7,7 @@ public sealed class SyntaxSpans
 {
     private readonly Dictionary<object, TextSpan> _spans = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, TextSpan> _nameSpans = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<int> _conditionalAssignmentOperators = [];
 
     public static SyntaxSpans Empty { get; } = new();
 
@@ -47,6 +48,13 @@ public sealed class SyntaxSpans
     }
 
     internal void SetName(object node, TextSpan span) => _nameSpans[node] = span;
+
+    // Source positions of the `>=` / `<=` tokens that the parser read as a conditional assignment statement
+    // (spec §12.7) rather than as a comparison. The language server uses them for hovers and write references.
+    public IReadOnlySet<int> ConditionalAssignmentOperators => _conditionalAssignmentOperators;
+
+    internal void AddConditionalAssignmentOperator(int position) => _conditionalAssignmentOperators.Add(position);
+
 
     // Spans of a nested parse (an interpolation hole) moved to their position in the enclosing source.
     internal void CopyShiftedTo(SyntaxSpans target, int offset)

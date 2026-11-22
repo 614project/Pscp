@@ -317,9 +317,66 @@ public sealed partial class Parser
             return ParseFastForStatement(expression, start);
         }
 
+        expression = AsStatementExpression(expression, start);
         bool hasStatementSemicolon = TryConsumeSemicolon();
         ExpectStatementEnd();
         return new ExpressionStatement(expression, hasStatementSemicolon);
+    }
+
+    // Spec §12.7: an expression statement `place >= value` is `place = min place value` and `place <= value` is
+    // `place = max place value`. A comparison whose value is discarded has no use, so the statement form is free
+    // for the conditional assignment. It applies only when
+    // - the comparison is the whole statement (`(a >= b)` stays a comparison, and so does `a >= b and c`),
+    // - its left operand is a place: a name, an element `a[i]`, a member `p.x` or a tuple element `t.1`.
+    // An expression body (`=> a >= b`), a lambda, a condition and any other expression position keep the comparison.
+    private Expression AsStatementExpression(Expression expression, int start)
+    {
+        if (expression is not BinaryExpression { Operator: BinaryOperator.GreaterThanOrEqual or BinaryOperator.LessThanOrEqual } comparison
+            || !IsConditionalAssignmentPlace(comparison.Left)
+            || IsWhollyParenthesized(start))
+        {
+            return expression;
+        }
+
+        AssignmentOperator op = comparison.Operator == BinaryOperator.GreaterThanOrEqual ? AssignmentOperator.MinAssign : AssignmentOperator.MaxAssign;
+        AssignmentExpression assignment = new(comparison.Left, op, comparison.Right, false);
+        _spans.Copy(comparison, assignment);
+        if (_spans.TryGet(comparison.Left, out TextSpan leftSpan))
+        {
+            TokenKind operatorKind = op == AssignmentOperator.MinAssign ? TokenKind.GreaterEqual : TokenKind.LessEqual;
+            for (int i = start; i < _position; i++)
+            {
+                if (_tokens[i].Kind == operatorKind && _tokens[i].Position >= leftSpan.Start + leftSpan.Length)
+                {
+                    _spans.AddConditionalAssignmentOperator(_tokens[i].Position);
+                    break;
+                }
+            }
+        }
+
+        return assignment;
+    }
+
+    private static bool IsConditionalAssignmentPlace(Expression expression)
+        => expression switch
+        {
+            IdentifierExpression { Name: not "_" } => true,
+            IndexExpression { IsNullConditional: false } index => index.Arguments.All(argument => argument is not RangeExpression and not SliceExpression),
+            MemberAccessExpression { IsNullConditional: false } => true,
+            TupleProjectionExpression => true,
+            _ => false,
+        };
+
+    // The statement's expression is one parenthesized group: `(a >= b)`.
+    private bool IsWhollyParenthesized(int start)
+    {
+        int end = _position - 1;
+        while (end > start && _tokens[end].Kind == TokenKind.NewLine)
+        {
+            end--;
+        }
+
+        return start < _tokens.Count && _tokens[start].Kind == TokenKind.OpenParen && FindMatchingClose(start) == end;
     }
 
     // A statement ends at a line break, `;`, `}`, `else` (after a `then` branch) or the end of the file. After a
@@ -414,6 +471,7 @@ public sealed partial class Parser
 
             int thenStart = _position;
             Expression thenExpression = ParseExpression();
+            Expression thenStatementExpression = AsStatementExpression(thenExpression, thenStart);
             SkipSeparators();
             Expect(TokenKind.Else, "Expected 'else' in one-line if expression.");
             SkipSeparators();
@@ -421,12 +479,26 @@ public sealed partial class Parser
             {
                 // `if c then f(x) else += y`: the else branch can only be a statement, so the whole form is one.
                 Statement elseStatement = ParseEmbeddedStatement();
-                return new IfStatement(condition, Mark(new ExpressionStatement(thenExpression, false), thenStart), elseStatement, true);
+                return new IfStatement(condition, Mark(new ExpressionStatement(thenStatementExpression, false), thenStart), elseStatement, true);
             }
 
+            int elseStart = _position;
             Expression elseExpression = ParseExpression();
+            Expression elseStatementExpression = AsStatementExpression(elseExpression, elseStart);
             bool hasSemicolon = TryConsumeSemicolon();
+            if (!ReferenceEquals(thenExpression, thenStatementExpression) || !ReferenceEquals(elseExpression, elseStatementExpression))
+            {
+                // `if c then lo >= x else hi <= x`: a branch is a conditional assignment, so the form is a statement.
+                return new IfStatement(
+                    condition,
+                    Mark(new ExpressionStatement(thenStatementExpression, false), thenStart),
+                    Mark(new ExpressionStatement(elseStatementExpression, hasSemicolon), elseStart),
+
+                    true);
+            }
+
             return new ExpressionStatement(new IfExpression(condition, thenExpression, elseExpression), hasSemicolon);
+
         }
 
         Statement thenBranch = ParseEmbeddedStatement();
@@ -695,8 +767,16 @@ public sealed partial class Parser
         {
             int expressionStart = ++_position;
             SkipExpressionNewLines();
+            int bodyStart = _position;
             Expression expression = WithNestedContext(ParseExpression);
+            if (returnType is NamedTypeSyntax { Name: "void", TypeArguments.Count: 0 })
+            {
+                // `void f(int v) => best >= v`: the body of a `void` function is a statement (spec §12.7).
+                expression = AsStatementExpression(expression, bodyStart);
+            }
+
             TryConsumeSemicolon();
+
             ExpressionStatement statement = Mark(new ExpressionStatement(expression, false), expressionStart);
             body = Mark(new BlockStatement(Immutable.List<Statement>(statement)), expressionStart);
         }

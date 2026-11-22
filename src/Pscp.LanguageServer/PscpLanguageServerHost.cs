@@ -1654,8 +1654,12 @@ public static class PscpLanguageServerHost
 
             foreach (KeyValuePair<string, PscpCompletionEntry> intrinsic in PscpIntrinsics.IntrinsicFunctions)
             {
-                items.Add(intrinsic.Value);
+                if (PscpIntrinsics.IsOffered(intrinsic.Key))
+                {
+                    items.Add(intrinsic.Value);
+                }
             }
+
 
             AddKeywordCompletions(
                 statementStart

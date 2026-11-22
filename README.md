@@ -2,7 +2,7 @@
 
 PSCP 언어를 제공하기 위한 도구들(트랜스파일러, 언어 서버, 확장 등)이 준비되어 있는 저장소입니다.
 
-현재 언어 버전은 **0.7**이고 도구 버전은 **0.7.0**입니다. 규범 문서는 [`docs/pscp_v_0_7_spec.md`](docs/pscp_v_0_7_spec.md)이며, 0.6에서 무엇이 바뀌었는지는 [`docs/pscp_v_0_7_changes.md`](docs/pscp_v_0_7_changes.md)에 있습니다.
+현재 언어 버전은 **0.7**이고 도구 버전은 **0.7.1**입니다. 규범 문서는 [`docs/pscp_v_0_7_spec.md`](docs/pscp_v_0_7_spec.md)이며, 0.6에서 무엇이 바뀌었는지는 [`docs/pscp_v_0_7_changes.md`](docs/pscp_v_0_7_changes.md)에 있습니다.
 
 ## 🚀 PSCP 언어 소개
 
@@ -82,8 +82,10 @@ while queue.Count > 0 {
 
 ### 4. 실전 압축 문법
 * **`:=` 대입 연산자:** 대입과 동시에 해당 값을 반환합니다. (예: 경로 압축에 유용 `parent[x] := find(parent[x])`)
+* **조건부 할당 `>=`, `<=`:** 문장으로 쓴 `low >= x`는 `low = min low x`, `high <= x`는 `high = max high x`입니다. (예: `dist[v] >= dist[u] + w`) 식 안에서는 그대로 비교입니다.
 * **자동 객체 생성 `new![n]`:** 컬렉션 배열을 선언할 때 내부 요소들까지 `new()`로 자동 초기화합니다. (예: `List<int>[] graph = new![n]`)
-* **내장 집계 함수 (Aggregate Intrinsic):** `min`, `max`, `sum`, `sumBy`, `chmin`, `chmax` 등을 별도의 라이브러리 임포트 없이 즉시 사용합니다.
+* **내장 집계 함수 (Aggregate Intrinsic):** `min`, `max`, `sum`, `sumBy`, `minBy`, `maxBy` 등을 별도의 라이브러리 임포트 없이 즉시 사용합니다. (`chmin`, `chmax`는 0.7.1부터 폐기 예정이며 조건부 할당으로 대체합니다.)
+
 * **암묵적 반환 (Implicit Return):** 블록의 마지막 표현식은 자동으로 반환값이 되어 코드가 한결 깔끔해집니다.
 
 ---
