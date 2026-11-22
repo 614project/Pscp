@@ -260,6 +260,11 @@ internal sealed partial class CSharpEmitter
 
     private string EmitAssignmentCore(AssignmentExpression assignment, bool wrapNormalAssignment)
     {
+        if (assignment.Operator is AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign)
+        {
+            return EmitConditionalAssignment(assignment);
+        }
+
         if (TryEmitKnownDataStructureAssignment(assignment, out string? knownRewrite))
         {
             return knownRewrite!;
@@ -272,8 +277,99 @@ internal sealed partial class CSharpEmitter
         return wrapNormalAssignment ? $"({body})" : body;
     }
 
+    // Spec §12.7: `t >= v` assigns `v` when it is strictly below `t` in the default order (§25.1), `t <= v` when it is
+    // strictly above. The form is a statement, so the result is a C# statement; the caller appends `;`. The target
+    // and the value are each evaluated once, target first.
+    private string EmitConditionalAssignment(AssignmentExpression assignment)
+    {
+        bool preferLower = assignment.Operator == AssignmentOperator.MinAssign;
+        TypeSyntax? type = _semantic?.GetExpressionType(assignment.Target);
+        if (type is NamedTypeSyntax { Name: "object" or "var" or "void" })
+        {
+            type = null;
+        }
+
+        if (!IsRepeatablePlace(assignment.Target))
+        {
+            if (assignment.Target is IndexExpression index
+                && TryEmitConditionalIndexAssignment(index, assignment.Value, type, preferLower) is string indexed)
+            {
+                return indexed;
+            }
+
+            // A field, a local or an array element: passing it by `ref` evaluates its receiver and index once.
+            string helper = preferLower ? "chmin" : "chmax";
+            return $"__PscpSeq.{helper}(ref {EmitAssignmentTarget(assignment.Target)}, {EmitExpression(assignment.Value, type)})";
+        }
+
+        string target = EmitAssignmentTarget(assignment.Target);
+        string value = EmitExpression(assignment.Value, type);
+        if (type is null)
+        {
+            // The static type is not known here (a property, say): the default-order `min` / `max` helper keeps
+            // the target on ties, so assigning its result is the same as assigning only on a strict improvement.
+            return $"{target} = __PscpSeq.{(preferLower ? "min" : "max")}({target}, {value})";
+        }
+
+        if (assignment.Value is LiteralExpression or IdentifierExpression)
+        {
+            return $"if ({EmitPreferredComparison(value, target, type, preferLower)}) {target} = {value}";
+        }
+
+        string candidate = NextTemporary("candidate");
+        return $"{{ {EmitType(type)} {candidate} = {value}; if ({EmitPreferredComparison(candidate, target, type, preferLower)}) {target} = {candidate}; }}";
+    }
+
+    // A place that can be read and then written by emitting it twice: names, members, tuple elements and elements
+    // whose receiver and indexes have no side effects (`grid[i + 1][j].cost`).
+    private static bool IsRepeatablePlace(Expression expression)
+        => expression switch
+        {
+            IdentifierExpression => true,
+            MemberAccessExpression { IsNullConditional: false } member => IsRepeatablePlace(member.Receiver),
+            TupleProjectionExpression projection => IsRepeatablePlace(projection.Receiver),
+            IndexExpression { IsNullConditional: false } index => IsRepeatablePlace(index.Receiver) && index.Arguments.All(IsSideEffectFreeTarget),
+            _ => false,
+        };
+
+    // `list[f()] >= v`: an indexer cannot be passed by `ref`, so the receiver and the index go to temporaries.
+
+    private string? TryEmitConditionalIndexAssignment(IndexExpression index, Expression value, TypeSyntax? type, bool preferLower)
+    {
+        TypeSyntax? receiverType = _semantic?.GetExpressionType(index.Receiver);
+        if (receiverType is not NamedTypeSyntax { Name: not ("object" or "var") } || index.Arguments.Count == 0)
+        {
+            return null;
+        }
+
+        System.Text.StringBuilder builder = new("{ ");
+        string receiver = NextTemporary("receiver");
+        builder.Append($"var {receiver} = {EmitExpression(index.Receiver)}; ");
+        List<string> arguments = [];
+        foreach (Expression argument in index.Arguments)
+        {
+            string name = NextTemporary("index");
+            builder.Append($"var {name} = {EmitExpression(argument)}; ");
+            arguments.Add(name);
+        }
+
+        string target = $"{receiver}[{string.Join(", ", arguments)}]";
+        if (type is null)
+        {
+            builder.Append($"{target} = __PscpSeq.{(preferLower ? "min" : "max")}({target}, {EmitExpression(value)}); }}");
+            return builder.ToString();
+        }
+
+        string candidate = NextTemporary("candidate");
+
+        builder.Append($"{EmitType(type)} {candidate} = {EmitExpression(value, type)}; ");
+        builder.Append($"if ({EmitPreferredComparison(candidate, target, type, preferLower)}) {target} = {candidate}; }}");
+        return builder.ToString();
+    }
+
     private string EmitCallExpression(CallExpression call, TypeSyntax? targetTypeHint)
     {
+
         // `x |> (v => e)`: a lambda is invoked through its delegate type, `((Func<int, int>)(v => e))(x)`.
         if (call.Pipe == PipeKind.Delegate
             && call.Callee is LambdaExpression pipedLambda

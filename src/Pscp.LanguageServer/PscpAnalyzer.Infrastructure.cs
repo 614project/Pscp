@@ -93,6 +93,8 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.CaretEqual:
                 case TokenKind.LessLessEqual:
                 case TokenKind.GreaterGreaterEqual:
+                case TokenKind.GreaterEqualGreater:
+                case TokenKind.LessEqualLess:
                 case TokenKind.Caret:
                 case TokenKind.Tilde:
                 case TokenKind.Amp:
@@ -251,6 +253,7 @@ internal sealed partial class PscpAnalyzer
         => FindTopLevelToken(tokens, start, endExclusive, kind);
 
     private static int FindTopLevelAssignment(IReadOnlyList<Token> tokens, int start, int endExclusive)
+
     {
         int parenDepth = 0;
         int bracketDepth = 0;
@@ -295,7 +298,9 @@ internal sealed partial class PscpAnalyzer
                 or TokenKind.PipeEqual
                 or TokenKind.CaretEqual
                 or TokenKind.LessLessEqual
-                or TokenKind.GreaterGreaterEqual)
+                or TokenKind.GreaterGreaterEqual
+                or TokenKind.GreaterEqualGreater
+                or TokenKind.LessEqualLess)
             {
                 return i;
             }

@@ -2,7 +2,7 @@
   "name": "pscp-vscode",
   "displayName": "PSCP",
   "description": "VS Code support for the PSCP programming language (language version 0.7).",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

@@ -178,7 +178,14 @@ internal sealed partial class PscpAnalyzer
                 }
 
                 state.MarkToken(i, state.ClassificationOf(i) ?? "function", ["deprecated"]);
-                string replacement = PscpCodeActions.GetReplacement(token.Text) is { } name ? $"Use `{name}` instead." : diagnostic.Message;
+                string replacement = PscpCodeActions.GetReplacement(token.Text) is { } name
+                    ? $"Use `{name}` instead."
+                    : token.Text switch
+                    {
+                        "chmin" => "Use the conditional assignment `target >=> value` (spec §12.7).",
+                        "chmax" => "Use the conditional assignment `target <=< value` (spec §12.7).",
+                        _ => diagnostic.Message,
+                    };
                 state.SetHover(i, $"```pscp\n{token.Text}\n```\n\nDeprecated: it is removed in v0.8. {replacement}\n\n[Spec appendix C]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("부록-c-폐기-예정-목록")})");
                 break;
             }
@@ -932,6 +939,7 @@ internal sealed partial class PscpAnalyzer
 
         int assignmentIndex = FindTopLevelAssignment(state.Tokens, index, statementEnd);
         if (assignmentIndex >= 0)
+
         {
             AnalyzeAssignment(state, scope, index, assignmentIndex, statementEnd, functionContext, loopDepth);
             return statementEnd;

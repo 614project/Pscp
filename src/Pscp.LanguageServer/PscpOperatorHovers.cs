@@ -29,6 +29,18 @@ internal static class PscpOperatorHovers
                 "(x = e)",
                 "13.4 `=`와 `:=`",
                 "134-와-"),
+            TokenKind.GreaterEqualGreater => Hover(
+                "target >=> value",
+                "Conditional assignment: assigns `value` only when it is strictly smaller than `target` in the default order, so `target` becomes `min target value`. It is a statement and has no value.",
+                "if (value < target) target = value;",
+                "12.7 조건부 할당",
+                "127-조건부-할당"),
+            TokenKind.LessEqualLess => Hover(
+                "target <=< value",
+                "Conditional assignment: assigns `value` only when it is strictly larger than `target` in the default order, so `target` becomes `max target value`. It is a statement and has no value.",
+                "if (value > target) target = value;",
+                "12.7 조건부 할당",
+                "127-조건부-할당"),
             TokenKind.PipeGreater => Hover(
                 "value |> f",
                 "Pipe: the left value becomes the first argument of the right-hand call. A collection helper becomes a member call on the value.",
@@ -75,6 +87,7 @@ internal static class PscpOperatorHovers
         };
 
     // Spec §26.2. `typeDisplay` is the receiver's static type as the analyzer knows it.
+
     public static string? ForRewrite(TokenKind kind, string? typeDisplay)
     {
         if (typeDisplay is null)

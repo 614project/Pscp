@@ -44,6 +44,9 @@ public sealed partial class Parser
             TokenKind.LessLessEqual => AssignmentOperator.ShiftLeftAssign,
             TokenKind.GreaterGreaterEqual => AssignmentOperator.ShiftRightAssign,
             TokenKind.QuestionQuestionEqual => AssignmentOperator.CoalesceAssign,
+            TokenKind.GreaterEqualGreater => AssignmentOperator.MinAssign,
+            TokenKind.LessEqualLess => AssignmentOperator.MaxAssign,
+
             _ => AssignmentOperator.Assign,
         };
 

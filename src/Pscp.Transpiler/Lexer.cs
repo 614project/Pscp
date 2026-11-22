@@ -211,8 +211,19 @@ public sealed class Lexer
         {
             token = new Token(TokenKind.GreaterGreaterEqual, ">>=", start);
         }
+        else if (Match(">=>"))
+        {
+            // Conditional assignment `a >=> b`, `a = min a b` (spec §12.7).
+            token = new Token(TokenKind.GreaterEqualGreater, ">=>", start);
+        }
+        else if (Match("<=<"))
+        {
+            // Conditional assignment `a <=< b`, `a = max a b` (spec §12.7).
+            token = new Token(TokenKind.LessEqualLess, "<=<", start);
+        }
         else if (Match("<=>"))
         {
+
             token = new Token(TokenKind.Spaceship, "<=>", start);
         }
         else if (Match("..<"))

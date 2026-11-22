@@ -61,3 +61,11 @@ for f in *.pscp; do pscp test "$f" || echo "FAIL $f"; done
 | 18_csharp_passthrough | PSCP 오류, C# 오류 | `new T[n]`, 컬렉션 initializer, 속성 접근자, 인덱서, `abstract`/`override`, 명시적 인터페이스 구현, 사용자 연산자, `params`와 기본값, 이름 있는 튜플, delegate 변수 호출, pipe로 람다 호출, `(int, string).asc` |
 | 19_names_and_hiding | C# 오류 | 바깥 이름을 가리는 지역 선언(§5.1), C# 키워드인 이름(`checked`, `event`), `ForEach`에 넘긴 블록 람다 |
 | 20_order_constants_collections | 다른 출력, C# 오류 | `NaN`의 기본 순서(§25.1), 상수 정수 산술의 wrap-around(§8.1), `Stack`/`Queue`/`HashSet`/`SortedSet` target 컬렉션 식 |
+
+## 0.7.1에서 추가한 프로그램
+
+| 프로그램 | 내용 |
+|---|---|
+| 21_conditional_assignment | 조건부 할당 `a >=> b`(= `a = min a b`), `a <=< b`(= `a = max a b`)와 그대로 비교인 `>=`, `<=` (스펙 §12.7) |
+
+17과 20은 0.7.0에서 만든 그대로 `chmax`/`chmin`의 `bool` 반환값을 쓴다. 0.7.1부터 이 둘은 폐기 예정이라 PSCP2900 경고가 나며, 테스트 러너는 이 경고를 기대한다.

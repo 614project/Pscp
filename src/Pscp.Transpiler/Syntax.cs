@@ -46,6 +46,9 @@ public enum TokenKind
     CaretEqual,
     LessLessEqual,
     GreaterGreaterEqual,
+    GreaterEqualGreater,
+    LessEqualLess,
+
     Caret,
     Tilde,
     Amp,
@@ -128,7 +131,7 @@ public enum HelperEmissionMode
 public static class PscpVersionInfo
 {
     public const string LanguageVersion = "0.7";
-    public const string ToolVersion = "0.7.0";
+    public const string ToolVersion = "0.7.1";
 }
 
 // `Code` identifies the diagnostic kind (PSCPxxxx, see DiagnosticCodes). `RelatedSpan` points at a related location
@@ -183,6 +186,10 @@ public enum AssignmentOperator
     ShiftLeftAssign,
     ShiftRightAssign,
     CoalesceAssign,
+    // Statement-only conditional assignments (spec §12.7): `a >=> b` is `a = min a b`, `a <=< b` is `a = max a b`.
+
+    MinAssign,
+    MaxAssign,
 }
 
 public enum OutputKind

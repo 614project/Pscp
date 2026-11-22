@@ -765,8 +765,13 @@ internal sealed partial class CSharpEmitter
             case NoMethodBody:
                 _writer.WriteLine(signature + ";");
                 break;
+            case ExpressionMethodBody { Expression: AssignmentExpression { Operator: AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign } conditional }:
+                // `void Relax(int v) => best >=> v`: a conditional assignment is a statement, so the body is a block.
+                EmitMethodLike(signature, new BlockMethodBody(new BlockStatement(Immutable.List<Statement>(new ExpressionStatement(conditional, false)))), isVoidLike);
+                break;
             case ExpressionMethodBody expressionBody:
                 if (!TryEmitHoistedExpressionBody(signature, expressionBody.Expression, isVoidLike, isProperty: false))
+
                 {
                     _writer.WriteLine($"{signature} => {(isVoidLike ? EmitExpression(expressionBody.Expression) : EmitExpression(expressionBody.Expression, CurrentReturnType))};");
                 }
@@ -1603,9 +1608,11 @@ internal sealed partial class CSharpEmitter
     private string EmitIfExpressionAsStatement(IfExpression ifExpression)
     {
         string thenBranch = EmitStatementExpression(ifExpression.ThenExpression);
-        if (ifExpression.ThenExpression is IfExpression)
+        // A nested `if` or a conditional assignment (itself an `if`) would take the `else`.
+        if (ifExpression.ThenExpression is IfExpression or AssignmentExpression { Operator: AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign })
         {
             thenBranch = $"{{ {thenBranch}; }}";
+
         }
         else
         {
