@@ -7,7 +7,7 @@
 - `.pscp` 언어 등록, v0.7 문법 하이라이팅 (`@"…"` verbatim 문자열, `new!`, 입출력 shorthand 전용 scope 포함)
 - 진단: 진단 코드(`PSCP2108` 등), 스펙 링크, 선언 위치 연결, 폐기 예정 이름 취소선
 - 자동완성: 문맥별 후보, 그룹 정렬(지역 → 타입 멤버 → 최상위 → intrinsic → .NET → 키워드), `labelDetails`, 스니펫
-- hover: 낮아지는 C#까지 보여 줍니다. `:=`, 조건부 할당 `>=`/`<=`, `|>`, `<|`, `<=>`, range,
+- hover: 낮아지는 C#까지 보여 줍니다. `:=`, 조건부 할당 `>=>`/`<=<`, `|>`, `<|`, `<=>`, range,
  `->`, 자료구조 rewrite(`+=`, `-=`, `~`, 전위 `--`), 입출력 shorthand, 바인딩의 `const` 여부
 - definition / references / rename / signature help (space-call 포함, 오버로드와 활성 매개변수 강조)
 - 계층형 문서 기호(개요): 타입 아래 필드·속성·메서드, 함수 아래 로컬 함수

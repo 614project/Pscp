@@ -377,7 +377,7 @@ internal static class TestRunner
                 }
 
                 void touch() {
-                    bug <= 2
+                    bug <=< 2
                 }
 
                 += solve()
@@ -863,13 +863,13 @@ internal static class TestRunner
             new(
                 "ConditionalAssignmentStatements",
                 """
-                // `a >= b` is `a = min a b`, `a <= b` is `a = max a b` (spec §12.7).
+                // `a >=> b` is `a = min a b`, `a <=< b` is `a = max a b` (spec §12.7).
                 mut int low = 100
                 mut int high = -5
-                low >= 10
-                high <= 20
-                low >= 50
-                high <= 3
+                low >=> 10
+                high <=< 20
+                low >=> 50
+                high <=< 3
                 += (low, high)
 
                 // The target is evaluated once, before the value; an indexer target goes through temporaries.
@@ -882,56 +882,57 @@ internal static class TestRunner
                 List<long> xs = [5L, 6L]
                 Dictionary<string, int> best = new()
                 best["a"] = 7
-                d[idx()] >= 5
-                xs[idx()] >= 1L
-                best["a"] <= 9
-                d[0] <= d[2] + 1
+                d[idx()] >=> 5
+                xs[idx()] >=> 1L
+                best["a"] <=< 9
+                d[0] <=< d[2] + 1
                 += d
                 += xs
                 += (best["a"], calls)
 
                 // Default order: NaN is the smallest value, strings compare ordinally, tuples element-wise.
                 mut double r = 1.0
-                r >= 0.25 + 0.5
+                r >=> 0.25 + 0.5
                 += r
-                r >= double.NaN
+                r >=> double.NaN
                 += r
                 mut string s = "b"
-                s >= "B"
+                s >=> "B"
                 += s
                 mut (int, int) p = (5, 0)
-                p >= (3, 4)
-                p >= (3, 9)
+                p >=> (3, 4)
+                p >=> (3, 9)
                 += p
 
                 // A place, a member, a one-line if branch, a loop body and a ref parameter.
                 record struct Box(int v)
                 Box[] boxes = [Box(1)]
-                boxes[0].v <= 4
+                boxes[0].v <=< 4
                 += boxes[0].v
                 mut int m = 7
-                if m > 5 then m >= 1 else m <= 100
+                if m > 5 then m >=> 1 else m <=< 100
                 += m
                 mut int top = 0
-                [3, 9, 4] -> v { top <= v }
+                [3, 9, 4] -> v { top <=< v }
                 for i in 0..<3 {
-                    if i % 2 == 0 then top <= 10 * i
+                    if i % 2 == 0 then top <=< 10 * i
                 }
                 += top
                 void relax(ref int t, int v) {
-                    t >= v
+                    t >=> v
                 }
                 relax(ref top, 2)
                 += top
-                void lower(int v) => top >= v
+                void lower(int v) => top >=> v
                 lower(1)
                 += top
 
-                // Everywhere else `>=` and `<=` still compare.
+                // `>=` and `<=` stay comparisons, also as a tail value.
                 bool ge(int a, int b) => a >= b
                 bool le(int a, int b) {
-                    (a <= b)
+                    a <= b
                 }
+
                 += (ge(3, 2), le(3, 2), if low >= 10 then "yes" else "no")
                 """,
                 "",
@@ -946,7 +947,7 @@ internal static class TestRunner
                 }
 
                 void relax(ref int best, int[] values) {
-                    best >= min values
+                    best >=> min values
                 }
 
 
@@ -3567,15 +3568,15 @@ internal static class TestRunner
         }
     }
 
-    // Spec §12.7: `a >= b` / `a <= b` as a whole statement is a conditional assignment; everywhere else it compares.
+    // Spec §12.7: `a >=> b` / `a <=< b` are conditional assignment statements; `>=` and `<=` only compare.
     private static void VerifyConditionalAssignment(List<string> failures)
     {
         TranspilationResult lowered = PscpTranspiler.Transpile(NormalizeSource(
             """
             mut int low = 9
-            low >= 3
+            low >=> 3
             mut int high = 0
-            high <= low + 1
+            high <=< low + 1
             += (low, high)
             """));
         if (!lowered.Success
@@ -3587,37 +3588,43 @@ internal static class TestRunner
 
         (string Name, string Source, string Code, DiagnosticSeverity Severity, string Message)[] cases =
         [
-            ("TailStatementIsAssignment", """
-                bool ge(int a, int b) {
-                    a >= b
+            ("TailHasNoValue", """
+                int f(int a) {
+                    mut int b = a
+                    b >=> 0
                 }
-                += ge(1, 2)
+                += f(1)
                 """, "PSCP2202", DiagnosticSeverity.Error, "conditional assignment"),
+            ("InsideExpression", """
+                mut int a = 1
+                let b = (a >=> 0)
+                += a
+                """, "PSCP2600", DiagnosticSeverity.Error, "has no value"),
             ("NoDefaultOrder", """
                 record struct P(int x)
                 mut P p = P(1)
-                p >= P(0)
+                p >=> P(0)
                 += p.x
-                """, "PSCP2502", DiagnosticSeverity.Error, "`>=` cannot compare"),
-            ("ParenthesizedStaysComparison", """
-                mut int a = 1
-                (a >= 0)
-                += a
-                """, "PSCP2207", DiagnosticSeverity.Warning, "discards"),
+                """, "PSCP2502", DiagnosticSeverity.Error, "`>=>` cannot compare"),
             ("ImmutableTarget", """
                 let a = 1
-                a >= 0
+                a >=> 0
                 += a
                 """, "PSCP2108", DiagnosticSeverity.Warning, "immutable"),
+            ("ComparisonStatementIsDiscarded", """
+                mut int a = 1
+                a >= 0
+                += a
+                """, "PSCP2207", DiagnosticSeverity.Warning, "discards"),
             ("ChminDeprecated", """
                 mut int a = 1
                 chmin(ref a, 0)
                 += a
-                """, "PSCP2900", DiagnosticSeverity.Warning, "`target >= value`"),
+                """, "PSCP2900", DiagnosticSeverity.Warning, "`target >=> value`"),
             ("ChmaxDeprecated", """
                 mut int a = 1
                 if chmax(ref a, 5) then += a
-                """, "PSCP2900", DiagnosticSeverity.Warning, "`target <= value`"),
+                """, "PSCP2900", DiagnosticSeverity.Warning, "`target <=< value`"),
         ];
 
         foreach ((string name, string source, string code, DiagnosticSeverity severity, string message) in cases)
@@ -3629,38 +3636,43 @@ internal static class TestRunner
             }
         }
 
-        // Expression bodies, lambdas, conditions and operands keep the comparison and raise nothing.
-        TranspilationResult comparisons = PscpTranspiler.Transpile(NormalizeSource(
+        // A one-line `if` statement whose branches are conditional assignments, and a method expression body.
+        TranspilationResult shapes = PscpTranspiler.Transpile(NormalizeSource(
             """
-            bool ge(int a, int b) => a >= b
-            mut int x = 3
-            if x >= 2 then x <= 5
-            let small = [1, 5, 9].filter(v => v <= x)
-            let flag = x >= 4 and x <= 6
-            += (ge(1, 2), x, small, flag)
+            class Best {
+                public mut int v = 10
+                public void Offer(int x) => v >=> x
+            }
+            mut int lo = 5
+            mut int hi = 5
+            for i in 0..<6 {
+                if i % 2 == 0 then lo >=> i else hi <=< i
+            }
+            let b = Best()
+            b.Offer(3)
+            += (lo, hi, b.v)
             """));
-        if (comparisons.Diagnostics.Any(diagnostic => diagnostic.Severity != DiagnosticSeverity.Info)
-            || !comparisons.CSharpCode.Contains("if (5 > x) x = 5;", StringComparison.Ordinal))
+        if (!shapes.Success)
         {
-            failures.Add($"ConditionalAssignment_ComparisonsStay: expected no diagnostics and one conditional assignment\n{FormatDiagnostics(comparisons.Diagnostics)}\n{comparisons.CSharpCode}");
+            failures.Add($"ConditionalAssignment_Shapes: expected no errors\n{FormatDiagnostics(shapes.Diagnostics)}\n{shapes.CSharpCode}");
         }
 
         // Language server: the operator explains itself, the target is a write, and `chmin` offers the rewrite.
-        string text = "mut int best = 9\nbest >= 3\n_ = chmin(ref best, 2 + 1)\nchmax(ref best, best > 1 ? 4 : 0)\n+= best\n";
+        string text = "mut int best = 9\nbest >=> 3\n_ = chmin(ref best, 2 + 1)\nchmax(ref best, best > 1 ? 4 : 0)\n+= best\n";
         Pscp.LanguageServer.PscpAnalysisResult analysis = new Pscp.LanguageServer.PscpAnalyzer().Analyze(
             new Pscp.LanguageServer.DocumentSnapshot(new Uri("file:///conditional.pscp"), 1, text, new Pscp.LanguageServer.LineIndex(text)));
-        int operatorIndex = analysis.Tokens.ToList().FindIndex(token => token.Kind == TokenKind.GreaterEqual);
+        int operatorIndex = analysis.Tokens.ToList().FindIndex(token => token.Kind == TokenKind.GreaterEqualGreater);
         if (operatorIndex < 0
             || !analysis.HoverByTokenIndex.TryGetValue(operatorIndex, out Pscp.LanguageServer.PscpHoverEntry? hover)
             || !hover.Markdown.Contains("Conditional assignment", StringComparison.Ordinal))
         {
-            failures.Add("ConditionalAssignment_Hover: expected the conditional assignment hover on `>=`.");
+            failures.Add("ConditionalAssignment_Hover: expected the conditional assignment hover on `>=>`.");
         }
 
-        int targetStart = text.IndexOf("best >=", StringComparison.Ordinal);
+        int targetStart = text.IndexOf("best >=>", StringComparison.Ordinal);
         if (!analysis.References.Any(reference => reference.IsWrite && reference.Span.Start == targetStart))
         {
-            failures.Add("ConditionalAssignment_WriteReference: expected `best` in `best >= 3` to be a write reference.");
+            failures.Add("ConditionalAssignment_WriteReference: expected `best` in `best >=> 3` to be a write reference.");
         }
 
         string FixFor(string callee)
@@ -3671,12 +3683,12 @@ internal static class TestRunner
             return fix is null ? "<none>" : string.Join(" | ", fix.Edits.Select(edit => $"{text.Substring(edit.Span.Start, edit.Span.Length)} => {edit.NewText}"));
         }
 
-        if (FixFor("chmin") != "_ = chmin(ref best, 2 + 1) => best >= 2 + 1")
+        if (FixFor("chmin") != "_ = chmin(ref best, 2 + 1) => best >=> 2 + 1")
         {
             failures.Add($"ConditionalAssignment_ChminQuickFix: got {FixFor("chmin")}");
         }
 
-        if (FixFor("chmax") != "chmax(ref best, best > 1 ? 4 : 0) => best <= (best > 1 ? 4 : 0)")
+        if (FixFor("chmax") != "chmax(ref best, best > 1 ? 4 : 0) => best <=< best > 1 ? 4 : 0")
         {
             failures.Add($"ConditionalAssignment_ChmaxQuickFix: got {FixFor("chmax")}");
         }

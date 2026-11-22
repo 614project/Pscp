@@ -46,6 +46,9 @@ public enum TokenKind
     CaretEqual,
     LessLessEqual,
     GreaterGreaterEqual,
+    GreaterEqualGreater,
+    LessEqualLess,
+
     Caret,
     Tilde,
     Amp,
@@ -183,7 +186,8 @@ public enum AssignmentOperator
     ShiftLeftAssign,
     ShiftRightAssign,
     CoalesceAssign,
-    // Statement-only conditional assignments (spec §12.7): `a >= b` is `a = min a b`, `a <= b` is `a = max a b`.
+    // Statement-only conditional assignments (spec §12.7): `a >=> b` is `a = min a b`, `a <=< b` is `a = max a b`.
+
     MinAssign,
     MaxAssign,
 }

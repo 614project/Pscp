@@ -201,7 +201,7 @@ internal static class PscpCodeActions
         fixes.Add(new PscpQuickFix($"Replace with `{replacement}`", diagnostic, [new PscpTextEdit(analysis.Tokens[index].Span, replacement)], IsPreferred: true));
     }
 
-    // `chmin(ref best, d)` as a whole statement (or `_ = chmin(...)`) → `best >= d` (spec §12.7). Only the
+    // `chmin(ref best, d)` as a whole statement (or `_ = chmin(...)`) → `best >=> d` (spec §12.7). Only the
     // parenthesized call has a rewrite; where the `bool` result is used there is none.
     private static void AddConditionalAssignmentFix(PscpAnalysisResult analysis, PscpServerDiagnostic diagnostic, List<PscpQuickFix> fixes, int index)
     {
@@ -215,7 +215,6 @@ internal static class PscpCodeActions
         int depth = 0;
         int comma = -1;
         int close = -1;
-        bool valueNeedsParentheses = false;
         for (int i = open; i < tokens.Count && close < 0; i++)
         {
             switch (tokens[i].Kind)
@@ -241,10 +240,6 @@ internal static class PscpCodeActions
                     break;
                 case TokenKind.EndOfFile:
                     return;
-                default:
-                    // Anything that binds weaker than `>=` would change how the statement parses (spec §13.1).
-                    valueNeedsParentheses |= depth == 1 && comma >= 0 && !BindsTighterThanComparison(tokens[i].Kind);
-                    break;
             }
         }
 
@@ -269,22 +264,10 @@ internal static class PscpCodeActions
         string text = analysis.Snapshot.Text;
         string target = text[tokens[open + 2].Position..(tokens[comma - 1].Position + tokens[comma - 1].Text.Length)];
         string value = text[tokens[comma + 1].Position..(tokens[close - 1].Position + tokens[close - 1].Text.Length)];
-        if (valueNeedsParentheses)
-        {
-            value = $"({value})";
-        }
-
-        string op = tokens[index].Text == "chmin" ? ">=" : "<=";
+        string op = tokens[index].Text == "chmin" ? ">=>" : "<=<";
         TextSpan span = new(tokens[first].Position, tokens[close].Position + 1 - tokens[first].Position);
         fixes.Add(new PscpQuickFix($"Use `{target} {op} {value}`", diagnostic, [new PscpTextEdit(span, $"{target} {op} {value}")], IsPreferred: true));
     }
-
-    private static bool BindsTighterThanComparison(TokenKind kind)
-        => kind is TokenKind.Identifier or TokenKind.IntegerLiteral or TokenKind.FloatLiteral or TokenKind.StringLiteral
-            or TokenKind.InterpolatedStringLiteral or TokenKind.CharLiteral or TokenKind.True or TokenKind.False or TokenKind.Null
-            or TokenKind.Dot or TokenKind.QuestionDot or TokenKind.Plus or TokenKind.Minus or TokenKind.Star or TokenKind.Slash
-            or TokenKind.Percent or TokenKind.PlusPlus or TokenKind.MinusMinus or TokenKind.Bang or TokenKind.Tilde
-            or TokenKind.PipeGreater or TokenKind.LessPipe or TokenKind.New;
 
     // `new SortedSet<string>()` → `new SortedSet<string>(string.asc)`, `Array.Sort(xs)` → `Array.Sort(xs, string.asc)`.
 

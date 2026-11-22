@@ -93,6 +93,8 @@ internal sealed partial class PscpAnalyzer
                 case TokenKind.CaretEqual:
                 case TokenKind.LessLessEqual:
                 case TokenKind.GreaterGreaterEqual:
+                case TokenKind.GreaterEqualGreater:
+                case TokenKind.LessEqualLess:
                 case TokenKind.Caret:
                 case TokenKind.Tilde:
                 case TokenKind.Amp:
@@ -250,26 +252,6 @@ internal sealed partial class PscpAnalyzer
     private static int FindToken(IReadOnlyList<Token> tokens, int start, int endExclusive, TokenKind kind)
         => FindTopLevelToken(tokens, start, endExclusive, kind);
 
-    // Spec §12.7: the `>=` / `<=` of a conditional assignment statement, as the front end parsed it.
-    private static int FindConditionalAssignment(AnalyzerState state, int start, int endExclusive)
-    {
-        if (state.FrontEnd is not { } frontEnd || frontEnd.Spans.ConditionalAssignmentOperators.Count == 0)
-        {
-            return -1;
-        }
-
-        for (int i = start; i < endExclusive && i < state.Tokens.Count; i++)
-        {
-            if (state.Tokens[i].Kind is TokenKind.GreaterEqual or TokenKind.LessEqual
-                && frontEnd.Spans.ConditionalAssignmentOperators.Contains(state.Tokens[i].Position))
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
     private static int FindTopLevelAssignment(IReadOnlyList<Token> tokens, int start, int endExclusive)
 
     {
@@ -316,7 +298,9 @@ internal sealed partial class PscpAnalyzer
                 or TokenKind.PipeEqual
                 or TokenKind.CaretEqual
                 or TokenKind.LessLessEqual
-                or TokenKind.GreaterGreaterEqual)
+                or TokenKind.GreaterGreaterEqual
+                or TokenKind.GreaterEqualGreater
+                or TokenKind.LessEqualLess)
             {
                 return i;
             }

@@ -5,7 +5,7 @@
 - 동반 문서: `pscp_v_0_7_changes.md` (v0.6 → v0.7 변경 해설, 항목별 before/after 코드)
 - 작성일: 2026-09-26
 - 개정: 2026-11-19 — 구현 리뷰 반영. 정한 것: C# 키워드인 이름(§3.3), 값을 버리는 문장(§4.3), 가림과 재선언(§5.1), 필드가 되는 최상위 변수의 타입(§7.5), 상수 산술(§8.1), `Action` 대상 람다(§10.6), `if` 식의 공통 타입(§12.1), 람다로의 pipe(§13.3), 패턴 결합자 오용(§13.9), 이름 있는 튜플(§20), NaN 순서(§25.1), 타입을 모르는 값의 rewrite(§26.1), C# 배열 생성 형태(§27.1), 타입 멤버(§28), Debug 검사(§29.1). 고친 것: §21.1·§23.1 예제의 부호, §7.4·§22.6의 범위, 부록 A·B
-- 개정: 2026-11-22 — 0.7.1. 더한 것: 조건부 할당 문장 `a >= b`, `a <= b`(§12.7). 폐기 예정: `chmin`/`chmax`(§22.5, 부록 C). 0.7.x 동안은 경고와 함께 동작하고 v0.8에서 제거한다
+- 개정: 2026-11-22 — 0.7.1. 더한 것: 조건부 할당 연산자 `a >=> b`, `a <=< b`(§12.7). 폐기 예정: `chmin`/`chmax`(§22.5, 부록 C). 0.7.x 동안은 경고와 함께 동작하고 v0.8에서 제거한다
 
 ---
 
@@ -209,8 +209,6 @@ if s > 0
 값만 계산하는 식 문장이 tail position([§10.5](#105-꼬리-위치와-암묵적-반환)) 밖에 있으면 그 값은 버려진다. 거의 항상 실수이므로 **경고**한다. 대상은 리터럴, 이름, 연산자 식(대입과 pipe는 제외), 튜플, `is` 검사, range, 그리고 분기가 모두 이런 식인 `if` 식과 조건 연산자다. 호출, 대입, `++`/`--`는 부수 효과가 있으므로 대상이 아니다.
 
 함수 안에서는 진단이 `return`을 제안한다. 마지막 문장만 암묵적으로 반환되기 때문이다.
-
-`>=`와 `<=`가 문장 전체인 식 문장(`low >= x`)은 값을 버리는 비교가 아니라 조건부 할당이다([§12.7](#127-조건부-할당)).
 
 ```txt
 bool union(int a, int b) {
@@ -715,7 +713,7 @@ tail position의 **식 문장**은 다음을 제외하면 모두 암묵적으로
 - 일반 대입 `x = e`
 - 일반 복합 대입 `x += e`, `x -= e` 등 (단, known DS rewrite는 호출이므로 제외되지 않는다)
 - 일반 증감 `x++`, `++x`, `x--`, `--x` (단, known DS의 `--q`는 호출이므로 제외되지 않는다)
-- 조건부 할당 `x >= e`, `x <= e` ([§12.7](#127-조건부-할당)). 비교 결과를 반환하려면 `(a >= b)`나 `return a >= b`로 쓴다
+- 조건부 할당 `x >=> e`, `x <=< e` ([§12.7](#127-조건부-할당))
 
 **호출 식도 반환 대상이다.** `foo(x)`, `obj.method(y)`, `inner(x)`가 tail position에 있으면 그 값이 반환된다.
 
@@ -994,45 +992,38 @@ throw new InvalidOperationException("bad state")
 ### 12.7 조건부 할당
 
 ```txt
-low >= 10          // low = min low 10. 10 < low일 때만 대입한다
-high <= 20         // high = max high 20. 20 > high일 때만 대입한다
-dist[v] >= dist[u] + w
-if r > 0 then dp[r][c] >= dp[r - 1][c] + cost[r][c]
+low >=> 10         // low = min low 10. 10 < low일 때만 대입한다
+high <=< 20        // high = max high 20. 20 > high일 때만 대입한다
+dist[v] >=> dist[u] + w
+if r > 0 then dp[r][c] >=> dp[r - 1][c] + cost[r][c]
 ```
 
 #### 문법
 
-**식 문장 전체가** `place >= value` 또는 `place <= value`이면 조건부 할당이다. 비교 결과를 버리는 문장은 쓸모가 없으므로([§4.3](#43-줄-이어짐이-아닌-것)) 이 자리를 조건부 할당에 쓴다. 다음을 모두 만족해야 한다.
+`>=>`와 `<=<`는 대입 연산자다([§13.1](#131-우선순위-표-강함--약함)의 19순위, 오른쪽 결합). 왼쪽은 대입할 수 있는 자리(이름, 원소 `a[i]`, 멤버 `p.x`, 튜플 원소 `t.1`)이고, 오른쪽은 다른 대입처럼 식 전체다. `best >=> a + b`는 `best >=> (a + b)`다.
 
-1. 식 문장의 최상위 연산자가 `>=` 또는 `<=`다. `a >= b and c`, `a >= b == c`처럼 더 약한 연산자가 최상위면 비교다.
-2. 문장 전체가 괄호 하나로 감싸여 있지 않다. `(a >= b)`는 비교다.
-3. 왼쪽이 place다: 이름, 원소 `a[i]`, 멤버 `p.x`, 튜플 원소 `t.1`. `x + y >= 3`처럼 place가 아니면 비교다.
+비교 연산자 `>=`, `<=`와는 별개의 토큰이다. `a >= b`, `a <= b`는 어디서나 비교다.
 
-식 문장이 놓일 수 있는 자리는 모두 해당한다: 블록 안의 문장, `then`/`else`/`do` 뒤의 문장, 한 줄 `if c then a >= x else b <= x`의 각 분기, 그리고 `void` 함수의 식 본문(`void relax(int v) => best >= v`). 그 밖의 자리, 즉 값을 내는 식 본문 `bool ge(int a, int b) => a >= b`, 타입 멤버의 식 본문, 람다, 조건(`if a >= b`, `while`), 인자, 초기화식, 피연산자에서 `>=`와 `<=`는 언제나 비교다.
+조건부 할당은 **문장**이다. 값이 없으므로 다음 자리에만 쓴다.
 
+- 식 문장: 블록 안의 문장, `then`/`else`/`do` 뒤의 문장, 문장으로 쓴 한 줄 `if c then lo >=> x else hi <=< x`의 각 분기
+- `void` 함수와 `void` 메서드의 식 본문: `void Offer(int x) => best >=> x`
 
-```txt
-bool fits(int v) => v <= limit         // 비교 (식 본문)
-let ok = [0..<n -> i do a[i] >= 3]     // 비교 (식 안)
-if best >= x then best >= x            // 조건은 비교, then 뒤의 문장은 조건부 할당
-```
-
-오른쪽은 대입 연산자의 오른쪽처럼 관계 연산자보다 강한 식 전체다. `best >= a + b`는 `best >= (a + b)`, `best >= min a b`는 `best >= (min a b)`다.
+식 안(`let b = (a >=> 0)`, 인자, 조건)에 쓰면 오류다. tail position에서는 반환되지 않는다([§10.5](#105-꼬리-위치와-암묵적-반환)).
 
 #### 의미
 
-- `place >= value`: `value`가 `place`보다 기본 순서([§25.1](#251-기본-순서))로 **엄격히 작을 때만** `place`에 `value`를 대입한다. 결과는 `place = min place value`와 같다.
-- `place <= value`: `value`가 **엄격히 클 때만** 대입한다. 결과는 `place = max place value`와 같다.
+- `place >=> value`: `value`가 `place`보다 기본 순서([§25.1](#251-기본-순서))로 **엄격히 작을 때만** `place`에 `value`를 대입한다. 결과는 `place = min place value`와 같다.
+- `place <=< value`: `value`가 **엄격히 클 때만** 대입한다. 결과는 `place = max place value`와 같다.
 - `place`의 receiver와 인덱스, 그 다음 `value`를 각각 **한 번** 평가한다.
-- 순서는 기본 순서다. `x >= NaN`은 `x`를 `NaN`으로 바꾸고, 문자열은 ordinal로 비교한다. 기본 순서가 없는 타입이면 오류다.
-- 조건부 할당은 문장이다. 값이 없으므로 tail position에서 반환되지 않는다([§10.5](#105-꼬리-위치와-암묵적-반환)). 반환 타입이 있는 함수의 마지막 문장이 `a >= b`이면 오류이며, 진단이 `(a >= b)` 또는 `return a >= b`를 제안한다.
+- 순서는 기본 순서다. `x >=> NaN`은 `x`를 `NaN`으로 바꾸고, 문자열은 ordinal로 비교한다. 기본 순서가 없는 타입이면 오류다.
 - 대입이므로 불변 바인딩이 대상이면 경고한다([§9.2](#92-불변성의-의미와-진단)).
 
 ```txt
 // 0.7.0까지
 chmin(ref dist[v], dist[u] + w)
 // 0.7.1부터
-dist[v] >= dist[u] + w
+dist[v] >=> dist[u] + w
 ```
 
 갱신 여부가 필요하면(`if chmin(...) then ...`) 비교와 대입을 직접 쓴다.
@@ -1048,9 +1039,9 @@ if nd < dist[v] {
 #### lowering
 
 ```txt
-low >= 10            →  if (10 < low) low = 10;
-best >= a[i] + b     →  { int __c = a[i] + b; if (__c < best) best = __c; }
-list[f()] >= x       →  { var __r = list; var __i = f(); int __c = x; if (__c < __r[__i]) __r[__i] = __c; }
+low >=> 10           →  if (10 < low) low = 10;
+best >=> a[i] + b    →  { int __c = a[i] + b; if (__c < best) best = __c; }
+list[f()] >=> x      →  { var __r = list; var __i = f(); int __c = x; if (__c < __r[__i]) __r[__i] = __c; }
 ```
 
 - 실수는 `CompareTo`로, 문자열과 튜플 등은 기본 순서 비교자로 비교한다.
@@ -1082,14 +1073,14 @@ list[f()] >= x       →  { var __r = list; var __i = f(); int __c = x; if (__c 
 | 16 | 논리 OR | `\|\|` `or` | 왼쪽 |
 | 17 | null 병합 | `??` | 오른쪽 |
 | 18 | 조건 | `c ? a : b` | 오른쪽 |
-| 19 | 대입 / 람다 | `=` `:=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `??=` `=>` | 오른쪽 |
+| 19 | 대입 / 람다 | `=` `:=` `+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=` `??=` `>=>` `<=<` `=>` | 오른쪽 |
 
 주의할 점:
 
 - range(8)는 덧셈보다 약하다. 그래서 `0..<n-1`은 `0..<(n-1)`이다. C#의 range는 곱셈보다 강하지만 PSCP는 다르다.
 - `&`, `^`, `|`가 `==`보다 약한 것은 C#과 같다. `x & mask == 0`은 `x & (mask == 0)`이다(C#과 같은 함정).
 - `+=` 등 대입 연산자가 known DS rewrite인지는 우선순위가 아니라 semantic binding이 정한다([§26](#26-자료구조-연산자-rewrite)).
-- 문장 전체인 `a >= b`, `a <= b`는 비교가 아니라 조건부 할당이다([§12.7](#127-조건부-할당)). 우선순위는 관계 연산자 그대로다.
+- `>=>`, `<=<`는 비교가 아니라 조건부 할당이다([§12.7](#127-조건부-할당)). 문장으로만 쓴다.
 
 ### 13.2 대입 연산자의 결합
 
@@ -1922,7 +1913,7 @@ points.maxBy(p => p.score)
 
 ### 22.5 `chmin`, `chmax`
 
-> **폐기 예정 (0.7.1).** 조건부 할당 `target >= value`, `target <= value`([§12.7](#127-조건부-할당))를 쓴다. 0.7.x 동안은 PSCP2900 경고와 함께 동작하고 v0.8에서 제거한다. 언어 서버는 문장으로 쓴 `chmin(ref a, b)`를 `a >= b`로 바꾸는 quick fix를 준다.
+> **폐기 예정 (0.7.1).** 조건부 할당 `target >=> value`, `target <=< value`([§12.7](#127-조건부-할당))를 쓴다. 0.7.x 동안은 PSCP2900 경고와 함께 동작하고 v0.8에서 제거한다. 언어 서버는 문장으로 쓴 `chmin(ref a, b)`를 `a >=> b`로 바꾸는 quick fix를 준다.
 
 ```txt
 chmin ref best cand
@@ -2122,7 +2113,7 @@ Array.Sort(arr)      // 제자리 정렬 (pass-through .NET)
 
 ### 25.1 기본 순서
 
-PSCP가 소유한 모든 순서 연산은 다음 **기본 순서**를 쓴다: `<=>`, `min`/`max`, `minBy`/`maxBy`의 key, 조건부 할당 `a >= b`/`a <= b`([§12.7](#127-조건부-할당)), `chmin`/`chmax`, `sort`/`sortBy`, `lowerBound`/`upperBound`, `T.asc`/`T.desc`, known collection auto-construction.
+PSCP가 소유한 모든 순서 연산은 다음 **기본 순서**를 쓴다: `<=>`, `min`/`max`, `minBy`/`maxBy`의 key, 조건부 할당 `a >=> b`/`a <=< b`([§12.7](#127-조건부-할당)), `chmin`/`chmax`, `sort`/`sortBy`, `lowerBound`/`upperBound`, `T.asc`/`T.desc`, known collection auto-construction.
 
 | 타입 | 기본 순서 |
 |---|---|
@@ -2604,10 +2595,7 @@ statement      = block
                | try-stmt | "throw" expr
                | "break" | "continue" | "return" [ expr ]
                | function-decl
-               | cond-assign
                | expr ;
-cond-assign    = place ( ">=" | "<=" ) pipe-expr ;  (* 식 문장 전체일 때만. §12.7 *)
-place          = IDENT | postfix "[" index-args "]" | postfix "." IDENT | postfix "." INT-LITERAL ;
 block          = "{" { statement END } "}" ;
 END            = NEWLINE | ";" ;                    (* §4.2 이어짐 규칙 적용 *)
 
@@ -2637,7 +2625,7 @@ function-decl  = [ "rec" ] { modifier } type IDENT [ type-params ] "(" [ params 
 expr           = lambda | assignment ;
 assignment     = conditional [ assign-op expr ] ;
 assign-op      = "=" | ":=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
-               | "<<=" | ">>=" | "??=" ;
+               | "<<=" | ">>=" | "??=" | ">=>" | "<=<" ;   (* >=>, <=<는 문장에서만. §12.7 *)
 conditional    = coalesce [ "?" expr ":" expr ] ;
 coalesce       = or-expr [ "??" coalesce ] ;
 or-expr        = and-expr { ( "||" | "or" ) and-expr } ;
@@ -2729,6 +2717,7 @@ slice          = [ index ] ( "..<" | "..=" ) index | index ".." | ".." ;
 | 3단 이상 중첩 컬렉션의 자동 렌더링 | §18.3 |
 | 스칼라 하나만 받은 `min`/`max` | §22.2 |
 | 기본 순서가 없는 타입의 순서 연산, 조건부 할당 | §25.1, §12.7 |
+| 식 안의 조건부 할당 `>=>`, `<=<` | §12.7 |
 | known DS `+=`/`-=`의 피연산자 타입 불일치 | §26.2 |
 | target type 없는 `new[n]`, 매개변수 없는 생성자가 없는 `new![n]` 원소 타입 | §27 |
 | 그 밖에 PSCP 고유 표면의 타입 오류 (C#으로 넘기지 않는다) | §34 |
@@ -2761,7 +2750,7 @@ v0.7에서는 경고와 함께 동작하고, v0.8에서 제거한다.
 | `readTuple2`, `readTuple3` | `readTuple<…>()` | §17.8 |
 | `readTuples2`, `readTuples3` | `readArray<(…)>(n)` | §17.8 |
 | `readGridInt`, `readGridLong`, `readNestedArray` | `readGrid<T>(n, m)` | §17.8 |
-| `chmin(ref a, b)`, `chmax(ref a, b)` (0.7.1부터) | 조건부 할당 `a >= b`, `a <= b` | §22.5, §12.7 |
+| `chmin(ref a, b)`, `chmax(ref a, b)` (0.7.1부터) | 조건부 할당 `a >=> b`, `a <=< b` | §22.5, §12.7 |
 | `groupCount()` | `freq()` | §24.5 |
 | `Array.zero(n)` | `new[n]` | §27.4 |
 

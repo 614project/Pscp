@@ -820,7 +820,19 @@ internal static class PscpSemanticAnalyzer
                     if (expressionStatement.Expression is IfExpression statementIf)
                     {
                         _statementConditionals.Add(statementIf);
+                        // `if c then lo >=> x else hi <=< x`: each branch of a statement `if` is a statement.
+                        for (IfExpression? branch = statementIf; branch is not null; branch = branch.ElseExpression as IfExpression)
+                        {
+                            foreach (Expression arm in new[] { branch.ThenExpression, branch.ElseExpression })
+                            {
+                                if (arm is AssignmentExpression { Operator: AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign } armAssignment)
+                                {
+                                    _statementAssignments.Add(armAssignment);
+                                }
+                            }
+                        }
                     }
+
 
                     AnalyzeExpression(expressionStatement.Expression, scope);
                     CheckExpressionStatement(expressionStatement);
@@ -1422,6 +1434,15 @@ internal static class PscpSemanticAnalyzer
 
             if (assignment.Operator is AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign)
             {
+                if (!_statementAssignments.Contains(assignment))
+                {
+                    string op = assignment.Operator == AssignmentOperator.MinAssign ? ">=>" : "<=<";
+                    Error(
+                        DiagnosticCodes.SurfaceTypeError,
+                        $"`{op}` is a conditional assignment statement and has no value. Write it on its own line.",
+                        _spans.Get(assignment));
+                }
+
                 CheckConditionalAssignment(assignment, Normalize(targetType));
                 return TypeName("void");
             }
@@ -1442,7 +1463,7 @@ internal static class PscpSemanticAnalyzer
             return targetType;
         }
 
-        // Spec §12.7: `a >= b` and `a <= b` compare in the default order (§25.1), so the type needs one.
+        // Spec §12.7: `a >=> b` and `a <=< b` compare in the default order (§25.1), so the type needs one.
         private void CheckConditionalAssignment(AssignmentExpression assignment, TypeSyntax? targetType)
         {
             if (targetType is NamedTypeSyntax { TypeArguments.Count: 0 } orderedType
@@ -1450,7 +1471,7 @@ internal static class PscpSemanticAnalyzer
                 && typeInfo is not null
                 && !typeInfo.HasOrdering)
             {
-                string op = assignment.Operator == AssignmentOperator.MinAssign ? ">=" : "<=";
+                string op = assignment.Operator == AssignmentOperator.MinAssign ? ">=>" : "<=<";
                 Error(
                     DiagnosticCodes.NoDefaultOrder,
                     $"`{typeInfo.Name}` has no default order, so `{op}` cannot compare it. Define `operator<=>` in the type.",
@@ -2094,7 +2115,7 @@ internal static class PscpSemanticAnalyzer
 
             if (name is "chmin" or "chmax" && receiver is null)
             {
-                string form = name == "chmin" ? "target >= value" : "target <= value";
+                string form = name == "chmin" ? "target >=> value" : "target <=< value";
                 Warning(
                     DiagnosticCodes.Deprecated,
                     $"`{name}` is deprecated and will be removed in v0.8. Write the conditional assignment `{form}` as a statement (spec §12.7); where the `bool` result is used, compare and assign explicitly.",
@@ -3119,7 +3140,8 @@ internal static class PscpSemanticAnalyzer
                         string hint = expression switch
                         {
                             AssignmentExpression { Operator: AssignmentOperator.Assign } => " A plain `x = e` does not produce a value here; write `x := e` to assign and return the value.",
-                            AssignmentExpression { Operator: AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign } => " As a statement `a >= b` and `a <= b` are conditional assignments (spec §12.7) and produce no value; to return the comparison, write `(a >= b)` or `return a >= b`.",
+                            AssignmentExpression { Operator: AssignmentOperator.MinAssign or AssignmentOperator.MaxAssign } => " A conditional assignment (`>=>`, `<=<`) does not return a value; add the value on the next line.",
+
                             AssignmentExpression => " A compound assignment does not return a value; add the value on the next line.",
                             PrefixExpression or PostfixExpression => " An increment does not return a value; add the value on the next line.",
                             _ => string.Empty,

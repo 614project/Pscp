@@ -21,7 +21,10 @@ public sealed partial class Parser
             or TokenKind.LessLessEqual
             or TokenKind.GreaterGreaterEqual
             or TokenKind.QuestionQuestionEqual
+            or TokenKind.GreaterEqualGreater
+            or TokenKind.LessEqualLess
             or TokenKind.ColonEqual;
+
 
     private Expression ParseAssignment()
     {

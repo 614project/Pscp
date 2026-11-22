@@ -66,6 +66,6 @@ for f in *.pscp; do pscp test "$f" || echo "FAIL $f"; done
 
 | 프로그램 | 내용 |
 |---|---|
-| 21_conditional_assignment | 조건부 할당 `a >= b`(= `a = min a b`), `a <= b`(= `a = max a b`)와, 문장이 아닌 자리에서는 그대로 비교로 남는 경우(스펙 §12.7) |
+| 21_conditional_assignment | 조건부 할당 `a >=> b`(= `a = min a b`), `a <=< b`(= `a = max a b`)와 그대로 비교인 `>=`, `<=` (스펙 §12.7) |
 
 17과 20은 0.7.0에서 만든 그대로 `chmax`/`chmin`의 `bool` 반환값을 쓴다. 0.7.1부터 이 둘은 폐기 예정이라 PSCP2900 경고가 나며, 테스트 러너는 이 경고를 기대한다.

@@ -29,6 +29,18 @@ internal static class PscpOperatorHovers
                 "(x = e)",
                 "13.4 `=`와 `:=`",
                 "134-와-"),
+            TokenKind.GreaterEqualGreater => Hover(
+                "target >=> value",
+                "Conditional assignment: assigns `value` only when it is strictly smaller than `target` in the default order, so `target` becomes `min target value`. It is a statement and has no value.",
+                "if (value < target) target = value;",
+                "12.7 조건부 할당",
+                "127-조건부-할당"),
+            TokenKind.LessEqualLess => Hover(
+                "target <=< value",
+                "Conditional assignment: assigns `value` only when it is strictly larger than `target` in the default order, so `target` becomes `max target value`. It is a statement and has no value.",
+                "if (value > target) target = value;",
+                "12.7 조건부 할당",
+                "127-조건부-할당"),
             TokenKind.PipeGreater => Hover(
                 "value |> f",
                 "Pipe: the left value becomes the first argument of the right-hand call. A collection helper becomes a member call on the value.",
@@ -71,25 +83,6 @@ internal static class PscpOperatorHovers
                 "foreach (var x in xs) { ... }",
                 "16.4 fast iteration",
                 "164-fast-iteration"),
-            _ => null,
-        };
-
-    // Spec §12.7: `>=` / `<=` as a whole statement.
-    public static string? ForConditionalAssignment(TokenKind kind)
-        => kind switch
-        {
-            TokenKind.GreaterEqual => Hover(
-                "target >= value",
-                "Conditional assignment: assigns `value` when it is strictly smaller than `target` in the default order, so `target` becomes `min target value`. Only a whole statement has this meaning; anywhere else `>=` compares.",
-                "if (value < target) target = value;",
-                "12.7 조건부 할당",
-                "127-조건부-할당"),
-            TokenKind.LessEqual => Hover(
-                "target <= value",
-                "Conditional assignment: assigns `value` when it is strictly larger than `target` in the default order, so `target` becomes `max target value`. Only a whole statement has this meaning; anywhere else `<=` compares.",
-                "if (value > target) target = value;",
-                "12.7 조건부 할당",
-                "127-조건부-할당"),
             _ => null,
         };
 

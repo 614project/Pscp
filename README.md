@@ -82,7 +82,7 @@ while queue.Count > 0 {
 
 ### 4. 실전 압축 문법
 * **`:=` 대입 연산자:** 대입과 동시에 해당 값을 반환합니다. (예: 경로 압축에 유용 `parent[x] := find(parent[x])`)
-* **조건부 할당 `>=`, `<=`:** 문장으로 쓴 `low >= x`는 `low = min low x`, `high <= x`는 `high = max high x`입니다. (예: `dist[v] >= dist[u] + w`) 식 안에서는 그대로 비교입니다.
+* **조건부 할당 `>=>`, `<=<`:** `low >=> x`는 `low = min low x`, `high <=< x`는 `high = max high x`입니다. 더 좋을 때만 대입합니다. (예: `dist[v] >=> dist[u] + w`)
 * **자동 객체 생성 `new![n]`:** 컬렉션 배열을 선언할 때 내부 요소들까지 `new()`로 자동 초기화합니다. (예: `List<int>[] graph = new![n]`)
 * **내장 집계 함수 (Aggregate Intrinsic):** `min`, `max`, `sum`, `sumBy`, `minBy`, `maxBy` 등을 별도의 라이브러리 임포트 없이 즉시 사용합니다. (`chmin`, `chmax`는 0.7.1부터 폐기 예정이며 조건부 할당으로 대체합니다.)
 

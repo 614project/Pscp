@@ -71,8 +71,8 @@ public static class PscpIntrinsicDocs
         new("sumBy", IntrinsicDocKind.Aggregate, "sumBy(xs, f)", ["xs", "f"], "T", "The sum of `f(x)` over the elements, evaluating `f` once per element.", "§22.3"),
         new("minBy", IntrinsicDocKind.Aggregate, "minBy(xs, key)", ["xs", "key"], "T", "The element with the smallest key; ties keep the first element.", "§22.4"),
         new("maxBy", IntrinsicDocKind.Aggregate, "maxBy(xs, key)", ["xs", "key"], "T", "The element with the largest key; ties keep the first element.", "§22.4"),
-        new("chmin", IntrinsicDocKind.Aggregate, "chmin(ref target, value)", ["ref target", "value"], "bool", "Deprecated (removed in v0.8): write `target >= value` as a statement (spec §12.7). Sets `target` to `value` when `value` is strictly smaller, and returns whether it changed.", "§22.5"),
-        new("chmax", IntrinsicDocKind.Aggregate, "chmax(ref target, value)", ["ref target", "value"], "bool", "Deprecated (removed in v0.8): write `target <= value` as a statement (spec §12.7). Sets `target` to `value` when `value` is strictly larger, and returns whether it changed.", "§22.5"),
+        new("chmin", IntrinsicDocKind.Aggregate, "chmin(ref target, value)", ["ref target", "value"], "bool", "Deprecated (removed in v0.8): write `target >=> value` (spec §12.7). Sets `target` to `value` when `value` is strictly smaller, and returns whether it changed.", "§22.5"),
+        new("chmax", IntrinsicDocKind.Aggregate, "chmax(ref target, value)", ["ref target", "value"], "bool", "Deprecated (removed in v0.8): write `target <=< value` (spec §12.7). Sets `target` to `value` when `value` is strictly larger, and returns whether it changed.", "§22.5"),
 
         new("abs", IntrinsicDocKind.Math, "abs(x)", ["x"], "T", "Absolute value of an `int`, `long`, `double` or `decimal`.", "§23.1"),
         new("sqrt", IntrinsicDocKind.Math, "sqrt(x)", ["x"], "double", "Square root.", "§23.1"),

@@ -26,7 +26,6 @@ internal sealed partial class PscpAnalyzer
         ResolveForwardReferences(state);
         AddDefaultTokenClassifications(state);
         AddRewriteHovers(state);
-        AddConditionalAssignmentHovers(state, frontEnd.Spans);
         AddDeprecationMarks(state, frontEnd.Diagnostics);
         PscpAnalysisResult result = state.Build();
         result.FrontEnd = frontEnd;
@@ -159,27 +158,6 @@ internal sealed partial class PscpAnalyzer
         return tokens[last].Span;
     }
 
-    // Spec §12.7: a `>=` / `<=` that the parser read as a conditional assignment says so on hover; a comparison
-    // keeps no hover.
-    private static void AddConditionalAssignmentHovers(AnalyzerState state, SyntaxSpans spans)
-    {
-        if (spans.ConditionalAssignmentOperators.Count == 0)
-        {
-            return;
-        }
-
-        for (int i = 0; i < state.Tokens.Count; i++)
-        {
-            Token token = state.Tokens[i];
-            if (token.Kind is TokenKind.GreaterEqual or TokenKind.LessEqual
-                && spans.ConditionalAssignmentOperators.Contains(token.Position)
-                && PscpOperatorHovers.ForConditionalAssignment(token.Kind) is { } hover)
-            {
-                state.SetHover(i, hover);
-            }
-        }
-    }
-
     // Guide §7.2 and §11.3: a deprecated name carries the `deprecated` modifier and says what replaces it
     // (spec appendix C). The judgement itself is the front end's PSCP2900 warning.
     private static void AddDeprecationMarks(AnalyzerState state, IReadOnlyList<Diagnostic> diagnostics)
@@ -204,8 +182,8 @@ internal sealed partial class PscpAnalyzer
                     ? $"Use `{name}` instead."
                     : token.Text switch
                     {
-                        "chmin" => "Use the conditional assignment statement `target >= value` (spec §12.7).",
-                        "chmax" => "Use the conditional assignment statement `target <= value` (spec §12.7).",
+                        "chmin" => "Use the conditional assignment `target >=> value` (spec §12.7).",
+                        "chmax" => "Use the conditional assignment `target <=< value` (spec §12.7).",
                         _ => diagnostic.Message,
                     };
                 state.SetHover(i, $"```pscp\n{token.Text}\n```\n\nDeprecated: it is removed in v0.8. {replacement}\n\n[Spec appendix C]({DiagnosticCodes.SpecUrl}#{Uri.EscapeDataString("부록-c-폐기-예정-목록")})");
@@ -960,11 +938,6 @@ internal sealed partial class PscpAnalyzer
         }
 
         int assignmentIndex = FindTopLevelAssignment(state.Tokens, index, statementEnd);
-        if (assignmentIndex < 0)
-        {
-            assignmentIndex = FindConditionalAssignment(state, index, statementEnd);
-        }
-
         if (assignmentIndex >= 0)
 
         {
